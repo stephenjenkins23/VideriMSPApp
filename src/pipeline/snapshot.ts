@@ -37,14 +37,27 @@ export async function computeFleetSnapshot(pool: Pool, repo: Repository): Promis
     // hardware value recently — not merely devices we have any row for. Those
     // are different questions and conflating them would overstate coverage.
     pool.query<{ total: string; covered: string }>(
+      // "Covered" = a device we have a recent HARDWARE telemetry reading for.
+      // The batch metrics feed (source='metrics' in health_samples) never carries
+      // CPU/RAM/signal, so on its own this is structurally ~0. The slow-lane
+      // poller writes the real per-device telemetry into device_telemetry, so a
+      // device counts as covered if EITHER source has a recent non-null field.
+      // As the slow lane sweeps, coverage climbs from 0 — honestly, per device.
       `SELECT (SELECT COUNT(*)::text FROM devices) AS total,
-              (SELECT COUNT(DISTINCT device_id)::text
-                 FROM health_samples
-                WHERE source = 'metrics'
-                  AND observed_at > now() - interval '1 hour'
-                  AND (cpu_percent IS NOT NULL OR ram_percent IS NOT NULL
-                       OR temperature_c IS NOT NULL OR wifi_signal_dbm IS NOT NULL
-                       OR ntp_sync_percent IS NOT NULL)) AS covered`,
+              (SELECT COUNT(*)::text FROM (
+                 SELECT device_id FROM health_samples
+                  WHERE source = 'metrics'
+                    AND observed_at > now() - interval '1 hour'
+                    AND (cpu_percent IS NOT NULL OR ram_percent IS NOT NULL
+                         OR temperature_c IS NOT NULL OR wifi_signal_dbm IS NOT NULL
+                         OR ntp_sync_percent IS NOT NULL)
+                 UNION
+                 SELECT device_id FROM device_telemetry
+                  WHERE observed_at > now() - interval '3 hours'
+                    AND (cpu_percent IS NOT NULL OR ram_used_percent IS NOT NULL
+                         OR storage_used_percent IS NOT NULL OR rssi_dbm IS NOT NULL
+                         OR ntp_offset_ms IS NOT NULL)
+               ) AS covered_devices) AS covered`,
     ),
   ]);
 

@@ -108,6 +108,44 @@ test("a healthy telemetry yield produces no empty-feed warning", async () => {
   assert.ok(!f.warnings.some((w) => w.includes("carries no hardware telemetry")));
 });
 
+test("once the slow lane is collecting, the empty-tiles warning is replaced by a coverage-building note", async () => {
+  // Batch metrics still carry nothing (yield 0), but a telemetry-slowlane poller
+  // has run with a yield — so the honest message is "collected per-device by the
+  // slow lane, building", not "tiles are empty".
+  const f = await getFreshness(
+    stubPool({
+      pollerRows: [
+        metricsRun({ telemetry_yield: 0 }),
+        metricsRun({ poller: "telemetry-slowlane", telemetry_yield: 0.8 }),
+      ],
+    }),
+  );
+  assert.ok(
+    !f.warnings.some((w) => w.includes("carries no hardware telemetry")),
+    "the misleading empty-tiles message must not appear once the slow lane collects",
+  );
+  const w = f.warnings.find((x) => x.includes("collected per-device by the slow-lane"));
+  assert.ok(w, "must explain that hardware telemetry is now collected per-device by the slow lane");
+  assert.match(w!, /fabricated zero/, "and must keep the null-not-zero honesty");
+});
+
+test("a slow-lane poller that has never produced a yield does not suppress the empty-feed warning", async () => {
+  // telemetry_yield null = it ran but recorded no yield (or never ran usefully),
+  // so we must NOT claim coverage; the honest empty-feed message still applies.
+  const f = await getFreshness(
+    stubPool({
+      pollerRows: [
+        metricsRun({ telemetry_yield: 0 }),
+        metricsRun({ poller: "telemetry-slowlane", telemetry_yield: null }),
+      ],
+    }),
+  );
+  assert.ok(
+    f.warnings.some((w) => w.includes("carries no hardware telemetry")),
+    "a slow lane with no recorded yield must not be treated as collecting",
+  );
+});
+
 // ─── failed-batch warnings carry their age ────────────────────────────────────
 
 test("a recent failed batch warns AND states how long ago the run was", async () => {

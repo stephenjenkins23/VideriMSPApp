@@ -104,13 +104,23 @@ export async function getFreshness(pool: Pool): Promise<Freshness> {
   }));
 
   const metrics = pollers.find((p) => p.poller === "metrics");
-  if (metrics?.telemetryYield === 0) {
+  const slowLane = pollers.find((p) => p.poller === "telemetry-slowlane");
+  // The slow lane is actively collecting once it has a recorded run with a yield.
+  const slowLaneCollecting = slowLane != null && slowLane.telemetryYield !== null;
+  if (metrics?.telemetryYield === 0 && !slowLaneCollecting) {
     warnings.push(
       "The batch metrics feed carries no hardware telemetry — CPU, memory and " +
         "signal are absent from the platform's bulk payload, so fleet-wide metric " +
         "tiles are empty. This is the shape of the bulk feed, not a fault: those " +
         "values ARE readable per-device on demand — open any device to see live " +
         "CPU, memory, storage and signal read straight from it.",
+    );
+  } else if (metrics?.telemetryYield === 0 && slowLaneCollecting) {
+    warnings.push(
+      "Fleet-wide hardware telemetry is collected per-device by the slow-lane " +
+        "poller (the batch feed carries none), sweeping the online estate about " +
+        "every 2 hours — so coverage builds over time and a device not yet reached " +
+        "this cycle shows no reading rather than a fabricated zero.",
     );
   }
 

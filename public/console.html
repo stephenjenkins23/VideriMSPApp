@@ -454,6 +454,10 @@ table.dt td.n{font-variant-numeric:tabular-nums}
 .srow .sn{flex:1;font-size:13.5px}
 .srow .sv{font-size:19px;font-weight:700;letter-spacing:-.02em;font-variant-numeric:tabular-nums}
 .srow .sp{font-size:11.5px;color:var(--tx-3);min-width:34px;text-align:right;font-variant-numeric:tabular-nums}
+.scov{display:flex;align-items:center;gap:10px;padding:10px 4px 2px;margin-top:6px;border-top:1px solid var(--bd-2)}
+.scov .sn{flex:1;font-size:12.5px;color:var(--tx-2)}
+.scov .sv{font-size:16px;font-weight:700;color:var(--violet);font-variant-numeric:tabular-nums}
+.scov .sp{font-size:11.5px;color:var(--tx-3)}
 .srow.online .sv{color:var(--green)}.srow.warning .sv{color:var(--amber)}
 .srow.offline .sv{color:var(--red)}.srow.unknown .sv{color:var(--na)}
 .srow.alert .sv{color:var(--violet)}
@@ -958,6 +962,17 @@ function renderStatusWidget() {
   for (const d of S.devices) by[d.status] = (by[d.status] || 0) + 1;
   const total = S.devices.length || 1;
   const order = statusOrder(by);
+  // Fleet-wide hardware-telemetry coverage — the share of devices with a reading
+  // in the last few hours, collected per-device by the slow lane. It climbs from
+  // 0 as the poller sweeps; a device not yet reached shows no reading, never a
+  // fabricated zero. Only shown once the slow lane has produced any coverage.
+  const cov = typeof snap.telemetryCoverage === "number" ? snap.telemetryCoverage : null;
+  const covLine = cov === null || cov === 0 ? "" :
+    `<div class="scov" title="Share of the fleet with a hardware-telemetry reading (CPU/RAM/signal) in the last ~3h, read per-device by the slow-lane poller.">
+       <span class="sdot alert"></span>
+       <span class="sn">Hardware telemetry</span>
+       <span class="sv">${Math.round(cov * 100)}%</span>
+       <span class="sp">of fleet</span></div>`;
   el.innerHTML = `<div class="slist">` + order.map((k) => {
     const n = by[k] || 0;
     return `<button class="srow ${k}" data-status="${k}">
@@ -966,7 +981,7 @@ function renderStatusWidget() {
       <span class="sn">${k[0].toUpperCase() + k.slice(1)}</span>
       <span class="sv">${n.toLocaleString()}</span>
       <span class="sp">${Math.round((n / total) * 100)}%</span></button>`;
-  }).join("") + `</div>`;
+  }).join("") + `</div>` + covLine;
   el.querySelectorAll(".srow").forEach((b) =>
     b.addEventListener("click", () => {
       S.cls = b.dataset.status;
