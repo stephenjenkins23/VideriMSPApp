@@ -293,6 +293,47 @@ export class Repository {
     }));
   }
 
+  /**
+   * The next batch of devices to read runtime telemetry from, stalest-first.
+   *
+   * The slow-lane sibling of `evidenceCaptureTargets`: same round-robin idea,
+   * different cursor. Instead of a `screenshot_requested_at` column on `devices`
+   * we order by the newest `device_telemetry.observed_at` we already hold, NULLS
+   * FIRST — so a device we have never read goes to the front, then the one read
+   * longest ago. Reading a device inserts a fresh row, which moves it to the back
+   * of the queue for free, so a full sweep of the online estate completes in
+   * (online / batch) ticks and then loops.
+   *
+   * Online only — an offline device answers no demo_command and would burn the
+   * per-field timeouts to learn nothing — and `device_jid` required, since that
+   * is what routes the command.
+   */
+  async telemetrySlowLaneTargets(batchSize: number): Promise<
+    Array<{ id: string; deviceId: string; deviceJid: string | null; playerId: string | null }>
+  > {
+    const { rows } = await this.pool.query<{
+      id: string; device_id: string; device_jid: string | null; player_id: string | null;
+    }>(
+      `SELECT d.id, d.device_id, d.device_jid, d.player_id
+         FROM devices d
+         LEFT JOIN LATERAL (
+           SELECT observed_at FROM device_telemetry t
+            WHERE t.device_id = d.id
+            ORDER BY observed_at DESC LIMIT 1
+         ) latest ON true
+        WHERE d.device_jid IS NOT NULL
+          AND EXISTS (SELECT 1 FROM health_samples h
+                       WHERE h.device_id = d.id AND h.presence = 'online'
+                         AND h.observed_at > now() - interval '30 minutes')
+        ORDER BY latest.observed_at ASC NULLS FIRST
+        LIMIT $1`,
+      [batchSize],
+    );
+    return rows.map((r) => ({
+      id: r.id, deviceId: r.device_id, deviceJid: r.device_jid, playerId: r.player_id,
+    }));
+  }
+
   /** Persist a runtime-telemetry reading (demo_command slow lane). */
   async saveTelemetry(
     deviceId: string,
