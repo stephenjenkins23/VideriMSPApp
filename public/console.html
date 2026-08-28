@@ -2316,23 +2316,38 @@ function buildModules() {
     ],
     comp: [
       { t: "&#9888;&#65039; Most common drift", rows: topRows(drift, 5), bar: "a" },
-      { t: "&#128269; Configuration coverage", bar: "g", rows: [
-        ["Scored from a snapshot", C.length + " devices", C.length],
-        ["No snapshot yet", (D.length - C.length) + " devices", Math.max(0, D.length - C.length)]] },
-      { t: "&#9989; Compliance bands", bar: "g", rows: [
-        ["95% and above", C.filter((c) => c.score >= 95).length + " devices", C.filter((c) => c.score >= 95).length],
-        ["75 to 94%", C.filter((c) => c.score >= 75 && c.score < 95).length + " devices", C.filter((c) => c.score >= 75 && c.score < 95).length],
-        ["Below 75%", C.filter((c) => c.score < 75).length + " devices", C.filter((c) => c.score < 75).length]] },
+      { t: "&#128269; Configuration coverage", bar: "g", rows: (() => {
+        // Meter width is a SHARE of the fleet, not a raw count. Passing the count
+        // (112, 138) straight into width:N% rendered >100% bars, clipped to full,
+        // conveying nothing. Normalise to fleet size so the bar means "share scored".
+        const share = (n) => (D.length ? Math.round((n / D.length) * 100) : 0);
+        const scored = C.length, unscored = Math.max(0, D.length - C.length);
+        return [
+          ["Scored from a snapshot", scored + " devices", share(scored)],
+          ["No snapshot yet", unscored + " devices", share(unscored)]]; })() },
+      { t: "&#9989; Compliance bands", bar: "g", rows: (() => {
+        // Bands partition the SCORED set, so the meter is a share of C.length.
+        const share = (n) => (C.length ? Math.round((n / C.length) * 100) : 0);
+        const hi = C.filter((c) => c.score >= 95).length;
+        const mid = C.filter((c) => c.score >= 75 && c.score < 95).length;
+        const lo = C.filter((c) => c.score < 75).length;
+        return [
+          ["95% and above", hi + " devices", share(hi)],
+          ["75 to 94%", mid + " devices", share(mid)],
+          ["Below 75%", lo + " devices", share(lo)]]; })() },
       { dead: 1, t: "&#128444; Screenshot verification",
         why: "Devices upload screenshots to S3 but the presigned URL is verb: put and a GET on it returns 403. No capture command exists.",
         repl: "The single cheapest platform ask: one read endpoint over a bucket Videri already fills." },
     ],
     content: [
-      { t: "&#127916; What is on screen now", bar: "b", rows: [
-        ["Reporting an asset", playing + " devices", playing],
-        ["Online but no asset", noAsset + " devices", noAsset],
-        ["Showing logo fallback", logo + " devices", logo],
-        ["Black screen", black + " devices", black]] },
+      { t: "&#127916; What is on screen now", bar: "b", rows: (() => {
+        // Share of the fleet, not a raw count (see Configuration coverage above).
+        const share = (n) => (D.length ? Math.round((n / D.length) * 100) : 0);
+        return [
+          ["Reporting an asset", playing + " devices", share(playing)],
+          ["Online but no asset", noAsset + " devices", share(noAsset)],
+          ["Showing logo fallback", logo + " devices", share(logo)],
+          ["Black screen", black + " devices", share(black)]]; })() },
       { dead: 1, t: "&#128250; Proof of play by slot",
         why: "Playback exists only as a per-device async file export with an undocumented schema and no aggregation at any scope.",
         repl: "The scheduled half IS computable from publisher events; the delivered half needs a batch pipeline we would own." },
