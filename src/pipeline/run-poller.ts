@@ -29,6 +29,8 @@ import { runAlerting, seedRules, toPollerRun } from "../alerting/engine.js";
 import { crossCheckVideriAlerts, renderCrossCheck } from "../alerting/videri-cross-check.js";
 import { pollDeviceSettings } from "../compliance/settings-poller.js";
 import { runCompliance, seedTemplates, toPollerRun as complianceRun } from "../compliance/engine.js";
+import { pollTelemetrySlowLane, type TelemetrySlowLaneTarget } from "./pollers/telemetry-slowlane.js";
+import type { TelemetryRunner } from "../videri/telemetry.js";
 import type { PollerResult } from "./pollers/types.js";
 
 const args = process.argv.slice(2);
@@ -40,6 +42,29 @@ const log = (message: string) => console.log(message);
 const repo = new Repository(pool);
 const http = new VideriHttp(new VideriAuth());
 const canvas = new CanvasService(http);
+
+/** Bind a TelemetryRunner to one device — identical to the drawer route and the
+ *  standalone run-telemetry-slowlane entrypoint, so all three issue the same
+ *  read-only demo_command sync_command. */
+const makeTelemetryRunner = (t: TelemetrySlowLaneTarget): TelemetryRunner => async (arg) => {
+  const r = await http.request<{
+    response_code?: string;
+    message?: string;
+    responses?: Array<{ params?: { response_code?: string } }>;
+  }>("messaging", "/messaging/sync_command", {
+    method: "POST",
+    body: {
+      device_id: t.deviceId,
+      device_jid: t.deviceJid,
+      player_id: t.playerId ?? t.deviceId,
+      command_name: "demo_command",
+      command_params: { arg },
+      message_id: crypto.randomUUID(),
+    },
+  });
+  const code = r.response_code ?? r.responses?.[0]?.params?.response_code ?? "UNKNOWN";
+  return { code, message: r.message ?? "" };
+};
 
 /** Records every run and surfaces failures without letting them escape. */
 async function record(result: PollerResult): Promise<void> {
@@ -147,6 +172,26 @@ if (!dryRun) {
         }
         const targets = await repo.listSettingsTargets(true);
         record(await pollDeviceSettings(http, repo, targets, { log }));
+      },
+    },
+    {
+      // SLOW LANE. Runtime telemetry (CPU/RAM/storage/signal/NTP) exists only as
+      // per-device demo_command reads — ~6 synchronous commands per device, no
+      // batch feed — so this rotates a small batch of the stalest online devices
+      // each tick (batch 10 → a ~70-online estate sweeps roughly every 2h) and
+      // persists what it reads into device_telemetry. Like device-settings it
+      // issues device commands, so it is opt-in behind ENABLE_TELEMETRY_SLOWLANE.
+      // Reads only — it writes nothing to any device.
+      name: "telemetry-slowlane",
+      intervalMs: 15 * 60_000,
+      runOnStart: false,
+      handler: async () => {
+        if (process.env["ENABLE_TELEMETRY_SLOWLANE"] !== "true") {
+          console.log("[telemetry-slowlane] skipped — set ENABLE_TELEMETRY_SLOWLANE=true to enable");
+          return;
+        }
+        const targets = await repo.telemetrySlowLaneTargets(10);
+        record(await pollTelemetrySlowLane(repo, targets, makeTelemetryRunner, { concurrency: 4, log }));
       },
     },
     {
