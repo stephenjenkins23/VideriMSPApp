@@ -1028,14 +1028,17 @@ function renderFirmwareWidget() {
 // Wi-Fi signal ARE readable per-device through demo_command (the slow lane, now
 // surfaced in the device drawer). What remains below is what the platform still
 // genuinely cannot answer. See docs/14-API-REALITY-VS-DOCS.md.
+// Aligned to docs/14 §C (genuinely cannot MONITOR). Two former entries were
+// removed 2026-08-28 after re-verification proved them NOT gaps: IP/DNS/gateway
+// (config exists via demo_command set_ethernet_settings + wm_network read, B3),
+// and data_usage (works with the x-tenant header — our earlier header bug, F).
 const GAPS = [
-  ["Temperature", "No verb returns a thermal reading on this hardware. CPU, RAM and signal ARE now readable per-device on demand; temperature is the one hardware metric with no source."],
-  ["Fleet-wide hardware telemetry", "CPU / RAM / signal read one device at a time (~4s each) — there is no batch feed, so fleet-wide metric tiles stay empty until a slow-lane poller fills them. A shape limit, not a missing capability."],
-  ["Network quality (packet loss, jitter)", "Signal strength (RSSI) is now readable per-device; packet loss and jitter are not. A venue congestion fault still cannot be isolated from a device fault."],
-  ["IP / DNS / gateway configuration", "No field exists anywhere. ops_connect_to_network joins a WiFi SSID; it cannot set a static address."],
-  ["Proof of play", "Per-device async file export only, undocumented schema, no aggregation at any scope."],
-  ["Audience / dwell", "Zero API surface, though com.videri.proximityscanner is installed on the hardware."],
-  ["Data usage", "GET /data_usage returns 403 to a tenant admin — the only structured time series on the platform."],
+  ["Temperature", "No verb returns a thermal reading on this hardware. CPU, RAM and signal ARE readable per-device on demand; temperature is the one hardware metric with no source anywhere."],
+  ["Fleet-wide hardware telemetry (as one read)", "CPU / RAM / signal read one device at a time (~4s each) — no batch feed, so fleet-wide tiles stay empty until a slow-lane poller fills them. The platform aggregates this into triage, which we cannot yet read. A shape limit, not a missing capability."],
+  ["Network packet loss / jitter", "RSSI is readable per-device and wm_network exposes ping_ms (latency, unwired); packet loss and jitter have no source. A venue congestion fault still cannot be fully isolated from a device fault."],
+  ["Aggregated proof of play", "Playback is a per-device async file export, undocumented schema, no aggregation at any scope. The scheduled half is computable from Publisher events; the delivered half needs a pipeline we own."],
+  ["Audience / dwell", "No visitor / dwell / footfall aggregation, though com.videri.proximityscanner is installed on the hardware and the sensor is readable per-device."],
+  ["Sub-15-minute outages", "Device push cadence is 15–22 min, so an outage shorter than a poll is invisible by construction — not a fault, a sampling limit."],
 ];
 
 /** Sub-minute ages matter here — captures are seconds old when live. */
@@ -1422,7 +1425,7 @@ const TOOLS = [
   { icon: "&#128260;", label: "Reboot", why:
       "Rejected by the device. get_presence and reboot_device both return ERROR on this fleet — the gateway accepts them and the hardware refuses." },
   { icon: "&#128736;", label: "Set IP / DNS", why:
-      "No IP, subnet, gateway or DNS field exists anywhere in the API. ops_connect_to_network joins a WiFi SSID; it cannot set an address." },
+      "The platform CAN set this (demo_command set_ethernet_settings: static_ip, subnet, router, dns1/dns2), but it is a disruptive network write we deliberately gate out of the product — a wrong address strands a device. Not a platform gap; our safety choice." },
 ];
 
 /** Command result banner, shown inside the drawer. */
@@ -1883,8 +1886,8 @@ function tabNetwork(d) {
           : na("ping_quality", "not reported")}
       </div>
       <div class="grp"><p class="glb">&#127760; IP configuration</p>
-        ${na("IP / subnet / gateway / DNS", "No such field anywhere in 107 operations")}
-        <div class="prov">ops_connect_to_network joins a WiFi SSID; it cannot set a static address.</div>
+        ${na("IP / subnet / gateway / DNS", "not yet surfaced")}
+        <div class="prov">Readable via demo_command wm_network / wifi_ip and settable via set_ethernet_settings (static_ip, subnet, router, dns1/dns2) — VFI has not wired the read, and the write is a gated disruptive command. Not a platform gap.</div>
       </div>
     </div><div>
       <div class="grp"><p class="glb">&#128268; Inputs</p>
@@ -2336,8 +2339,8 @@ function buildModules() {
           ["75 to 94%", mid + " devices", share(mid)],
           ["Below 75%", lo + " devices", share(lo)]]; })() },
       { dead: 1, t: "&#128444; Screenshot verification",
-        why: "Devices upload screenshots to S3 but the presigned URL is verb: put and a GET on it returns 403. No capture command exists.",
-        repl: "The single cheapest platform ask: one read endpoint over a bucket Videri already fills." },
+        why: "No batch/aggregated screenshot-verification feed exists. Per-device screenshots ARE readable (CDN mirror, serial-keyed) and capturable fresh on demand (get_screenshot:=true) — the Live wall uses exactly that — but there is no fleet-wide 'is every screen showing the right thing' read.",
+        repl: "Closest real signal, already surfaced: is_blackscreen / is_showing_logo per device, and the driven Live capture wall." },
     ],
     content: [
       { t: "&#127916; What is on screen now", bar: "b", rows: (() => {
