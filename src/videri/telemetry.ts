@@ -68,7 +68,15 @@ export function parseRssi(message: string): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
-/** ops_chrony_stats_json → {offsetMs, reach, server}. */
+/**
+ * ops_chrony_stats_json → {offsetMs, reach, server}.
+ *
+ * `reach` is chrony's 8-bit reachability register, passed through verbatim:
+ * range 0..377 OCTAL (377 = the last 8 polls all succeeded), NOT 0..255. Any UI
+ * that surfaces it should render it as N/377 or "n of last 8 polls", never as a
+ * percentage of 255. Verified 2026-08-28: answered by 0 of 73 online devices in
+ * this fleet — a rarely-populated field, not a broken read.
+ */
 export function parseChrony(message: string): { offsetMs: number; reach: number | null; server: string | null } | null {
   try {
     const outer = JSON.parse(message) as { message_json?: unknown };
