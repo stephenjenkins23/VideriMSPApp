@@ -1,0 +1,116 @@
+{
+  "ranAt": "2026-08-28T12:33:20.249Z",
+  "base": "https://api.go.videri.com",
+  "tenant": "VIDERISALES",
+  "summary": {
+    "confirmed": 11,
+    "resolved": 2,
+    "inconclusive": 0
+  },
+  "checks": [
+    {
+      "id": "GAP-01",
+      "category": "absent-data",
+      "claim": "No runtime hardware telemetry (CPU / RAM / temperature / signal / packet loss / jitter / NTP / storage) exists in the metrics payload.",
+      "call": "GET /canvas-status/metrics/fetch/{deviceId}  — sampled across multiple devices",
+      "verdict": "CONFIRMED",
+      "observed": "8 devices sampled, 0 runtime-metric keys found"
+    },
+    {
+      "id": "GAP-02",
+      "category": "absent-data",
+      "claim": "Map-grade coordinates are sparsely populated (~35% of devices), so a pinned fleet map can only cover a subset.",
+      "call": "GET /canvas-service/canvases?assigned_to_group={true,false}&size=200 (all pages)",
+      "verdict": "CONFIRMED",
+      "observed": "geo.coordinates.latitude on 86/249 (35%); location string on 14/249 (6%) and adds no device geo does not already cover. A pinned map must state its own coverage."
+    },
+    {
+      "id": "GAP-13",
+      "category": "vocabulary",
+      "claim": "metadata metafields are the only fleet-wide custom dimension, but on this tenant they are near-constant placeholder data — so they do NOT deliver fleet geography, despite 100% coverage.",
+      "call": "GET /canvas-service/canvases?...&size=200 — metadata[].metafieldName + value",
+      "verdict": "CONFIRMED",
+      "observed": "metadata on 249/249 devices across 15 metafields, but CITY on 249/249, 2 distinct, top value 100% and NAME on 249/249, 1 distinct, top value 100% — placeholder data, not geography. 100% coverage with 1-2 distinct values groups the fleet into one bucket. The mechanism is real; the values on this tenant are not."
+    },
+    {
+      "id": "GAP-03",
+      "category": "sentinel",
+      "claim": "License fields and playback_quality are effectively absent (<5% coverage). Other lifecycle fields ARE populated — last_online_time on ~93%.",
+      "call": "GET /canvas-service/canvases?assigned_to_group=true&size=50",
+      "verdict": "CONFIRMED",
+      "observed": "n=249 · license_expiration 0%; license_status 1%; playback_quality 0%; account_name 0%; last_online_time 94%; core_services_status 93%; presence_status 100%"
+    },
+    {
+      "id": "GAP-04",
+      "category": "contract",
+      "claim": "RETRACTED. data_usage is not denied — it requires the x-tenant header. canvas-status silently ignores x-tenant_id, and the resulting no-tenant-context 403 was misread as a permissions wall.",
+      "call": "GET /canvas-status/data_usage/{serial} — with x-tenant, NOT x-tenant_id",
+      "verdict": "RESOLVED",
+      "observed": "x-tenant -> 200 with 0 daily row(s); x-tenant_id -> 403. The 403 was our header, not their permissions."
+    },
+    {
+      "id": "GAP-05",
+      "category": "access-denied",
+      "claim": "canvas_count is denied to a tenant admin.",
+      "call": "GET /canvas-service/canvas_count/{tenantCode}",
+      "verdict": "CONFIRMED",
+      "observed": "HTTP 403"
+    },
+    {
+      "id": "GAP-06",
+      "category": "access-denied",
+      "claim": "Asset storage statistics are denied to a tenant admin.",
+      "call": "GET /cms/api/v1/assets/statistics/storage",
+      "verdict": "CONFIRMED",
+      "observed": "HTTP 403"
+    },
+    {
+      "id": "GAP-07",
+      "category": "empty",
+      "claim": "The aggregator — the platform's only pre-aggregation layer — returns no rows for this tenant.",
+      "call": "GET /aggregator/api/v1/metrics/account-groups?limit=5",
+      "verdict": "CONFIRMED",
+      "observed": "totalItems = 0"
+    },
+    {
+      "id": "GAP-08",
+      "category": "vocabulary",
+      "claim": "The platform detects exactly two alert types: \"offline\" and \"showingLogo\".",
+      "call": "GET /alerting/api/v1/alerts?limit=200",
+      "verdict": "CONFIRMED",
+      "observed": "n=100, types = [offline, showingLogo]"
+    },
+    {
+      "id": "GAP-09",
+      "category": "vocabulary",
+      "claim": "Platform alerts carry no severity field, so severity cannot be sourced from the platform.",
+      "call": "GET /alerting/api/v1/alerts?limit=5",
+      "verdict": "CONFIRMED",
+      "observed": "no severity-like field among: uuid, alertType, canvasId, deviceId, canvasName, groupCode, groupName, tenantCode, isResolved, resolvedAt, createdAt"
+    },
+    {
+      "id": "GAP-10",
+      "category": "contract",
+      "claim": "GET /canvases requires assigned_to_group, and neither value returns the whole fleet.",
+      "call": "GET /canvas-service/canvases (no params), then with true and false",
+      "verdict": "CONFIRMED",
+      "observed": "without param → 400; true → 233, false → 16 (disjoint, sum 249)"
+    },
+    {
+      "id": "GAP-12",
+      "category": "empty",
+      "claim": "ping_quality is populated on every device but always returns the same value (\"no\") — present, but zero information.",
+      "call": "GET /canvas-service/canvases?assigned_to_group=true&size=100",
+      "verdict": "CONFIRMED",
+      "observed": "249 devices, 1 distinct value: no"
+    },
+    {
+      "id": "GAP-11",
+      "category": "contract",
+      "claim": "RETRACTED. Screenshots ARE readable — from a public CDN mirror keyed by hardware serial, not from the API host. Every read path under api.go.videri.com really is closed, which is why probing only that host produced the wrong conclusion.",
+      "call": "GET https://cdn.go.videri.com/videri-production-canvas-service/screenshots/{serial}.jpg",
+      "verdict": "RESOLVED",
+      "observed": "CDN 200, 19018 bytes, last modified Thu, 27 Apr 2023 16:53:41 GMT (1219 days old). API host still closed: screenshots/79101X02R01621500133J2000→404 screenshots/79101X02R01621500133J2000→404. Retrieval is solved; freshness is the remaining problem."
+    }
+  ]
+}

@@ -1,0 +1,42 @@
+{
+  "name": "vfi",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Videri Fleet Intelligence \u2014 fleet management on the Videri platform APIs",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "poll": "node --env-file=.env dist/pipeline/run-poller.js",
+    "brief": "node --env-file=.env dist/ai/run-brief.js",
+    "canary": "node --env-file=.env dist/canary/run-canary.js",
+    "discover": "node --env-file=.env dist/canary/run-discover.js",
+    "test": "npm run build && npm run test:unit",
+    "test:unit": "node --test dist/canary/smoke-adapter.js dist/videri/adapter.test.js dist/videri/brightness.test.js dist/videri/telemetry.test.js dist/qa/graders.test.js dist/pipeline/pipeline.test.js dist/pipeline/pollers.e2e.test.js dist/alerting/alerting.test.js dist/api/api.test.js dist/compliance/compliance.test.js",
+    "eval": "node --env-file-if-exists=.env dist/qa/run-evals.js",
+    "qa": "npm run typecheck && npm run test && npm run eval",
+    "serve": "node --env-file=.env dist/api/run-server.js",
+    "validate-gaps": "node --env-file=.env dist/canary/validate-gaps.js",
+    "db:setup": "./scripts/setup-db.sh",
+    "compliance:calibrate": "node --env-file=.env dist/compliance/run-calibrate.js",
+    "discover:all": "node --env-file=.env dist/canary/discover-all.js ../specs/go",
+    "audit:settings": "node --env-file=.env dist/canary/audit-settings-fields.js",
+    "audit:demo": "node --env-file=.env dist/canary/demo-command-audit.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.120.0",
+    "pg": "^8.13.0",
+    "pino": "^9.5.0",
+    "zod": "^4.4.3",
+    "fastify": "^5.2.0",
+    "@fastify/cors": "^10.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/pg": "^8.11.0",
+    "typescript": "^5.7.0"
+  }
+}

@@ -1,0 +1,2708 @@
+<title>Videri Fleet Intelligence</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
+
+<style>
+:root{
+  --bg:#F6F7F9; --card:#FFFFFF; --card-2:#FAFBFC;
+  --bd:#E4E7EB; --bd-2:#EDEFF2;
+  --tx:#111827; --tx-2:#5B6573; --tx-3:#98A1AE;
+  --blue:#2563EB; --blue-2:#EFF4FE; --blue-bd:#BFD4FB;
+  --red:#DC2626; --red-2:#FEF1F1; --red-bd:#F8CFCF;
+  --amber:#D97706; --amber-2:#FEF8EC; --amber-bd:#F6E0B5;
+  --green:#059669; --green-2:#EDFAF4;
+  --violet:#7C3AED;
+  --na:#9AA3AF; --na-2:#F3F4F6;
+  --bar:#0E1116; --bar-2:#1A1F27; --bar-tx:#F5F6F8; --bar-tx-2:#98A1AE; --bar-bd:#242A33;
+  --sh:0 1px 2px rgba(16,24,40,.04);
+  --sh-2:0 1px 3px rgba(16,24,40,.06),0 4px 12px rgba(16,24,40,.04);
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  --bg:#0F1115; --card:#171A20; --card-2:#1D2027;
+  --bd:#282C34; --bd-2:#222630;
+  --tx:#F3F4F6; --tx-2:#A2ABBA; --tx-3:#6B7480;
+  --blue:#60A5FA; --blue-2:#182233; --blue-bd:#2B3E5C;
+  --red:#F87171; --red-2:#2A1A1B; --red-bd:#4A2727;
+  --amber:#FBBF24; --amber-2:#2A2214; --amber-bd:#4A3A1B;
+  --green:#34D399; --green-2:#132620;
+  --na:#6B7480; --na-2:#1E2129;
+  --bar:#080A0D; --bar-2:#151A21; --bar-tx:#F3F4F6; --bar-tx-2:#8B95A3; --bar-bd:#1E242C;
+  --sh:0 1px 2px rgba(0,0,0,.3); --sh-2:0 1px 3px rgba(0,0,0,.4);
+}}
+:root[data-theme="dark"]{
+  --bg:#0F1115; --card:#171A20; --card-2:#1D2027; --bd:#282C34; --bd-2:#222630;
+  --tx:#F3F4F6; --tx-2:#A2ABBA; --tx-3:#6B7480;
+  --blue:#60A5FA; --blue-2:#182233; --blue-bd:#2B3E5C;
+  --red:#F87171; --red-2:#2A1A1B; --red-bd:#4A2727;
+  --amber:#FBBF24; --amber-2:#2A2214; --amber-bd:#4A3A1B;
+  --green:#34D399; --green-2:#132620; --na:#6B7480; --na-2:#1E2129;
+  --bar:#080A0D; --bar-2:#151A21; --bar-tx:#F3F4F6; --bar-tx-2:#8B95A3; --bar-bd:#1E242C;
+  --sh:0 1px 2px rgba(0,0,0,.3); --sh-2:0 1px 3px rgba(0,0,0,.4);
+}
+
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--tx)}
+body{font-family:"Inter",-apple-system,BlinkMacSystemFont,system-ui,sans-serif;
+  font-size:13.5px;line-height:1.5;-webkit-font-smoothing:antialiased}
+button{font:inherit;cursor:pointer}
+.wrap{max-width:1360px;margin:0 auto;padding:22px 24px 80px}
+@media(max-width:700px){.wrap{padding:16px 14px 60px}}
+
+/* nav */
+.top{display:flex;align-items:center;gap:12px;margin-bottom:20px;flex-wrap:wrap}
+.top h1{font-size:17px;font-weight:700;margin:0;letter-spacing:-.02em}
+.top .sub{font-size:12.5px;color:var(--tx-3)}
+.tabs{display:flex;gap:6px;margin-left:auto;flex-wrap:wrap}
+.tabs button{background:var(--card);border:1px solid var(--bd);border-radius:8px;
+  padding:6px 13px;font-size:12.5px;font-weight:500;color:var(--tx-2);transition:.12s}
+.tabs button:hover{border-color:var(--blue-bd);color:var(--tx)}
+.tabs button[aria-selected="true"]{background:var(--blue-2);border-color:var(--blue-bd);color:var(--blue);font-weight:600}
+
+.card{background:var(--card);border:1px solid var(--bd);border-radius:11px;box-shadow:var(--sh);overflow:hidden}
+.chd{display:flex;align-items:center;gap:9px;padding:13px 16px;border-bottom:1px solid var(--bd-2);flex-wrap:wrap}
+.chd h2{font-size:12px;font-weight:700;margin:0;letter-spacing:.05em;text-transform:uppercase;display:flex;align-items:center;gap:7px}
+.chd .r{margin-left:auto;display:flex;gap:7px;align-items:center}
+.btn{background:var(--card);border:1px solid var(--bd);border-radius:7px;padding:5px 11px;
+  font-size:12px;font-weight:500;color:var(--tx);display:inline-flex;align-items:center;gap:5px;transition:.12s}
+.btn:hover{border-color:var(--blue-bd);color:var(--blue)}
+.btn.pri{background:var(--blue);border-color:var(--blue);color:#fff}
+.btn.pri:hover{opacity:.9;color:#fff}
+.btn.sm{padding:4px 9px;font-size:11.5px}
+.btn[disabled]{color:var(--na);cursor:not-allowed;background:var(--na-2)}
+.btn[disabled]:hover{border-color:var(--bd);color:var(--na)}
+
+.cnt{background:var(--red);color:#fff;font-size:11px;font-weight:700;
+  border-radius:20px;padding:1px 7px;min-width:20px;text-align:center}
+
+/* filter pills */
+.pills{display:flex;gap:8px;padding:12px 16px;flex-wrap:wrap;border-bottom:1px solid var(--bd-2)}
+.fp{display:inline-flex;align-items:center;gap:7px;border:1px solid var(--bd);border-radius:20px;
+  padding:5px 12px;font-size:12.5px;background:var(--card);transition:.12s}
+.fp:hover{border-color:var(--blue-bd)}
+.fp[aria-pressed="true"]{background:var(--blue-2);border-color:var(--blue-bd)}
+.fp b{font-weight:600}
+.d{width:9px;height:9px;border-radius:50%;flex:none}
+.d.red{background:var(--red)} .d.amb{background:var(--amber)}
+.d.blu{background:var(--blue)} .d.gry{background:var(--na)}
+
+.sechd{display:flex;align-items:center;gap:8px;padding:11px 16px 8px;
+  font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--red)}
+.sechd.amb{color:var(--amber)}
+
+/* alert row */
+.arow{display:grid;grid-template-columns:44px 1fr auto;gap:13px;align-items:center;
+  padding:13px 16px;border-top:1px solid var(--bd-2);width:100%;background:none;border-left:0;
+  border-right:0;border-bottom:0;text-align:left;color:var(--tx);transition:background .1s}
+.arow:hover{background:var(--card-2)}
+.arow:focus-visible{outline:2px solid var(--blue);outline-offset:-2px}
+/* Screenshot thumbnails are impossible &#8212; the platform has no read endpoint.
+   A labelled placeholder is honest; a fake black square would imply we looked. */
+.thumb{width:44px;height:34px;border-radius:6px;background:var(--na-2);border:1px solid var(--bd);
+  display:grid;place-items:center;font-size:8.5px;color:var(--na);text-align:center;
+  line-height:1.15;font-weight:600;letter-spacing:.02em;flex:none}
+.arow .ti{display:block;font-size:13.5px;font-weight:600;letter-spacing:-.008em}
+.arow .ds{display:block;font-size:12.5px;color:var(--tx-2);margin-top:1px}
+.arow .mt{display:block;font-size:11.5px;color:var(--tx-3);margin-top:4px}
+.arow .mt em{font-style:normal;color:var(--blue)}
+
+.fbar{display:flex;align-items:center;gap:11px;margin:12px 16px;padding:12px 14px;
+  background:var(--red-2);border:1px solid var(--red-bd);border-radius:9px;width:calc(100% - 32px);
+  text-align:left;color:var(--tx)}
+.fbar .t{display:block;font-size:12.5px;font-weight:600;color:var(--red)}
+.fbar .s{display:block;font-size:12px;color:var(--tx-2);margin-top:1px}
+.wbar{display:flex;align-items:center;gap:10px;margin:0 16px 14px;padding:11px 14px;
+  background:var(--amber-2);border:1px solid var(--amber-bd);border-radius:9px;font-size:12.5px}
+.wbar .l{color:var(--tx-2)}
+.wbar b{color:var(--amber)}
+
+/* &#9472;&#9472; device modal &#9472;&#9472; */
+.dv-hd{display:flex;align-items:center;gap:11px;padding:15px 18px;border-bottom:1px solid var(--bd-2);flex-wrap:wrap}
+.dv-hd h3{font-size:16.5px;font-weight:700;margin:0;letter-spacing:-.02em}
+.dv-hd .loc{font-size:12.5px;color:var(--tx-2);width:100%;margin-top:-4px}
+.tag{font-size:11px;font-weight:700;letter-spacing:.04em;padding:3px 9px;border-radius:6px}
+.tag.on{background:var(--green-2);color:var(--green)}
+.tag.warn{background:var(--amber-2);color:var(--amber)}
+.tag.net{background:var(--blue-2);color:var(--blue);font-weight:600;letter-spacing:0}
+.toolbar{display:flex;gap:7px;padding:12px 18px;border-bottom:1px solid var(--bd-2);flex-wrap:wrap}
+
+.mets{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:11px;padding:14px 18px}
+.met{border:1px solid var(--bd);border-radius:9px;padding:12px 14px;background:var(--card)}
+.met .v{display:block;font-size:21px;font-weight:700;letter-spacing:-.025em}
+.met .k{display:block;font-size:10.5px;font-weight:700;letter-spacing:.07em;text-transform:uppercase;color:var(--tx-3);margin-top:2px}
+.met .tr{height:4px;border-radius:3px;background:var(--bd-2);margin-top:9px;overflow:hidden}
+.met .tr i{display:block;height:100%;border-radius:3px}
+.met.na{background:var(--na-2);border-style:dashed}
+.met.na .v{color:var(--na)}
+.met .why{font-size:10.5px;color:var(--na);margin-top:7px;line-height:1.35}
+
+.dtabs{display:flex;gap:2px;padding:0 18px;border-bottom:1px solid var(--bd-2);overflow-x:auto}
+.dtabs button{background:none;border:0;padding:11px 13px;font-size:13px;font-weight:500;
+  color:var(--tx-2);border-bottom:2px solid transparent;white-space:nowrap;display:flex;gap:6px;align-items:center}
+.dtabs button:hover{color:var(--tx)}
+.dtabs button[aria-selected="true"]{color:var(--tx);font-weight:600;border-bottom-color:var(--tx)}
+.dbody{padding:16px 18px 22px}
+.two{display:grid;grid-template-columns:1fr 1fr;gap:28px}
+@media(max-width:820px){.two{grid-template-columns:1fr;gap:20px}}
+
+.grp{margin-bottom:20px}
+.glb{font-size:11.5px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;
+  color:var(--tx-2);margin:0 0 9px;display:flex;align-items:center;gap:7px}
+.kv{display:flex;justify-content:space-between;gap:14px;padding:8.5px 0;border-bottom:1px solid var(--bd-2);font-size:13px}
+.kv:last-child{border-bottom:0}
+.kv .k{color:var(--tx-2)}
+.kv .v{font-weight:600;text-align:right}
+.kv .v.na{color:var(--na);font-weight:400;font-size:12.5px}
+.kv .v.ok{color:var(--green)} .kv .v.wn{color:var(--amber)} .kv .v.bd{color:var(--red)}
+
+.note{background:var(--amber-2);border:1px solid var(--amber-bd);border-radius:8px;
+  padding:10px 12px;font-size:12.5px;color:var(--tx-2);margin:10px 0 0;line-height:1.5}
+.note.na{background:var(--na-2);border-color:var(--bd)}
+.note.na b{color:var(--tx)}
+.note b{color:var(--amber)}
+
+/* sliders */
+.sld{margin-bottom:13px}
+.sld .row{display:flex;align-items:center;gap:12px}
+.sld label{font-size:12.5px;color:var(--tx-2);min-width:82px}
+.sld input[type=range]{flex:1;accent-color:var(--blue);height:4px}
+.sld .n{font-size:12.5px;font-weight:600;min-width:32px;text-align:right}
+.segs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px}
+.segs button{border:1px solid var(--bd);background:var(--card);border-radius:7px;
+  padding:6px 13px;font-size:12.5px;font-weight:500;color:var(--tx-2)}
+.segs button[aria-pressed="true"]{background:var(--blue);border-color:var(--blue);color:#fff;font-weight:600}
+.segs button[disabled]{background:var(--na-2);color:var(--na);cursor:not-allowed;border-style:dashed}
+
+.src{display:flex;align-items:center;gap:11px;padding:11px 13px;border:1px solid var(--bd);
+  border-radius:9px;margin-bottom:8px;background:var(--card)}
+.src.act{border-color:var(--blue);background:var(--blue-2)}
+.src.off{opacity:.5}
+.src .nm{font-size:13px;font-weight:500;flex:1}
+.src .st{font-size:12px;color:var(--blue);font-weight:600}
+.sw{width:38px;height:22px;border-radius:20px;background:var(--bd);position:relative;flex:none;border:0;padding:0}
+.sw::after{content:"";position:absolute;top:2px;left:2px;width:18px;height:18px;border-radius:50%;
+  background:#fff;transition:transform .15s;box-shadow:0 1px 2px rgba(0,0,0,.2)}
+.sw[aria-checked="true"]{background:var(--blue)}
+.sw[aria-checked="true"]::after{transform:translateX(16px)}
+
+/* schedule */
+.sch{display:grid;grid-template-columns:auto auto 1fr auto;gap:8px 10px;align-items:center;font-size:12.5px}
+.sch .day{font-weight:600;min-width:34px}
+.sch input[type=time]{border:1px solid var(--bd);border-radius:6px;padding:4px 7px;font:inherit;
+  font-size:12px;background:var(--card);color:var(--tx)}
+.sch input[type=checkbox]{accent-color:var(--blue);width:15px;height:15px}
+
+/* insights modules */
+.mods{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+@media(max-width:900px){.mods{grid-template-columns:1fr}}
+.mod{background:var(--card);border:1px solid var(--bd);border-radius:11px;box-shadow:var(--sh);overflow:hidden}
+.mod.dead{border-style:dashed;background:var(--card-2)}
+.mhd{display:flex;align-items:center;gap:8px;padding:12px 14px;border-bottom:1px solid var(--bd-2)}
+.mhd h3{font-size:13.5px;font-weight:600;margin:0;display:flex;align-items:center;gap:7px}
+.mhd .ctl{margin-left:auto;display:flex;gap:8px;color:var(--tx-3);font-size:12px}
+.mrow{display:grid;grid-template-columns:22px 1fr 84px auto;gap:11px;align-items:center;
+  padding:8.5px 14px;border-top:1px solid var(--bd-2);font-size:12.5px}
+.rk{width:21px;height:21px;border-radius:50%;background:var(--blue);color:#fff;
+  font-size:10.5px;font-weight:700;display:grid;place-items:center}
+.rk.g{background:var(--na)}
+.mrow .nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.mtr{height:4px;background:var(--bd-2);border-radius:3px;overflow:hidden}
+.mtr i{display:block;height:100%;border-radius:3px;background:var(--red)}
+.mtr i.a{background:var(--amber)} .mtr i.b{background:var(--blue)} .mtr i.g{background:var(--green)}
+.mrow .vv{font-weight:600;text-align:right;white-space:nowrap;font-size:12.5px}
+.deadbody{padding:16px 14px;font-size:12.5px;color:var(--tx-2);line-height:1.55}
+.deadbody b{color:var(--tx)}
+.repl{margin-top:9px;padding-top:9px;border-top:1px dashed var(--bd);color:var(--green);font-weight:500}
+
+.scrim{position:fixed;inset:0;background:rgba(17,24,39,.42);opacity:0;pointer-events:none;
+  transition:opacity .16s;z-index:70}
+.scrim.on{opacity:1;pointer-events:auto}
+.modal{position:fixed;top:3vh;left:50%;transform:translateX(-50%) translateY(8px);
+  width:min(880px,95vw);max-height:94vh;overflow-y:auto;background:var(--card);
+  border:1px solid var(--bd);border-radius:13px;z-index:71;opacity:0;pointer-events:none;
+  transition:opacity .16s,transform .16s;box-shadow:0 18px 60px rgba(16,24,40,.22)}
+.modal.on{opacity:1;pointer-events:auto;transform:translateX(-50%) translateY(0)}
+.x{background:none;border:0;color:var(--tx-3);font-size:17px;line-height:1;padding:4px 6px;margin-left:auto}
+.x:hover{color:var(--tx)}
+@media(prefers-reduced-motion:reduce){*{transition:none!important}}
+.hide{display:none!important}
+</style>
+<style>
+/* ════ Live-console components. TOKEN-ONLY: every color references a :root
+   variable, because 129 hardcoded hex values in this block are exactly how
+   dark mode shipped broken — light banners and near-black titles on a dark
+   page. If a color cannot be expressed with the tokens above, the fix is a
+   new token in BOTH palettes, never a literal here. ════ */
+
+/* ── freshness ── */
+.banner{display:flex;gap:10px;align-items:flex-start;padding:11px 14px;border-radius:10px;
+  margin-bottom:14px;font-size:12.5px;line-height:1.45;border:1px solid transparent}
+.banner.warn{background:var(--amber-2);border-color:var(--amber-bd);color:var(--tx-2)}
+.banner.warn b{color:var(--amber)}
+.banner.bad{background:var(--red-2);border-color:var(--red-bd);color:var(--tx-2)}
+.banner.bad b{color:var(--red)}
+.banner ul{margin:4px 0 0;padding-left:16px}
+.fresh{display:inline-flex;align-items:center;gap:5px;font-size:11.5px;font-weight:600;
+  padding:2px 8px;border-radius:999px;border:1px solid var(--bd);font-variant-numeric:tabular-nums}
+.fresh.ok{color:var(--green);background:var(--green-2);border-color:var(--bd)}
+.fresh.warn{color:var(--amber);background:var(--amber-2);border-color:var(--amber-bd)}
+.fresh.bad{color:var(--red);background:var(--red-2);border-color:var(--red-bd)}
+
+/* ── search + table ── */
+.srch{display:flex;gap:8px;align-items:center;padding:10px 16px 12px}
+.srch input{flex:1;font:inherit;font-size:13px;padding:8px 11px;border:1px solid var(--bd);
+  border-radius:9px;background:var(--bg);color:var(--tx)}
+.srch input::placeholder{color:var(--tx-3)}
+.srch input:focus{outline:2px solid var(--blue);outline-offset:-1px}
+.tblwrap{overflow-x:auto}
+table.dt{width:100%;border-collapse:collapse;font-size:12.5px}
+table.dt th{position:sticky;top:0;background:var(--card);z-index:2;
+  text-align:left;font-size:10.5px;text-transform:uppercase;letter-spacing:.06em;
+  color:var(--tx-3);font-weight:600;padding:7px 9px;border-bottom:1px solid var(--bd);
+  cursor:pointer;user-select:none;white-space:nowrap}
+table.dt th:hover{color:var(--tx)}
+table.dt th .dir{font-size:9px;margin-left:3px}
+table.dt td{padding:9px;border-bottom:1px solid var(--bd-2);vertical-align:middle}
+table.dt tr.r{cursor:pointer}
+table.dt tr.r:hover td{background:var(--card-2)}
+table.dt tr.r:focus-visible{outline:2px solid var(--blue);outline-offset:-2px}
+table.dt td.n{font-variant-numeric:tabular-nums}
+.sdot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:6px;vertical-align:1px}
+.sdot.online{background:var(--green)}.sdot.offline{background:var(--red)}
+.sdot.warning{background:var(--amber)}.sdot.unknown{background:var(--na)}
+.sdot.alert{background:var(--violet)}
+.tbar{display:flex;gap:6px;align-items:center;padding:0 16px 10px;flex-wrap:wrap}
+.empty{padding:34px 12px;text-align:center;color:var(--tx-3);font-size:13px}
+.pg{display:flex;gap:8px;align-items:center;justify-content:flex-end;padding:11px 16px;
+  font-size:12px;color:var(--tx-3);font-variant-numeric:tabular-nums}
+.prov{font-size:11px;color:var(--tx-3);margin-top:3px}
+/* A sublabel inside a key/value row must break to its own line. Inline, it
+   concatenates into the label: "Hardware healthno CPU field exists". */
+.kv .k .prov,.kv .k span.prov{display:block;margin-top:2px;line-height:1.4;max-width:34ch}
+.kv .k{min-width:0}
+
+/* ── skeleton loading: shaped placeholders, not a text apology ── */
+.spin{padding:34px 12px;text-align:center;color:var(--tx-3);font-size:13px}
+.skel{padding:14px 16px;display:grid;gap:11px}
+.sk{border-radius:7px;background:linear-gradient(90deg,var(--bd-2) 25%,var(--na-2) 45%,var(--bd-2) 65%);
+  background-size:280% 100%;animation:shimmer 1.1s linear infinite}
+@keyframes shimmer{from{background-position:120% 0}to{background-position:-80% 0}}
+@media(prefers-reduced-motion:reduce){.sk{animation:none;background:var(--bd-2)}}
+.sk.line{height:13px}.sk.wide{height:19px;max-width:60%}.sk.row{height:52px}
+
+/* ── AI brief ── */
+.bhead{font-size:19px;font-weight:650;line-height:1.35;margin:6px 0 10px;max-width:62ch;
+  letter-spacing:-.015em;text-wrap:balance}
+.bstate{font-size:14px;color:var(--tx-2);line-height:1.6;max-width:70ch;margin-bottom:22px}
+.blab{font-size:10.5px;font-weight:700;letter-spacing:.07em;text-transform:uppercase;
+  color:var(--tx-3);margin:22px 0 9px}
+.bitem{display:flex;gap:11px;align-items:flex-start;padding:12px 13px;border:1px solid var(--bd);
+  border-radius:10px;margin-bottom:7px;background:var(--card);text-align:left;width:100%;
+  font:inherit;cursor:pointer;color:var(--tx);transition:background .1s,border-color .1s}
+.bitem:hover{background:var(--card-2);border-color:var(--blue-bd)}
+.bitem:focus-visible{outline:2px solid var(--blue);outline-offset:-1px}
+.bitem .sev{font-size:9.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;
+  padding:3px 7px;border-radius:5px;flex:none;margin-top:1px}
+.sev.critical,.sev.high{background:var(--red-2);color:var(--red)}
+.sev.medium{background:var(--amber-2);color:var(--amber)}
+.sev.info{background:var(--blue-2);color:var(--blue)}
+.bitem .txt{flex:1}
+.bitem .dv{font-weight:600;font-size:13.5px;display:block;margin-bottom:2px;color:var(--tx)}
+.bitem .pr{font-size:13px;color:var(--tx-2);display:block;line-height:1.5}
+.bitem .ev{font-size:11.5px;color:var(--tx-3);display:block;margin-top:4px;line-height:1.5}
+.bitem .ac{font-size:12px;color:var(--blue);display:block;margin-top:5px}
+.blist{margin:0;padding-left:18px}
+.blist li{font-size:13px;color:var(--tx-2);line-height:1.6;margin-bottom:5px}
+.gapbox{background:var(--card-2);border:1px solid var(--bd);border-radius:10px;padding:14px 16px;margin-top:8px}
+.gapbox li{font-size:12.5px;color:var(--tx-2);line-height:1.6;margin-bottom:6px}
+
+/* ── 24h presence timeline (drawer) ── */
+.ptl{display:flex;gap:2px;height:26px;align-items:stretch;margin:6px 0 4px}
+.ptl i{flex:1;border-radius:2px;background:var(--na-2);min-width:3px}
+.ptl i.on{background:var(--green)}
+.ptl i.off{background:var(--red);opacity:.75}
+.ptl i.mix{background:var(--amber)}
+.ptl-x{display:flex;justify-content:space-between;font-size:10px;color:var(--tx-3);
+  font-variant-numeric:tabular-nums}
+
+/* ── daily data usage: the one real time series the platform has ── */
+.usage{display:flex;align-items:flex-end;gap:2px;height:62px;margin:8px 0 4px}
+.usage i{flex:1;min-width:2px;background:var(--blue);border-radius:2px 2px 0 0;
+  display:block;opacity:.85}
+.usage i.peak{background:var(--amber);opacity:1}
+.usage i.zero{background:var(--bd-2);height:2px!important}
+
+/* ── command palette (⌘K): one keystroke to anything ── */
+.kbtn{display:inline-flex;align-items:center;gap:7px;border:1px solid var(--bd);border-radius:8px;
+  background:var(--card);color:var(--tx-3);font-size:12.5px;padding:6px 11px;transition:.12s}
+.kbtn:hover{border-color:var(--blue-bd);color:var(--tx)}
+.kbtn kbd{font:inherit;font-size:10.5px;border:1px solid var(--bd);border-radius:4px;
+  padding:0 5px;background:var(--card-2);color:var(--tx-3)}
+.pal{position:fixed;top:12vh;left:50%;transform:translateX(-50%);width:min(560px,92vw);
+  background:var(--card);border:1px solid var(--bd);border-radius:13px;z-index:80;
+  box-shadow:var(--sh-2),0 24px 70px rgba(0,0,0,.25);opacity:0;pointer-events:none;transition:opacity .12s}
+.pal.on{opacity:1;pointer-events:auto}
+.pal input{width:100%;border:0;background:none;color:var(--tx);font:inherit;font-size:15px;
+  padding:15px 17px;border-bottom:1px solid var(--bd-2);outline:none;box-sizing:border-box}
+.pal input::placeholder{color:var(--tx-3)}
+.pal-list{max-height:46vh;overflow-y:auto;padding:6px}
+.pal-row{display:flex;align-items:center;gap:10px;width:100%;text-align:left;background:none;
+  border:0;border-radius:8px;padding:9px 11px;font:inherit;color:var(--tx);cursor:pointer}
+.pal-row[aria-selected="true"]{background:var(--blue-2)}
+.pal-row .pk{font-size:10px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;
+  color:var(--tx-3);border:1px solid var(--bd);border-radius:4px;padding:1px 6px;flex:none}
+.pal-row .pn{font-size:13.5px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pal-row .ps{font-size:11.5px;color:var(--tx-3);margin-left:auto;flex:none;font-variant-numeric:tabular-nums}
+.pal-empty{padding:22px;text-align:center;color:var(--tx-3);font-size:13px}
+.pal-hint{display:flex;gap:14px;padding:8px 14px;border-top:1px solid var(--bd-2);
+  font-size:11px;color:var(--tx-3)}
+.pal-hint kbd{border:1px solid var(--bd);border-radius:4px;padding:0 4px;background:var(--card-2);font:inherit;font-size:10px}
+
+/* ════ APP SHELL ════
+   Dark bar in both themes, on purpose: it anchors the product, keeps the
+   working canvas the brightest thing on screen, and gives the status pills a
+   constant background so "green means healthy" never depends on the theme. */
+.appbar{background:var(--bar);color:var(--bar-tx);border-bottom:1px solid var(--bar-bd);
+  position:sticky;top:0;z-index:60}
+.appbar-in{max-width:1360px;margin:0 auto;padding:10px 24px;display:flex;align-items:center;gap:16px}
+@media(max-width:700px){.appbar-in{padding:9px 14px;gap:10px}}
+.brand{display:flex;align-items:center;gap:10px;flex:none}
+.mark{width:30px;height:30px;border-radius:8px;background:var(--blue);color:#fff;
+  display:grid;place-items:center;font-weight:700;font-size:15px;letter-spacing:-.02em;flex:none}
+.brand .bt{font-size:14.5px;font-weight:650;letter-spacing:-.015em;line-height:1.2;display:block}
+.brand .bs{font-size:11px;color:var(--bar-tx-2);line-height:1.2;display:block;
+  font-variant-numeric:tabular-nums}
+.gsearch{flex:1;max-width:420px;position:relative;display:flex;align-items:center}
+.gsearch input{width:100%;background:var(--bar-2);border:1px solid var(--bar-bd);border-radius:9px;
+  color:var(--bar-tx);font:inherit;font-size:12.5px;padding:7px 11px 7px 30px;box-sizing:border-box}
+.gsearch input::placeholder{color:var(--bar-tx-2)}
+.gsearch input:focus{outline:none;border-color:var(--blue)}
+.gsearch .gi{position:absolute;left:10px;font-size:11px;color:var(--bar-tx-2);pointer-events:none}
+.gsearch kbd{position:absolute;right:8px;font:inherit;font-size:10px;color:var(--bar-tx-2);
+  border:1px solid var(--bar-bd);border-radius:4px;padding:0 5px;pointer-events:none}
+.barright{margin-left:auto;display:flex;align-items:center;gap:10px;flex:none}
+.envpill{display:inline-flex;align-items:center;gap:6px;font-size:10.5px;font-weight:700;
+  letter-spacing:.06em;padding:3px 9px;border-radius:999px;border:1px solid var(--bar-bd);
+  background:var(--bar-2);color:var(--bar-tx-2)}
+.envpill .dot{width:6px;height:6px;border-radius:50%;background:var(--green)}
+.barbtn{background:var(--bar-2);border:1px solid var(--bar-bd);border-radius:8px;color:var(--bar-tx-2);
+  padding:5px 9px;font-size:12px;display:inline-flex;align-items:center;gap:5px;transition:.12s}
+.barbtn:hover{color:var(--bar-tx);border-color:var(--blue)}
+.avatar{width:28px;height:28px;border-radius:50%;background:var(--bar-2);border:1px solid var(--bar-bd);
+  color:var(--bar-tx);display:grid;place-items:center;font-size:11px;font-weight:700;flex:none}
+
+/* ── tab bar: icon + label + count, underline for active ── */
+.navbar{background:var(--card);border-bottom:1px solid var(--bd);position:sticky;top:51px;z-index:55}
+.navbar-in{max-width:1360px;margin:0 auto;padding:0 24px;display:flex;gap:2px;overflow-x:auto;
+  scrollbar-width:none}
+.navbar-in::-webkit-scrollbar{display:none}
+@media(max-width:700px){.navbar-in{padding:0 14px}}
+.navbar button{background:none;border:0;border-bottom:2px solid transparent;padding:11px 13px;
+  font-size:13px;font-weight:500;color:var(--tx-2);display:inline-flex;align-items:center;gap:7px;
+  white-space:nowrap;transition:.12s}
+.navbar button:hover{color:var(--tx)}
+.navbar button[aria-selected="true"]{color:var(--blue);font-weight:600;border-bottom-color:var(--blue)}
+.navbar .nb{font-size:10px;font-weight:700;padding:1px 6px;border-radius:999px;
+  background:var(--na-2);color:var(--tx-2);font-variant-numeric:tabular-nums}
+.navbar button[aria-selected="true"] .nb{background:var(--blue-2);color:var(--blue)}
+.navbar .nb.hot{background:var(--red);color:#fff}
+
+/* ── page header ── */
+.pagehead{display:flex;align-items:flex-end;gap:14px;margin-bottom:16px;flex-wrap:wrap}
+.pagehead h2{font-size:21px;font-weight:680;margin:0;letter-spacing:-.025em}
+.pagehead .ps{font-size:12.5px;color:var(--tx-3);margin-top:2px}
+.pagehead .pr{margin-left:auto;display:flex;gap:8px;align-items:center}
+.btn.dark{background:var(--bar);border-color:var(--bar);color:var(--bar-tx)}
+.btn.dark:hover{opacity:.88;color:var(--bar-tx)}
+
+/* ── widget grid ── */
+.wgrid{display:grid;grid-template-columns:repeat(12,1fr);gap:14px;align-items:start}
+.w{background:var(--card);border:1px solid var(--bd);border-radius:11px;box-shadow:var(--sh);overflow:hidden}
+.w-4{grid-column:span 4}.w-5{grid-column:span 5}.w-6{grid-column:span 6}
+.w-7{grid-column:span 7}.w-8{grid-column:span 8}.w-12{grid-column:span 12}
+@media(max-width:1080px){.w-4,.w-5,.w-6,.w-7,.w-8{grid-column:span 12}}
+.whd{display:flex;align-items:center;gap:8px;padding:12px 15px;border-bottom:1px solid var(--bd-2)}
+.whd h3{margin:0;font-size:11px;font-weight:700;letter-spacing:.07em;text-transform:uppercase;
+  color:var(--tx-2);display:flex;align-items:center;gap:7px}
+.whd .wr{margin-left:auto;display:flex;gap:7px;align-items:center}
+.wbody{padding:15px}
+
+/* ── health gauge ── */
+.gauge{display:flex;flex-direction:column;align-items:center;padding:6px 0 2px}
+.gauge-arc{position:relative;width:186px;height:104px}
+.gauge-arc svg{width:186px;height:104px;display:block}
+.gauge .gtrack{fill:none;stroke:var(--bd-2);stroke-width:13;stroke-linecap:round}
+.gauge .gval{fill:none;stroke-width:13;stroke-linecap:round;
+  transition:stroke-dashoffset .5s ease}
+/* The number is centered inside the arc's opening — absolute + text-align:center
+   pins it to the horizontal midpoint regardless of digit count. */
+.gauge-val{position:absolute;left:0;right:0;bottom:2px;text-align:center;line-height:1}
+.gauge-val b{font-size:40px;font-weight:700;letter-spacing:-.035em}
+.gauge-val .of{font-size:14px;font-weight:600;color:var(--tx-3);margin-left:1px}
+.gauge-cap{text-align:center;margin-top:6px;font-size:12.5px;color:var(--tx-2)}
+.glink{background:none;border:0;color:var(--blue);font-size:11.5px;padding:0;text-decoration:underline}
+.gfoot{display:flex;justify-content:space-between;align-items:center;width:100%;
+  margin-top:14px;padding-top:12px;border-top:1px solid var(--bd-2);font-size:11.5px;color:var(--tx-3)}
+
+/* ── status list ── */
+.slist{display:flex;flex-direction:column}
+.srow{display:flex;align-items:center;gap:10px;padding:11px 4px;border-bottom:1px solid var(--bd-2);
+  background:none;border-left:0;border-right:0;border-top:0;width:100%;text-align:left;
+  color:var(--tx);font:inherit;cursor:pointer}
+.srow:last-child{border-bottom:0}
+.srow:hover{background:var(--card-2)}
+.srow .sn{flex:1;font-size:13.5px}
+.srow .sv{font-size:19px;font-weight:700;letter-spacing:-.02em;font-variant-numeric:tabular-nums}
+.srow .sp{font-size:11.5px;color:var(--tx-3);min-width:34px;text-align:right;font-variant-numeric:tabular-nums}
+.srow.online .sv{color:var(--green)}.srow.warning .sv{color:var(--amber)}
+.srow.offline .sv{color:var(--red)}.srow.unknown .sv{color:var(--na)}
+.srow.alert .sv{color:var(--violet)}
+
+/* ── gap list (the honest counterpart to a screenshot wall) ── */
+.gaprow{display:flex;gap:10px;align-items:flex-start;padding:9px 0;border-bottom:1px solid var(--bd-2);font-size:12.5px}
+.gaprow:last-child{border-bottom:0}
+.gaprow .gd{width:7px;height:7px;border-radius:50%;background:var(--na);margin-top:5px;flex:none}
+.gaprow .gn{font-weight:600;color:var(--tx)}
+.gaprow .gw{color:var(--tx-3);font-size:11.5px;display:block;margin-top:1px;line-height:1.45}
+
+/* ── screenshot evidence ──
+   Age is part of the image. A months-old frame shown without its date is a lie
+   about what is on screen now, so every tile carries a dated badge and stale
+   frames are visibly dimmed rather than presented as current. */
+.shots{display:grid;grid-template-columns:repeat(auto-fill,minmax(132px,1fr));gap:11px}
+.shot{position:relative;border:1px solid var(--bd);border-radius:9px;overflow:hidden;
+  background:var(--na-2);aspect-ratio:9/16;display:block;width:100%;padding:0;cursor:pointer}
+.shot img{width:100%;height:100%;object-fit:cover;display:block}
+.shot.stale img{filter:grayscale(.55) brightness(.72)}
+.shot .age{position:absolute;top:5px;left:5px;font-size:9.5px;font-weight:700;
+  letter-spacing:.04em;padding:2px 6px;border-radius:5px;background:var(--red-2);color:var(--red)}
+.shot.fresh .age{background:var(--green-2);color:var(--green)}
+.shot .nm{position:absolute;bottom:0;left:0;right:0;padding:14px 7px 6px;font-size:10.5px;
+  font-weight:600;color:#fff;text-align:left;line-height:1.25;
+  background:linear-gradient(180deg,rgba(0,0,0,0),rgba(0,0,0,.82))}
+.shot .none{position:absolute;inset:0;display:grid;place-items:center;text-align:center;
+  font-size:10px;color:var(--tx-3);padding:8px;line-height:1.35}
+.shot .anom{position:absolute;top:5px;right:5px;font-size:9px;font-weight:800;letter-spacing:.05em;
+  padding:2px 6px;border-radius:5px;background:var(--red);color:#fff}
+.shot .anom.logo{background:var(--amber)}
+.shot.anom-black{outline:2px solid var(--red);outline-offset:-2px}
+.shot.anom-black img{filter:brightness(.5)}
+.shot.anom-logo{outline:2px solid var(--amber);outline-offset:-2px}
+.shotbig{border:1px solid var(--bd);border-radius:10px;overflow:hidden;background:var(--na-2);
+  max-width:280px}
+.shotbig img{width:100%;display:block}
+.shotbig.stale img{filter:grayscale(.5) brightness(.75)}
+</style>
+
+<header class="appbar">
+  <div class="appbar-in">
+    <div class="brand">
+      <span class="mark">V</span>
+      <span><span class="bt">Videri Fleet Intelligence</span>
+        <span class="bs" id="brandsub">&#8212;</span></span>
+    </div>
+    <div class="gsearch">
+      <span class="gi">&#128269;</span>
+      <input id="gq" type="text" placeholder="Search devices, locations, alerts&#8230;"
+             autocomplete="off" spellcheck="false" aria-label="Search everything" readonly>
+      <kbd>&#8984;K</kbd>
+    </div>
+    <div class="barright">
+      <span class="envpill" id="envpill" title="Tenant and environment">
+        <span class="dot"></span><span id="envname">&#8212;</span></span>
+      <span id="freshpill"></span>
+      <button class="barbtn" id="reload" title="Refresh now">&#8635;</button>
+      <span class="avatar" title="stephen.jenkins@videri.com">SJ</span>
+    </div>
+  </div>
+</header>
+
+<nav class="navbar"><div class="navbar-in" id="nav">
+  <button aria-selected="true"  data-v="overview">&#128202; Overview</button>
+  <button aria-selected="false" data-v="alerts">&#128680; Alerts <span class="nb hot" id="nb-alerts">0</span></button>
+  <button aria-selected="false" data-v="devices">&#128421; Devices <span class="nb" id="nb-devices">0</span></button>
+  <button aria-selected="false" data-v="compliance">&#128737; Compliance <span class="nb" id="nb-comp">0</span></button>
+  <button aria-selected="false" data-v="brief">&#10024; AI Brief</button>
+  <button aria-selected="false" data-v="insights">&#128200; Insights</button>
+  <button aria-selected="false" data-v="sla">&#9201; SLA</button>
+</div></nav>
+
+<div class="wrap">
+
+  <div class="pagehead">
+    <div><h2 id="phead">Fleet Overview</h2>
+      <div class="ps" id="psub">Everything measurable, and everything that is not</div></div>
+    <div class="pr">
+      <button class="btn" id="gapsbtn">&#128683; What we cannot see</button>
+      <button class="btn dark" id="exportbtn">&#8681; Export report</button>
+    </div>
+  </div>
+
+  <div id="staleness"></div>
+
+  <!-- ============ OVERVIEW ============ -->
+  <section id="v-overview">
+    <div class="wgrid">
+      <div class="w w-4">
+        <div class="whd"><h3>Fleet health</h3></div>
+        <div class="wbody" id="whealth"></div>
+      </div>
+      <div class="w w-3" style="grid-column:span 3">
+        <div class="whd"><h3>Device status</h3></div>
+        <div class="wbody" id="wstatus"></div>
+      </div>
+      <div class="w w-5">
+        <div class="whd"><h3>&#128680; Active alerts <span class="nb hot" id="wacount">0</span></h3>
+          <div class="wr"><button class="btn sm" data-goto="alerts">View all &#8594;</button></div></div>
+        <div id="walerts"></div>
+      </div>
+      <div class="w w-5">
+        <div class="whd"><h3>&#128230; Firmware</h3>
+          <div class="wr"><span class="prov" id="wfwsub"></span></div></div>
+        <div class="wbody" id="wfirmware"></div>
+      </div>
+      <div class="w w-7">
+        <div class="whd"><h3>&#128444; Screen evidence</h3>
+          <div class="wr">
+            <span class="prov" id="wshotsub"></span>
+            <button class="btn sm" id="shotLive">&#9210; Go live</button>
+          </div></div>
+        <div class="wbody" id="wshots"></div>
+      </div>
+      <div class="w w-5">
+        <div class="whd"><h3>&#128683; What this platform cannot tell us</h3></div>
+        <div class="wbody" id="wgaps"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ BRIEF ============ -->
+  <section id="v-brief" class="hide">
+    <div class="card">
+      <div class="chd">
+        <h2>&#10024; Fleet brief</h2>
+        <div class="r"><span id="bmeta" class="prov"></span></div>
+      </div>
+      <div id="brief"><div class="skel"><span class="sk wide"></span><span class="sk line"></span>
+        <span class="sk line"></span><span class="sk row"></span><span class="sk row"></span></div></div>
+    </div>
+  </section>
+
+  <!-- ============ ALERTS ============ -->
+  <section id="v-alerts" class="hide">
+    <div class="card">
+      <div class="chd">
+        <h2>&#128276; Active alerts <span class="cnt" id="acount">&#8212;</span></h2>
+        <div class="r"><button class="btn" id="reload">&#8635; Refresh</button></div>
+      </div>
+      <div class="pills" id="fp"></div>
+      <div id="alist"><div class="skel"><span class="sk row"></span><span class="sk row"></span>
+        <span class="sk row"></span></div></div>
+      <div class="wbar" id="inertbar" style="display:none">
+        <span class="d gry"></span>
+        <span class="l" id="inerttext"></span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ DEVICES ============ -->
+  <section id="v-devices" class="hide">
+    <div class="card">
+      <div class="chd">
+        <h2>&#128421; Devices <span class="cnt" id="dcount">&#8212;</span></h2>
+      </div>
+      <div class="srch">
+        <input id="q" type="search" placeholder="Search by name, location, serial or id&#8230;"
+               aria-label="Search devices">
+      </div>
+      <div class="tbar" id="dfilters"></div>
+      <div id="dtable"><div class="skel"><span class="sk line"></span><span class="sk row"></span>
+        <span class="sk row"></span><span class="sk row"></span></div></div>
+    </div>
+  </section>
+
+  <!-- ============ COMPLIANCE ============ -->
+  <section id="v-compliance" class="hide">
+    <div class="card">
+      <div class="chd"><h2>&#128737; Configuration compliance</h2>
+        <div class="r"><span class="prov" id="compsub"></span></div></div>
+      <div id="comptable"></div>
+    </div>
+  </section>
+
+  <!-- ============ SLA ============ -->
+  <section id="v-sla" class="hide">
+    <div class="card">
+      <div class="chd"><h2>&#9201; SLA measurement confidence</h2></div>
+      <div class="wbody" id="slabody"></div>
+    </div>
+  </section>
+
+  <!-- ============ INSIGHTS ============ -->
+  <section id="v-insights" class="hide">
+    <div class="card" style="margin-bottom:16px">
+      <div class="chd"><h2>&#128202; Analytics &amp; insights</h2></div>
+      <div class="pills" id="iv"></div>
+    </div>
+    <div class="mods" id="mods"></div>
+  </section>
+</div>
+
+<div class="scrim" id="scrim"></div>
+<div class="modal" id="modal" role="dialog" aria-label="Device detail">
+  <div class="dv-hd">
+    <h3 id="dnm">&#8212;</h3>
+    <span class="tag" id="dst">&#8212;</span>
+    <span class="tag net" id="dcls">&#8212;</span>
+    <button class="x" id="dx" aria-label="Close">&#10005;</button>
+    <div class="loc" id="dloc">&#8212;</div>
+  </div>
+  <div class="toolbar" id="dtools"></div>
+  <div id="cmdout" style="display:none;margin:0 18px 12px"></div>
+  <div class="mets" id="dmets"></div>
+  <div class="dtabs" id="dtabs"></div>
+  <div class="dbody" id="dbody"></div>
+</div>
+
+<div class="scrim" id="pscrim" style="z-index:79"></div>
+<div class="pal" id="pal" role="dialog" aria-label="Command palette">
+  <input id="palq" type="text" placeholder="Jump to a device, tab or action&#8230;"
+         autocomplete="off" spellcheck="false" aria-label="Search everything">
+  <div class="pal-list" id="pallist"></div>
+  <div class="pal-hint"><span><kbd>&#8593;</kbd><kbd>&#8595;</kbd> navigate</span>
+    <span><kbd>&#8629;</kbd> open</span><span><kbd>esc</kbd> close</span></div>
+</div>
+
+<script>
+"use strict";
+/* ===================================================================
+   Live console. Every number below comes from the read API; nothing is
+   hardcoded. Where the platform has no data, the UI says so explicitly
+   rather than rendering a zero -- an absent metric and a metric reading
+   zero are different facts, and conflating them is how a dashboard
+   certifies a dead fleet as healthy.
+   =================================================================== */
+
+const $ = (s) => document.querySelector(s);
+const esc = (v) => String(v == null ? "" : v).replace(/[&<>"']/g,
+  (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+/* ---- transport ---------------------------------------------------- */
+let TOKEN = sessionStorage.getItem("vfi_token") || "";
+
+async function api(path, opts) {
+  const headers = TOKEN ? { authorization: "Bearer " + TOKEN } : {};
+  const res = await fetch(path, { ...(opts || {}), headers });
+  if (res.status === 401) {
+    const t = window.prompt("This API requires a bearer token (VFI_API_TOKEN):", "");
+    if (t) { TOKEN = t.trim(); sessionStorage.setItem("vfi_token", TOKEN); return api(path, opts); }
+    throw new Error("Unauthorized");
+  }
+  // 429 (sweep rate-limit) is expected and not an error — return the body.
+  if (!res.ok && res.status !== 429) throw new Error(path + " returned " + res.status);
+  return res.json();
+}
+
+/** Walk a paginated endpoint to completion. The API caps limit at 200 and the
+ *  fleet is larger, so a single request would silently truncate the fleet. */
+async function apiAll(path, cap = 2000) {
+  const sep = path.includes("?") ? "&" : "?";
+  const out = [];
+  let page = 1, meta = null;
+  for (;;) {
+    const body = await api(`${path}${sep}page=${page}&limit=200`);
+    meta = body.meta;
+    out.push(...(body.data || []));
+    // The envelope calls this `page`, not `pagination`. Reading the wrong key
+    // silently stopped after one request and truncated the fleet at the API's
+    // 200-row cap -- which looked like a real number, not a bug.
+    const p = meta && meta.page;
+    if (!p || page >= (p.totalPages || 1) || out.length >= cap) break;
+    page += 1;
+  }
+  return { data: out, meta };
+}
+
+/* ---- formatting -------------------------------------------------- */
+function ago(iso) {
+  if (!iso) return "never";
+  const s = (Date.now() - new Date(iso).getTime()) / 1000;
+  if (s < 0) return "in the future";
+  if (s < 90) return Math.round(s) + " sec ago";
+  const m = s / 60;
+  if (m < 90) return Math.round(m) + " min ago";
+  const h = m / 60;
+  if (h < 36) return h.toFixed(1) + " hr ago";
+  return Math.round(h / 24) + " d ago";
+}
+function dur(sec) {
+  if (sec == null) return "—";
+  if (sec < 90) return Math.round(sec) + " sec";
+  if (sec < 5400) return Math.round(sec / 60) + " min";
+  if (sec < 129600) return (sec / 3600).toFixed(1) + " hr";
+  return Math.round(sec / 86400) + " d";
+}
+
+/* ---- state ------------------------------------------------------- */
+const S = { summary: null, alerts: [], devices: [], compliance: [], pipeline: null,
+            fresh: null, sev: "all", cls: "all", q: "", dev: null, dtab: "overview",
+            sort: { key: "status", dir: 1 }, loading: false, brief: null, sla: null };
+
+/* ===================================================================
+   Freshness. This is the first thing rendered and the loudest thing on
+   the page when it is bad. We poll, so everything here is a snapshot of
+   some age -- an operator acting on a stale screen is the failure mode
+   an SLA product cannot have.
+   =================================================================== */
+/** Page titles, so the header narrates where you are. */
+const PAGES = {
+  overview:   ["Fleet Overview", "Everything measurable, and everything that is not"],
+  alerts:     ["Active Alerts", "Grouped by severity, newest evidence first"],
+  devices:    ["Devices", "Sortable, searchable; click any row for full detail"],
+  compliance: ["Configuration Compliance", "Calibrated drift scored apart from policy adoption"],
+  brief:      ["AI Fleet Brief", "Generated from the live fleet, with its own coverage gaps declared"],
+  insights:   ["Analytics & Insights", "Derived from the live fleet; impossible modules stay visible"],
+  sla:        ["SLA Measurement", "What can honestly be claimed, and what cannot be measured"],
+};
+
+function renderFreshness() {
+  const f = S.fresh;
+  const el = $("#staleness");
+  if (!f) { el.innerHTML = ""; return; }
+  if (f.newestSampleAt) {
+    f.ageSeconds = Math.max(0, (Date.now() - new Date(f.newestSampleAt).getTime()) / 1000);
+    f.state = f.ageSeconds > 1200 ? "stale" : f.ageSeconds > 300 ? "lagging" : "fresh";
+  }
+  const cls = f.state === "fresh" ? "ok" : f.state === "aging" ? "warn" : "bad";
+  const total = S.summary ? S.summary.snapshot.totalDevices : "—";
+  $("#brandsub").textContent = `Enterprise MDM \u00b7 ${total} devices`;
+  $("#envname").textContent = "VIDERISALES";
+  $("#freshpill").innerHTML =
+    `<span class="fresh ${cls}">&#9679; ${esc(f.state)} &#183; ${dur(f.ageSeconds)} old</span>`;
+
+  const warnings = f.warnings || [];
+  if (f.state === "fresh" && warnings.length === 0) { el.innerHTML = ""; return; }
+  el.innerHTML =
+    `<div class="banner ${cls === "ok" ? "warn" : cls}">
+       <span>&#9888;&#65039;</span>
+       <span><b>Newest reading is ${dur(f.ageSeconds)} old (${esc(f.state)}).</b>
+       Everything below is a snapshot of that moment, not of now.
+       ${warnings.length ? "<ul>" + warnings.map((w) => `<li>${esc(w)}</li>`).join("") + "</ul>" : ""}
+       </span></div>`;
+}
+
+/* ===================================================================
+   OVERVIEW — the widget grid.
+   =================================================================== */
+
+/**
+ * Fleet health score.
+ *
+ * A single 0-100 number is the most dangerous object on an ops dashboard: it
+ * invites an operator to stop reading. So this one is built to survive scrutiny:
+ *
+ *  - It scores ONLY dimensions we can actually measure. Hardware health, network
+ *    quality and content verification have no data source on this platform, so
+ *    they are excluded from the maths — not silently defaulted to 100, which is
+ *    how a dark fleet scores "green".
+ *  - Weights are renormalised over the dimensions that survived, and the divisor
+ *    is shown.
+ *  - "Why?" opens the full derivation, including what was excluded and why.
+ *
+ * A score of 100 here therefore means "everything we can see is fine", never
+ * "everything is fine" — and the UI says so in those words.
+ */
+function healthScore() {
+  const snap = S.summary && S.summary.snapshot;
+  if (!snap) return null;
+  const total = snap.totalDevices || 0;
+  const by = snap.byStatus || {};
+  const dims = [];
+
+  if (total > 0) {
+    const online = by.online || 0;
+    dims.push({
+      key: "Reachability", weight: 40, value: Math.round((online / total) * 100),
+      detail: `${online} of ${total} devices reachable`,
+    });
+  }
+
+  const fw = S.summary.snapshot.firmwareDistribution || [];
+  const fwTotal = fw.reduce((a, v) => a + v.count, 0);
+  const fwCurrent = fw.filter((v) => v.isLatest).reduce((a, v) => a + v.count, 0);
+  if (fwTotal > 0) {
+    dims.push({
+      key: "Firmware currency", weight: 20, value: Math.round((fwCurrent / fwTotal) * 100),
+      detail: `${fwCurrent} of ${fwTotal} on the latest release`,
+    });
+  }
+
+  if (S.compliance.length > 0) {
+    const mean = S.compliance.reduce((a, c) => a + c.score, 0) / S.compliance.length;
+    dims.push({
+      key: "Configuration drift", weight: 25, value: Math.round(mean),
+      detail: `mean drift score across ${S.compliance.length} devices with a config snapshot`,
+    });
+  }
+
+  const crit = (snap.openAlertsBySeverity || {}).critical || 0;
+  if (total > 0) {
+    const clean = Math.max(0, 1 - crit / total);
+    dims.push({
+      key: "Critical alerts", weight: 15, value: Math.round(clean * 100),
+      detail: `${crit} critical alert${crit === 1 ? "" : "s"} open across ${total} devices`,
+    });
+  }
+
+  // Excluded on purpose — each has no data source, verified across 107 read ops.
+  const excluded = [
+    ["Hardware health", "no CPU, memory or temperature field exists in the payload"],
+    ["Network quality", "no signal strength, packet loss or jitter is reported"],
+    ["Content verification", "screenshots cannot be read back, so what is on screen is unverifiable"],
+  ];
+  if (!S.compliance.length) {
+    excluded.push(["Configuration drift", "no device has returned a config snapshot yet"]);
+  }
+
+  const wsum = dims.reduce((a, d) => a + d.weight, 0);
+  if (wsum === 0) return null;
+  const score = Math.round(dims.reduce((a, d) => a + d.value * d.weight, 0) / wsum);
+  return { score, dims, excluded, weightSum: wsum };
+}
+
+function renderHealth() {
+  const el = $("#whealth");
+  const h = healthScore();
+  if (!h) { el.innerHTML = `<div class="empty">Not enough data to score.</div>`; return; }
+  const col = h.score >= 85 ? "var(--green)" : h.score >= 60 ? "var(--amber)" : "var(--red)";
+  // 180deg arc, r=74 → length = pi*74
+  const LEN = Math.PI * 74;
+  const off = LEN * (1 - h.score / 100);
+  el.innerHTML =
+    `<div class="gauge">
+      <div class="gauge-arc">
+        <svg viewBox="0 0 186 104" role="img" aria-label="Fleet health ${h.score} of 100">
+          <path class="gtrack" d="M 19 93 A 74 74 0 0 1 167 93"></path>
+          <path class="gval" d="M 19 93 A 74 74 0 0 1 167 93"
+                stroke="${col}" stroke-dasharray="${LEN.toFixed(1)}"
+                stroke-dashoffset="${off.toFixed(1)}"></path>
+        </svg>
+        <div class="gauge-val"><b style="color:${col}">${h.score}</b><span class="of">/100</span></div>
+      </div>
+      <div class="gauge-cap">Health score &#183;
+        <button class="glink" id="whybtn">why this number?</button></div>
+      <div class="gfoot">
+        <span>${h.dims.length} of ${h.dims.length + h.excluded.length} dimensions measurable</span>
+        <span>${h.excluded.length} excluded</span>
+      </div>
+     </div>`;
+  $("#whybtn").addEventListener("click", () => showHealthBreakdown(h));
+}
+
+/** The derivation, in a drawer. If a number cannot be explained, it should not be shown. */
+function showHealthBreakdown(h) {
+  S.dev = null;
+  $("#dnm").textContent = "Fleet health — how this is calculated";
+  $("#dst").textContent = String(h.score);
+  $("#dst").className = "tag on";
+  $("#dcls").textContent = `${h.dims.length} dimensions`;
+  $("#dloc").innerHTML = `Weighted over measurable dimensions only, divisor ${h.weightSum}`;
+  $("#dtools").innerHTML = "";
+  $("#dmets").innerHTML = "";
+  $("#dtabs").innerHTML = "";
+  $("#dbody").innerHTML =
+    `<div class="two"><div>
+      <div class="grp"><p class="glb">Counted</p>
+        ${h.dims.map((d) => `<div class="kv"><span class="k">${esc(d.key)}
+          <span class="prov">weight ${d.weight}/${h.weightSum} &#183; ${esc(d.detail)}</span></span>
+          <span class="v ${d.value >= 85 ? "ok" : d.value >= 60 ? "wn" : "bd"}">${d.value}</span></div>`).join("")}
+      </div>
+    </div><div>
+      <div class="grp"><p class="glb">Excluded &#8212; no data source</p>
+        ${h.excluded.map(([k, w]) =>
+          `<div class="kv"><span class="k">${esc(k)}<span class="prov">${esc(w)}</span></span>
+           <span class="v na">not scored</span></div>`).join("")}
+      </div>
+      <div class="note"><b>${h.score} means &#8220;everything we can see is fine&#8221;,
+        not &#8220;everything is fine&#8221;.</b> Excluded dimensions are left out of the
+        maths rather than scored as passing &#8212; defaulting them to 100 is how a fleet
+        with zero hardware telemetry ends up reading green.</div>
+    </div></div>`;
+  $("#scrim").classList.add("on");
+  $("#modal").classList.add("on");
+}
+
+/**
+ * The status categories to render, in order, given the observed counts.
+ *
+ * online/warning/offline always show (even at zero) so the row set is stable.
+ * ANY other status present in the data — "alert", "unknown", or something we
+ * have never seen — is appended when its count is non-zero. Hardcoding a fixed
+ * list once dropped the 2 "alert" devices on the floor: the breakdown summed to
+ * 248 of 250 and those devices could not be filtered to. A status list must be
+ * derived from the data it summarises, never assumed, or the total silently lies.
+ */
+function statusOrder(by) {
+  const order = ["online", "warning", "offline"];
+  for (const k of Object.keys(by)) if (!order.includes(k) && (by[k] || 0) > 0) order.push(k);
+  return order;
+}
+
+function renderStatusWidget() {
+  const el = $("#wstatus");
+  const snap = S.summary && S.summary.snapshot;
+  if (!snap) { el.innerHTML = ""; return; }
+  // Counted from the device rows, not the snapshot — the two use different status
+  // expressions and disagreed on screen once already.
+  const by = {};
+  for (const d of S.devices) by[d.status] = (by[d.status] || 0) + 1;
+  const total = S.devices.length || 1;
+  const order = statusOrder(by);
+  el.innerHTML = `<div class="slist">` + order.map((k) => {
+    const n = by[k] || 0;
+    return `<button class="srow ${k}" data-status="${k}">
+      <span class="d ${k === "online" ? "" : ""}"></span>
+      <span class="sdot ${k}"></span>
+      <span class="sn">${k[0].toUpperCase() + k.slice(1)}</span>
+      <span class="sv">${n.toLocaleString()}</span>
+      <span class="sp">${Math.round((n / total) * 100)}%</span></button>`;
+  }).join("") + `</div>`;
+  el.querySelectorAll(".srow").forEach((b) =>
+    b.addEventListener("click", () => {
+      S.cls = b.dataset.status;
+      switchTab("devices");
+      renderDeviceFilters(); renderDevices();
+    }));
+}
+
+function renderAlertWidget() {
+  const el = $("#walerts");
+  const crit = S.alerts.filter((a) => a.severity === "critical").slice(0, 4);
+  $("#wacount").textContent = S.alerts.length;
+  if (S.alerts.length === 0) {
+    el.innerHTML = `<div class="empty">No alerts are open.</div>`;
+    return;
+  }
+  const counts = {};
+  for (const a of S.alerts) counts[a.severity] = (counts[a.severity] || 0) + 1;
+  const pills = SEV.filter(([s]) => counts[s]).map(([s, dot]) =>
+    `<span class="fp" style="cursor:default"><span class="d ${dot}"></span><b>${counts[s]}</b> ${s}</span>`).join("");
+  el.innerHTML =
+    `<div class="pills">${pills}</div>` +
+    (crit.length ? `<div class="sechd">&#128308; Critical &#8212; requires action</div>` : "") +
+    (crit.length ? crit : S.alerts.slice(0, 4)).map((a) => `
+      <button class="arow" data-id="${esc(a.deviceId)}">
+        <span class="thumb">${thumbFor(a)}</span>
+        <span><span class="ti">${esc(a.title)}</span>
+          <span class="ds">${esc((a.evidence || "").slice(0, 120))}</span>
+          <span class="mt">${ago(a.lastFiredAt || a.openedAt)} &#183; <em>${esc(a.ruleId)}</em></span></span>
+        <span class="btn sm">Open</span></button>`).join("");
+  el.querySelectorAll(".arow").forEach((b) =>
+    b.addEventListener("click", () => openDevice(b.dataset.id)));
+}
+
+function renderFirmwareWidget() {
+  const el = $("#wfirmware");
+  const fw = (S.summary && S.summary.snapshot.firmwareDistribution) || [];
+  if (fw.length === 0) { el.innerHTML = `<div class="empty">No firmware data.</div>`; return; }
+  const total = fw.reduce((a, v) => a + v.count, 0);
+  const behind = total - fw.filter((v) => v.isLatest).reduce((a, v) => a + v.count, 0);
+  $("#wfwsub").textContent = `${behind} of ${total} behind · ${fw.length} versions`;
+  const ranked = fw.slice().sort((a, b) => b.count - a.count).slice(0, 5);
+  const max = ranked[0].count;
+  el.innerHTML = ranked.map((v) => `
+    <div class="mrow" style="grid-template-columns:1fr 90px auto;padding-left:0;padding-right:0;border-top:0;border-bottom:1px solid var(--bd-2)">
+      <span class="nm" title="${esc(v.version)}">${esc(v.version)}${v.isLatest ? ' <span class="v ok">latest</span>' : ""}</span>
+      <span class="mtr"><i class="${v.isLatest ? "g" : "a"}" style="width:${Math.round((v.count / max) * 100)}%"></i></span>
+      <span class="vv">${v.count}</span></div>`).join("");
+}
+
+/**
+ * The honest counterpart to a "live screenshots" wall: the wall cannot exist on
+ * this platform, and a dashboard that just omits it lets the operator assume the
+ * data is somewhere they have not looked. Naming the holes is the feature.
+ */
+// Only GENUINE gaps belong here. Three former entries were retired once we
+// proved them wrong this session: screenshots DO capture on demand
+// (get_screenshot:=true turns a months-old frame seconds-old), and CPU, RAM and
+// Wi-Fi signal ARE readable per-device through demo_command (the slow lane, now
+// surfaced in the device drawer). What remains below is what the platform still
+// genuinely cannot answer. See docs/14-API-REALITY-VS-DOCS.md.
+const GAPS = [
+  ["Temperature", "No verb returns a thermal reading on this hardware. CPU, RAM and signal ARE now readable per-device on demand; temperature is the one hardware metric with no source."],
+  ["Fleet-wide hardware telemetry", "CPU / RAM / signal read one device at a time (~4s each) — there is no batch feed, so fleet-wide metric tiles stay empty until a slow-lane poller fills them. A shape limit, not a missing capability."],
+  ["Network quality (packet loss, jitter)", "Signal strength (RSSI) is now readable per-device; packet loss and jitter are not. A venue congestion fault still cannot be isolated from a device fault."],
+  ["IP / DNS / gateway configuration", "No field exists anywhere. ops_connect_to_network joins a WiFi SSID; it cannot set a static address."],
+  ["Proof of play", "Per-device async file export only, undocumented schema, no aggregation at any scope."],
+  ["Audience / dwell", "Zero API surface, though com.videri.proximityscanner is installed on the hardware."],
+  ["Data usage", "GET /data_usage returns 403 to a tenant admin — the only structured time series on the platform."],
+];
+
+/** Sub-minute ages matter here — captures are seconds old when live. */
+function shortAge(sec) {
+  if (sec == null) return "undated";
+  if (sec < 90) return `${Math.max(1, Math.round(sec))}s`;
+  if (sec < 3600) return `${Math.round(sec / 60)}m`;
+  if (sec < 172800) return `${Math.round(sec / 3600)}h`;
+  return `${Math.round(sec / 86400)}d`;
+}
+
+/**
+ * Live screen evidence.
+ *
+ * The CDN is stale by default, so instead of showing whatever is on file we
+ * DRIVE captures: "Go live" sweeps the online estate in batches of 12, asking
+ * each device to capture on demand (a stale frame becomes seconds old), and the
+ * wall shows only frames from the last few minutes. Devices that are black or on
+ * the logo lead, because that is what needs attention. Captures only happen
+ * while someone is watching — the sweep is client-driven, not a standing job.
+ */
+const LIVE = { on: false, timer: null, sweeping: false };
+
+function renderShotsWidget() {
+  const el = $("#wshots");
+  const s = S.shots;
+  if (!s) { el.innerHTML = `<div class="skel"><span class="sk row"></span></div>`; return; }
+  const list = (s.screenshots || []).slice(0, 12);
+  const anomalies = s.anomalies || 0;
+  $("#wshotsub").textContent = LIVE.on
+    ? `${s.shown} live${anomalies ? ` · ${anomalies} need attention` : ""}${LIVE.sweeping ? " · sweeping…" : ""}`
+    : `${s.available} on file · ${s.shown} recent`;
+
+  if (list.length === 0) {
+    el.innerHTML =
+      `<div class="empty">${LIVE.on
+        ? "Sweeping the estate for fresh captures…"
+        : "No recent capture. Click <b>Go live</b> to sweep the estate for fresh screenshots."}</div>`;
+    return;
+  }
+  el.innerHTML =
+    `<div class="shots">` + list.map((x) => {
+      const cls = x.anomaly === "black" ? "anom-black" : x.anomaly === "logo" ? "anom-logo" : "fresh";
+      const badge = x.anomaly === "black" ? '<span class="anom">BLACK</span>'
+        : x.anomaly === "logo" ? '<span class="anom logo">LOGO</span>' : "";
+      return `
+      <button class="shot ${cls}" data-id="${esc(x.deviceId)}"
+              title="${esc(x.name || x.deviceId)} — captured ${x.lastModified ? new Date(x.lastModified).toLocaleString() : "unknown"}">
+        <img src="${esc(x.url)}?t=${x.lastModified ? Date.parse(x.lastModified) : 0}"
+             alt="Screen capture for ${esc(x.name || x.deviceId)}" decoding="async">
+        ${badge}
+        <span class="age">${shortAge(x.ageSeconds)}</span>
+        <span class="nm">${esc(x.name || x.deviceId)}</span>
+      </button>`;
+    }).join("") + `</div>` +
+    `<div class="prov" style="margin-top:10px">${LIVE.on
+      ? "Live: the estate is being swept 12 devices at a time; each frame is captured on demand and is seconds old. Black and logo screens lead."
+      : "On-demand captures, hardware-serial keyed. Frames older than 10 minutes are hidden — a stale screenshot is not evidence of what is on screen now."}</div>`;
+  el.querySelectorAll(".shot").forEach((b) =>
+    b.addEventListener("click", () => openDevice(b.dataset.id)));
+}
+
+/** One live cycle: sweep a batch, wait for captures to land, then re-fetch. */
+async function liveTick() {
+  if (!LIVE.on || LIVE.sweeping) return;
+  LIVE.sweeping = true;
+  renderShotsWidget();
+  try {
+    await api("/api/screenshots/sweep", { method: "POST" }).catch(() => null);
+    // Captures land on the CDN within a few seconds; give them a beat.
+    await new Promise((r) => setTimeout(r, 6000));
+    const shots = await api("/api/screenshots?limit=12&maxAgeMinutes=10").catch(() => null);
+    if (shots) S.shots = shots.data;
+  } finally {
+    LIVE.sweeping = false;
+    renderShotsWidget();
+  }
+}
+
+function toggleLive() {
+  LIVE.on = !LIVE.on;
+  const btn = $("#shotLive");
+  if (LIVE.on) {
+    btn.textContent = "■ Stop live";
+    btn.classList.add("pri");
+    liveTick();
+    // The sweep is server-rate-limited to ~25 s; poll a touch slower.
+    LIVE.timer = setInterval(liveTick, 30000);
+  } else {
+    btn.textContent = "⏺ Go live";
+    btn.classList.remove("pri");
+    if (LIVE.timer) clearInterval(LIVE.timer);
+    LIVE.timer = null;
+  }
+}
+
+function renderGapsWidget() {
+  $("#wgaps").innerHTML = GAPS.map(([n, w]) =>
+    `<div class="gaprow"><span class="gd"></span><span><span class="gn">${esc(n)}</span>
+      <span class="gw">${esc(w)}</span></span></div>`).join("");
+}
+
+function renderOverview() {
+  renderHealth(); renderStatusWidget(); renderAlertWidget();
+  renderFirmwareWidget(); renderShotsWidget(); renderGapsWidget();
+}
+
+/* ===================================================================
+   BRIEF
+   The AI layer's output. Rendered with its dataGaps section given equal
+   weight to its findings: a brief that reads as confident while silently
+   omitting 0%-coverage telemetry is worse than no brief.
+   =================================================================== */
+function renderBrief() {
+  const el = $("#brief");
+  el.className = "";
+  const wrap = S.brief;
+  if (!wrap) {
+    el.innerHTML = `<div class="empty">No brief has been generated yet.
+      Run <code>npm run brief</code>.</div>`;
+    $("#bmeta").textContent = "";
+    return;
+  }
+  const b = wrap.brief || {};
+  $("#bmeta").textContent =
+    `${wrap.model || "model unknown"} \u00b7 ${wrap.windowHours}h window \u00b7 generated ${ago(wrap.generatedAt)}`;
+
+  const items = (b.needsAttention || []).map((it) => `
+    <button class="bitem" data-name="${esc(it.device)}">
+      <span class="sev ${esc(it.severity)}">${esc(it.severity)}</span>
+      <span class="txt">
+        <span class="dv">${esc(it.device)}</span>
+        <span class="pr">${esc(it.problem)}</span>
+        <span class="ev">${esc(it.evidence)}</span>
+        <span class="ac">&#8594; ${esc(it.suggestedAction)}</span>
+      </span></button>`).join("");
+
+  el.innerHTML =
+    `<div class="bhead">${esc(b.headline || "")}</div>
+     <div class="bstate">${esc(b.fleetState || "")}</div>
+     ${items ? `<div class="blab">Needs attention (${(b.needsAttention || []).length})</div>${items}` : ""}
+     ${(b.changes || []).length
+        ? `<div class="blab">Changes in the window</div><ul class="blist">${
+            b.changes.map((c) => `<li>${esc(c)}</li>`).join("")}</ul>` : ""}
+     ${(b.dataGaps || []).length
+        ? `<div class="blab">Not covered by this brief</div>
+           <div class="gapbox"><ul class="blist">${
+             b.dataGaps.map((g) => `<li>${esc(g)}</li>`).join("")}</ul></div>` : ""}`;
+
+  // The brief names devices, not ids. Resolve by name so an item is still one
+  // click from the device it describes.
+  el.querySelectorAll(".bitem").forEach((btn) => {
+    const name = btn.dataset.name;
+    const match = S.devices.find((d) => d.name === name)
+      || S.devices.find((d) => name && d.name && name.includes(d.name));
+    if (!match) { btn.style.cursor = "default"; return; }
+    btn.addEventListener("click", () => openDevice(match.id));
+  });
+}
+
+/* ===================================================================
+   ALERTS
+   =================================================================== */
+const SEV = [["critical", "red"], ["high", "red"], ["medium", "amb"], ["info", "blu"]];
+
+function renderAlertFilters() {
+  const counts = (S.summary && S.summary.snapshot.openAlertsBySeverity) || {};
+  const wrap = $("#fp");
+  wrap.innerHTML = "";
+  for (const [sev, dot] of SEV) {
+    const n = counts[sev] || 0;
+    if (n === 0 && sev !== "critical") continue;
+    const b = document.createElement("button");
+    b.className = "fp";
+    b.innerHTML = `<span class="d ${dot}"></span><b>${n}</b> ${sev}`;
+    b.setAttribute("aria-pressed", String(S.sev === sev));
+    b.addEventListener("click", () => {
+      S.sev = S.sev === sev ? "all" : sev;
+      renderAlertFilters(); renderAlerts();
+    });
+    wrap.appendChild(b);
+  }
+}
+
+/** A thumbnail derived from the rule, not from an image: screenshots cannot be
+ *  read back from this platform, so the tile carries the reason instead. */
+function thumbFor(a) {
+  const r = a.ruleId || "";
+  if (r.includes("black")) return "NO<br>IMAGE";
+  if (r.includes("logo")) return "LOGO";
+  if (r.includes("offline")) return "OFF<br>LINE";
+  if (r.includes("component") || r.includes("firmware")) return "FW";
+  return "CFG";
+}
+
+function renderAlerts() {
+  const L = $("#alist");
+  L.className = "";
+  const rows = S.alerts.filter((a) => S.sev === "all" || a.severity === S.sev);
+  $("#acount").textContent = S.alerts.length;
+  if (rows.length === 0) {
+    L.innerHTML = `<div class="empty">No ${S.sev === "all" ? "" : esc(S.sev) + " "}alerts are open.</div>`;
+    return;
+  }
+  L.innerHTML = rows.map((a) => `
+    <button class="arow" data-id="${esc(a.deviceId)}">
+      <span class="thumb">${thumbFor(a)}</span>
+      <span><span class="ti">${esc(a.title)} &#8212; ${esc(a.deviceName || a.deviceId)}</span>
+        <span class="ds">${esc(a.evidence || "")}</span>
+        <span class="mt">${ago(a.lastFiredAt || a.openedAt)} &#183; <em>${esc(a.ruleId)}</em>
+          ${a.acknowledgedAt ? " &#183; acknowledged" : ""}</span></span>
+      <span class="btn sm">Open</span>
+    </button>`).join("");
+  L.querySelectorAll(".arow").forEach((b) =>
+    b.addEventListener("click", () => openDevice(b.dataset.id)));
+}
+
+/** Rules that cannot fire because their input does not exist. Reporting these
+ *  as "quiet" would be a lie: they are structurally silent. */
+function renderInert() {
+  const avail = S.pipeline && S.pipeline.telemetryAvailability;
+  if (!avail) return;
+  const dead = Object.entries(avail).filter(([, v]) => !v.readable).map(([k]) => k);
+  if (dead.length === 0) return;
+  $("#inertbar").style.display = "";
+  $("#inerttext").innerHTML =
+    `<b>${dead.length} hardware alert input(s) unavailable</b> &#8212; ` +
+    dead.map((d) => esc(d)).join(", ") +
+    ` have no data source on this platform, so rules reading them can never fire.`;
+}
+
+/* ===================================================================
+   DEVICES
+   =================================================================== */
+function renderDeviceFilters() {
+  // Counted from the rows actually in this table, NOT from the stored fleet
+  // snapshot. The snapshot is computed at poll time by a different status
+  // expression, and the two disagreed on screen: the pills claimed "0 warning"
+  // while warning rows sat directly beneath them. A filter must be counted from
+  // the thing it filters, or the dashboard contradicts itself in public.
+  const by = {};
+  for (const d of S.devices) by[d.status] = (by[d.status] || 0) + 1;
+  const wrap = $("#dfilters");
+  wrap.innerHTML = "";
+  // Same derived order as the overview widget, so a status can never exist in the
+  // table without a chip to filter it — the chips must sum to All.
+  const opts = [["all", "All", S.devices.length]].concat(
+    statusOrder(by).map((k) => [k, k, by[k] || 0]));
+  for (const [key, label, n] of opts) {
+    const b = document.createElement("button");
+    b.className = "fp";
+    b.innerHTML = `<span class="sdot ${key === "all" ? "unknown" : key}"></span><b>${n}</b> ${label}`;
+    b.setAttribute("aria-pressed", String(S.cls === key));
+    b.addEventListener("click", () => { S.cls = key; renderDeviceFilters(); renderDevices(); });
+    wrap.appendChild(b);
+  }
+}
+
+/** Sort accessors. Status sorts by urgency, not alphabet — an ops table's
+ *  default order should put what needs attention on top. */
+const SORTS = {
+  name:    (d) => (d.name || d.id).toLowerCase(),
+  class:   (d) => d.deviceClass,
+  status:  (d) => ({ offline: 0, warning: 1, unknown: 2, online: 3 }[d.status] ?? 4),
+  seen:    (d) => (d.lastOnlineTime ? -new Date(d.lastOnlineTime).getTime() : 0),
+  fw:      (d) => (d.firmwareBehind ? 0 : 1),
+  alerts:  (d) => -(d.openAlerts ? d.openAlerts.total : 0),
+};
+
+function renderDevices() {
+  const q = S.q.trim().toLowerCase();
+  const rows = S.devices.filter((d) => {
+    if (S.cls !== "all" && d.status !== S.cls) return false;
+    if (!q) return true;
+    return [d.name, d.location, d.id, d.serialNo, d.deviceClass, d.city]
+      .some((v) => v && String(v).toLowerCase().includes(q));
+  });
+  const acc = SORTS[S.sort.key] || SORTS.status;
+  rows.sort((a, b) => {
+    const x = acc(a), y = acc(b);
+    return (x < y ? -1 : x > y ? 1 : 0) * S.sort.dir;
+  });
+  $("#dcount").textContent = S.devices.length;
+  const T = $("#dtable");
+  T.className = "";
+  if (rows.length === 0) { T.innerHTML = `<div class="empty">No devices match.</div>`; return; }
+  const shown = rows.slice(0, 200);
+  const th = (key, label) => {
+    const active = S.sort.key === key;
+    return `<th data-sort="${key}" aria-sort="${active ? (S.sort.dir === 1 ? "ascending" : "descending") : "none"}">` +
+      `${label}${active ? `<span class="dir">${S.sort.dir === 1 ? "&#9650;" : "&#9660;"}</span>` : ""}</th>`;
+  };
+  T.innerHTML =
+    `<div class="tblwrap"><table class="dt"><thead><tr>
+       ${th("name", "Device")}${th("class", "Class")}${th("status", "Status")}${th("seen", "Last seen")}
+       ${th("fw", "Firmware")}${th("alerts", "Alerts")}<th>Now playing</th></tr></thead><tbody>` +
+    shown.map((d) => {
+      const l = d.latest || {};
+      const playing = l.nowPlayingId
+        ? `Ad ${esc(String(l.nowPlayingId).slice(0, 8))}`
+        : l.showingLogo ? `<span class="v wn">Logo fallback</span>`
+        : l.isBlackScreen ? `<span class="v wn">Black screen</span>`
+        : `<span class="na">Not reported</span>`;
+      const al = d.openAlerts || {};
+      return `<tr class="r" data-id="${esc(d.id)}">
+        <td><b>${esc(d.name || d.id)}</b>${d.location ? `<div class="prov">${esc(d.location)}</div>` : ""}</td>
+        <td>${esc(d.deviceClass)}</td>
+        <td><span class="sdot ${esc(d.status)}"></span>${esc(d.status)}</td>
+        <td class="n">${ago(d.lastOnlineTime)}</td>
+        <td>${d.firmwareBehind ? `<span class="v wn">behind</span>` : `<span class="v ok">current</span>`}</td>
+        <td class="n">${al.total ? `<b>${al.total}</b>` : "&#8212;"}</td>
+        <td>${playing}</td></tr>`;
+    }).join("") + `</tbody></table></div>` +
+    (rows.length > shown.length
+      ? `<div class="pg">Showing ${shown.length} of ${rows.length} matches &#8212; narrow the search to see the rest.</div>`
+      : `<div class="pg">${rows.length} device(s)</div>`);
+  T.querySelectorAll("tr.r").forEach((r) =>
+    r.addEventListener("click", () => openDevice(r.dataset.id)));
+  T.querySelectorAll("th[data-sort]").forEach((h) =>
+    h.addEventListener("click", () => {
+      const key = h.dataset.sort;
+      if (S.sort.key === key) S.sort.dir = -S.sort.dir;
+      else S.sort = { key, dir: 1 };
+      renderDevices();
+    }));
+}
+
+/* ===================================================================
+   DEVICE DRAWER -- one click from any alert or row
+   =================================================================== */
+const DTABS = [["overview", "&#128203; Overview"], ["network", "&#128246; Network"],
+               ["display", "&#128421; Display"], ["compliance", "&#128737; Compliance"]];
+
+async function openDevice(id) {
+  $("#scrim").classList.add("on");
+  $("#modal").classList.add("on");
+  $("#dnm").textContent = "Loading…";
+  $("#dbody").innerHTML =
+    `<div class="skel"><span class="sk wide"></span><span class="sk row"></span>` +
+    `<span class="sk row"></span><span class="sk line"></span></div>`;
+  $("#dtools").innerHTML = ""; $("#dmets").innerHTML = ""; $("#dtabs").innerHTML = "";
+  try {
+    const [detail, alerts, health, shot] = await Promise.all([
+      api("/api/devices/" + encodeURIComponent(id)),
+      api("/api/devices/" + encodeURIComponent(id) + "/alerts"),
+      // Presence history was served by the API and used by nothing — the one
+      // real time series we own, invisible. 24h in hourly buckets.
+      api("/api/devices/" + encodeURIComponent(id) + "/health?windowHours=24&bucketMinutes=60")
+        .catch(() => null),
+      api("/api/devices/" + encodeURIComponent(id) + "/screenshot/meta").catch(() => null),
+    ]);
+    S.dev = detail.data;
+    S.dev._alerts = alerts.data || [];
+    S.dev._health = health && health.data;
+    S.dev._shot = shot && shot.data;
+    S.dtab = "overview";
+    paintDevice();
+  } catch (e) {
+    $("#dbody").innerHTML = `<div class="empty">Could not load device: ${esc(e.message)}</div>`;
+  }
+}
+function closeDevice() {
+  $("#scrim").classList.remove("on"); $("#modal").classList.remove("on");
+}
+
+/* Commands the platform genuinely exposes vs. ones it does not. The disabled
+   ones carry the reason -- a greyed button with no explanation is worse than
+   no button, because the operator cannot tell whether it is us or the API. */
+/**
+ * The toolbar. Every enabled entry runs a real command; every disabled entry
+ * carries the reason it cannot. These were previously all decoration — enabled
+ * buttons with no handler, which is why "reboot doesn't work": there was nothing
+ * behind it.
+ */
+const TOOLS = [
+  { icon: "&#128300;", label: "Read settings", cmd: "ops_get_settings" },
+
+  { icon: "&#128230;", label: "Firmware info", cmd: "ops_get_firmware_info" },
+  { icon: "&#127916;", label: "Media files", cmd: "ops_get_media_files" },
+  // Verified rejected by the device, not by us: `get_presence` returned ERROR on
+  // a live V4, and an independent implementation records both it and
+  // `reboot_device` as "rejected_by_device" across the Spark fleet. Offering a
+  // button that the hardware refuses is the same lie as a button with no handler.
+  { icon: "&#128260;", label: "Reboot", why:
+      "Rejected by the device. get_presence and reboot_device both return ERROR on this fleet — the gateway accepts them and the hardware refuses." },
+  { icon: "&#128736;", label: "Set IP / DNS", why:
+      "No IP, subnet, gateway or DNS field exists anywhere in the API. ops_connect_to_network joins a WiFi SSID; it cannot set an address." },
+];
+
+/** Command result banner, shown inside the drawer. */
+function showCmdResult(html, kind) {
+  const el = $("#cmdout");
+  if (!el) return;
+  el.className = `banner ${kind === "bad" ? "bad" : "warn"}`;
+  el.innerHTML = html;
+  el.style.display = "";
+}
+
+async function runCommand(tool, extraParams) {
+  const id = S.dev && S.dev.id;
+  if (!id) return;
+
+  if (tool.risk === "disruptive") {
+    const name = S.dev.name || id;
+    if (!window.confirm(
+      `Reboot "${name}" now?\n\n` +
+      `This is a real command to real hardware. The device will drop offline for ` +
+      `roughly a minute and whatever is on screen will disappear while it restarts.`
+    )) return;
+  }
+
+  showCmdResult(`<span>&#8987;</span><span>Sending <b>${esc(tool.label)}</b>&#8230; ` +
+    `commands are synchronous and can take ~10 s.</span>`, "warn");
+  try {
+    const res = await fetch(`/api/devices/${encodeURIComponent(id)}/command`, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...(TOKEN ? { authorization: "Bearer " + TOKEN } : {}) },
+      body: JSON.stringify({
+        command: tool.cmd,
+        ...(tool.risk ? { confirm: true } : {}),
+        ...(extraParams ? { params: extraParams } : {}),
+      }),
+    });
+    const body = await res.json();
+    const d = body.data || body;
+
+    if (!res.ok) {
+      showCmdResult(`<span>&#9888;&#65039;</span><span><b>${esc(tool.label)} failed.</b> ` +
+        `${esc(d.message || d.error || res.status)}</span>`, "bad");
+      return;
+    }
+    // A 200 with a non-SUCCESS response_code is still a failure — the device
+    // answered the gateway, not the command.
+    if (!d.ok) {
+      showCmdResult(`<span>&#9888;&#65039;</span><span><b>${esc(tool.label)}: ` +
+        `${esc(d.responseCode)}</b> after ${d.durationMs} ms. The gateway accepted the ` +
+        `request; the device did not complete it.</span>`, "bad");
+      return;
+    }
+    showCmdResult(`<span>&#9989;</span><span><b>${esc(tool.label)} succeeded</b> in ` +
+      `${d.durationMs} ms${Object.keys(d.sentParams || {}).length
+        ? ` &#183; sent <code>${esc(JSON.stringify(d.sentParams))}</code>` : ""}.` +
+      `${tool.cmd === "ops_get_settings" ? " Reloading device detail&#8230;" : ""}</span>`, "warn");
+    if (tool.cmd === "ops_get_settings") {
+      setTimeout(() => openDevice(id), 700);
+      load();
+    }
+  } catch (e) {
+    showCmdResult(`<span>&#9888;&#65039;</span><span><b>${esc(tool.label)} failed.</b> ` +
+      `${esc(e.message)}</span>`, "bad");
+  }
+}
+
+/**
+ * A runtime metric tile. Three states: `loading` (read in flight), `ok` (a live
+ * value, with a proportion bar), `na` (the device could not report it — shown as
+ * a reason, never as zero).
+ */
+function runtimeTile(label, state, valueText, valueNum, naReason, sub) {
+  if (state === "loading") {
+    return `<div class="met"><div class="v" style="color:var(--tx-3)">&#8230;</div>
+      <div class="k">${label}</div><div class="why">reading from device&#8230;</div></div>`;
+  }
+  if (state === "na") {
+    return `<div class="met na"><div class="v">&#8212;</div><div class="k">${label}</div>
+      <div class="why">${esc(naReason || "not reported")}</div></div>`;
+  }
+  const pct = typeof valueNum === "number" ? Math.max(0, Math.min(100, valueNum)) : 0;
+  const col = pct >= 85 ? "var(--red)" : pct >= 65 ? "var(--amber)" : "var(--green)";
+  return `<div class="met"><div class="v" style="color:${col}">${esc(valueText)}</div>
+    <div class="k">${label}</div>
+    <div class="tr"><i style="width:${pct}%;background:${col}"></i></div>
+    ${sub ? `<div class="why">${esc(sub)}</div>` : ""}</div>`;
+}
+
+/**
+ * Read live runtime telemetry for the open device and repaint the tiles.
+ *
+ * Slow lane: ~4-5 s of device commands (docs/16). Fired once per drawer open;
+ * the result is cached on S.dev so tab switches don't re-command. A device that
+ * closes before the read returns is simply ignored.
+ */
+async function loadTelemetry(id) {
+  if (!S.dev || S.dev.id !== id) return;
+  S.dev._telLoading = true;                       // suppress re-trigger during the read
+  const res = await api("/api/devices/" + encodeURIComponent(id) + "/telemetry").catch(() => null);
+  if (!S.dev || S.dev.id !== id) return;          // drawer changed underneath us
+  // On success, the data; on failure, an empty object so tiles resolve to "na"
+  // rather than spinning forever or re-triggering the read.
+  S.dev._telemetry = (res && res.data) || {};
+  S.dev._telLoading = false;
+  if (S.dtab === "overview" || S.dtab === "network") paintDevice();
+}
+
+function paintDevice() {
+  const d = S.dev;
+  $("#dnm").textContent = d.name || d.id;
+  $("#dst").textContent = String(d.status || "").toUpperCase();
+  $("#dst").className = "tag " + (d.status === "online" ? "on" : "");
+  $("#dcls").textContent = d.productName || d.deviceClass || "—";
+  $("#dloc").innerHTML = d.location
+    ? `&#128205; ${esc(d.location)}` : `<span class="na">Location not reported</span>`;
+
+  $("#dtools").innerHTML = TOOLS.map((tool, i) =>
+    tool.cmd
+      ? `<button class="btn${tool.risk === "disruptive" ? "" : ""}" data-tool="${i}"
+           ${tool.risk === "disruptive" ? 'style="border-color:var(--amber-bd);color:var(--amber)"' : ""}
+           >${tool.icon} ${tool.label}</button>`
+      : `<button class="btn" disabled title="${esc(tool.why)}">${tool.icon} ${tool.label}</button>`
+    ).join("") +
+    `<span style="margin-left:auto;font-size:11.5px;color:var(--tx-3)">
+       ${d.settingsAgeSeconds == null
+         ? "Config never read"
+         : "Config read " + dur(d.settingsAgeSeconds) + " ago"}</span>`;
+  $("#dtools").querySelectorAll("[data-tool]").forEach((b) =>
+    b.addEventListener("click", () => runCommand(TOOLS[Number(b.dataset.tool)])));
+
+  /* Metric tiles. Compliance is real; the hardware metrics are not, and each
+     dead tile says why instead of showing a zero. */
+  const c = d.compliance;
+  const tiles = [];
+  // The caption must not read as a contradiction. "100%" beside "17 of 19 pass"
+  // looks like a bug unless it says WHY the other two are excluded: policy gaps
+  // are deliberately scored apart from drift.
+  const policyCount = c ? (c.drift || []).filter((x) => x.kind === "policy").length : 0;
+  const caption = c
+    ? (policyCount > 0
+        ? `${c.checksPassed} of ${c.checksTotal} pass &#183; ${policyCount} policy gap${policyCount > 1 ? "s" : ""} scored separately`
+        : `${c.checksPassed} of ${c.checksTotal} checks pass`) +
+      (c.checksNotApplicable ? ` &#183; ${c.checksNotApplicable} n/a` : "")
+    : "";
+  tiles.push(c
+    ? `<div class="met"><div class="v" style="color:${c.score >= 95 ? "var(--green)" : c.score >= 75 ? "var(--amber)" : "var(--red)"}">${c.score}%</div>
+         <div class="k">Drift score</div>
+         <div class="tr"><i style="width:${c.score}%;background:${c.score >= 95 ? "var(--green)" : "var(--amber)"}"></i></div>
+         <div class="why">${caption}</div></div>`
+    : `<div class="met na"><div class="v">&#8212;</div><div class="k">Drift score</div>
+         <div class="why">No configuration snapshot yet</div></div>`);
+  // Runtime tiles. These are read live from the device (demo_command slow lane)
+  // and start in a "reading…" state; loadTelemetry() fills them in. Temperature
+  // is the one that is genuinely unavailable — no verb returns it — so it stays
+  // a plain "not reported" rather than a live tile.
+  const tm = S.dev._telemetry;
+  tiles.push(runtimeTile("CPU load", tm ? (tm.cpuPercent == null ? "na" : "ok") : "loading",
+    tm && tm.cpuPercent != null ? tm.cpuPercent + "%" : null, tm && tm.cpuPercent,
+    "read_proc_stat not populated on this device"));
+  tiles.push(runtimeTile("RAM used", tm ? (tm.ramUsedPercent == null ? "na" : "ok") : "loading",
+    tm && tm.ramUsedPercent != null ? tm.ramUsedPercent + "%" : null, tm && tm.ramUsedPercent,
+    "meminfo not readable", tm && tm.ramTotalGb ? `of ${tm.ramTotalGb} GB` : ""));
+  tiles.push(runtimeTile("Storage used", tm ? (tm.storageUsedPercent == null ? "na" : "ok") : "loading",
+    tm && tm.storageUsedPercent != null ? tm.storageUsedPercent + "%" : null, tm && tm.storageUsedPercent,
+    "no readable storage path"));
+  tiles.push(`<div class="met na"><div class="v">&#8212;</div><div class="k">Temperature</div>
+    <div class="why">No temperature verb returns a value on this hardware</div></div>`);
+  $("#dmets").innerHTML = tiles.join("");
+  // Kick off the live read once per drawer open.
+  if (S.dev._telemetry === undefined && !S.dev._telLoading) loadTelemetry(d.id);
+
+  $("#dtabs").innerHTML = DTABS.map(([k, l]) =>
+    `<button data-t="${k}" aria-selected="${k === S.dtab}">${l}</button>`).join("");
+  $("#dtabs").querySelectorAll("button").forEach((b) =>
+    b.addEventListener("click", () => { S.dtab = b.dataset.t; paintDevice(); }));
+
+  $("#dbody").innerHTML =
+    ({ overview: tabOverview, network: tabNetwork, display: tabDisplay, compliance: tabCompliance })[S.dtab](d);
+  wireSliders();
+}
+
+/**
+ * 24 hours of presence as one glanceable strip. Absence of data renders as the
+ * neutral token, never as "offline" — an hour we did not observe is not an hour
+ * the device was down, and painting it red would manufacture an outage.
+ */
+function presenceTimeline(health) {
+  if (!health || !health.points || health.points.length === 0) {
+    return `<div class="prov">No presence history in the last 24 h — collection ` +
+           `may have just started.</div>`;
+  }
+  const byHour = new Map(health.points.map((pt) => [pt.bucket, pt]));
+  const cells = [];
+  const now = Date.now();
+  for (let h = 23; h >= 0; h--) {
+    const bucket = new Date(Math.floor((now - h * 3600_000) / 3600_000) * 3600_000);
+    const pt = byHour.get(bucket.toISOString());
+    let cls = "", label = "no data";
+    // Denominator is presence-carrying readings only. Metrics rows hold no
+    // presence field; counting them made fully-online hours render as partial.
+    const denom = pt ? (pt.presenceSamples ?? 0) : 0;
+    if (denom > 0) {
+      const ratio = pt.onlineSamples / denom;
+      cls = ratio >= 0.99 ? "on" : ratio <= 0.01 ? "off" : "mix";
+      label = `${pt.onlineSamples}/${denom} presence readings online`;
+    }
+    const hh = String(bucket.getHours()).padStart(2, "0");
+    cells.push(`<i class="${cls}" title="${hh}:00 — ${label}"></i>`);
+  }
+  return `<div class="ptl">${cells.join("")}</div>` +
+    `<div class="ptl-x"><span>24 h ago</span><span>now</span></div>`;
+}
+
+/**
+ * The actual last frame from the panel, dated.
+ *
+ * Never rendered bare: an undated or months-old capture presented as "the
+ * screen" is worse than no image, because it looks like proof.
+ */
+function screenEvidence(shot) {
+  if (!shot || !shot.available) {
+    return `<div class="kv"><span class="v na">No capture available</span></div>` +
+      `<div class="prov">${esc((shot && shot.reason) || "the CDN has no object for this device")}</div>`;
+  }
+  const when = shot.lastModified ? new Date(shot.lastModified).toLocaleString() : "unknown";
+  return `<div class="shotbig ${shot.stale ? "stale" : ""}">
+      <img src="${esc(shot.url)}" alt="Last screen capture" decoding="async">
+    </div>
+    <div class="kv" style="margin-top:8px"><span class="k">Captured</span>
+      <span class="v ${shot.stale ? "wn" : "ok"}">${shortAge(shot.ageSeconds)} ago</span></div>
+    <div class="kv"><span class="k">Timestamp</span><span class="v">${esc(when)}</span></div>
+    ${shot.stale
+      ? `<div class="note"><b>This frame is history, not evidence.</b> It is older than
+          an hour, and devices push every 15&#8211;22 minutes, so it cannot describe what
+          is on screen now. Shown dimmed and dated rather than withheld, because a
+          months-old capture is still the last thing we know.</div>`
+      : `<div class="note na">Captured within the last hour, so this is a fair
+          representation of the current screen.</div>`}`;
+}
+
+const kv = (k, v, cls) =>
+  `<div class="kv"><span class="k">${k}</span><span class="v ${cls || ""}">${v}</span></div>`;
+const na = (k, why) =>
+  `<div class="kv"><span class="k">${k}</span><span class="v na">${why || "Not reported"}</span></div>`;
+
+function tabOverview(d) {
+  const l = d.latest || {};
+  const alerts = d._alerts || [];
+  return `<div class="two"><div>
+      <div class="grp"><p class="glb">&#128444; Screen evidence</p>
+        ${screenEvidence(d._shot)}
+      </div>
+      <div class="grp"><p class="glb">Presence &#8212; last 24 h</p>
+        ${presenceTimeline(d._health)}
+      </div>
+      <div class="grp"><p class="glb">Device info</p>
+        ${kv("Device id", esc(d.id))}
+        ${d.serialNo ? kv("Serial", esc(d.serialNo)) : na("Serial")}
+        ${d.productName ? kv("Product", esc(d.productName)) : na("Product")}
+        ${kv("Class", esc(d.deviceClass))}
+        ${d.timezone ? kv("Timezone", esc(d.timezone)) : na("Timezone")}
+        ${d.orientation ? kv("Orientation", esc(d.orientation)) : na("Orientation")}
+        ${d.screenWidth ? kv("Screen", `${d.screenWidth} &#215; ${d.screenHeight}`) : na("Screen size")}
+        ${kv("Last seen", ago(d.lastOnlineTime))}
+        ${kv("Reading age", l.observedAt ? ago(l.observedAt) : "no readings")}
+        ${l.isScreenOn == null ? na("Screen on") : kv("Screen on", l.isScreenOn ? "Yes" : "No", l.isScreenOn ? "ok" : "wn")}
+        ${l.isBlackScreen == null ? na("Black screen") : kv("Black screen", l.isBlackScreen ? "Yes" : "No", l.isBlackScreen ? "wn" : "ok")}
+        ${l.showingLogo == null ? na("Showing logo") : kv("Showing logo", l.showingLogo ? "Yes" : "No", l.showingLogo ? "wn" : "ok")}
+        ${na("Uptime", "No uptime field exists")}
+      </div>
+    </div><div>
+      <div class="grp"><p class="glb">Component versions
+        <span style="font-weight:400;text-transform:none;letter-spacing:0;color:var(--tx-3)">&#8212; richer than one firmware field</span></p>
+        ${(d.components || []).length === 0
+          ? `<div class="kv"><span class="v na">No component versions reported</span></div>`
+          : d.components.map((c) => kv(esc(c.name.replace(/_version$/, "")),
+              c.behind ? `${esc(c.current)} &#8594; ${esc(c.latest)}` : `${esc(c.current)} &#10003;`,
+              c.behind ? "wn" : "ok")).join("")}
+      </div>
+      <div class="grp"><p class="glb">Open alerts (${alerts.filter((a) => !a.resolvedAt).length})</p>
+        ${alerts.length === 0
+          ? `<div class="kv"><span class="v ok">None</span></div>`
+          : alerts.slice(0, 6).map((a) => kv(esc(a.title),
+              `${esc(a.severity)} &#183; ${ago(a.lastFiredAt || a.openedAt)}`,
+              a.severity === "critical" ? "wn" : "")).join("")}
+      </div>
+      <div class="grp"><p class="glb">Tenant metafields
+        <span style="font-weight:400;text-transform:none;letter-spacing:0;color:var(--tx-3)">&#8212; set by the tenant, not the platform</span></p>
+        ${Object.keys(d.metafields || {}).length === 0
+          ? `<div class="kv"><span class="v na">None recorded</span></div>`
+          : Object.entries(d.metafields).map(([k, v]) =>
+              kv(esc(k), /^https?:\/\//.test(String(v))
+                ? `<a href="${esc(v)}" target="_blank" rel="noopener noreferrer">link</a>`
+                : esc(v))).join("")}
+      </div>
+      <div class="note na"><b>No performance chart.</b> A CPU / temperature / RAM
+        time series needs those metrics to exist. Swept all 107 read operations
+        and 41 telemetry fields the platform returns: none of them are present.</div>
+    </div></div>`;
+}
+
+/**
+ * Network.
+ *
+ * The platform reports no RSSI, SSID, IP, DNS, NTP or packet-loss field, so
+ * there is nothing to show directly and this tab used to be two lines. What we
+ * CAN do is derive real network behaviour from the presence history we collect
+ * ourselves: availability over the window, how many times the device dropped,
+ * and how much of the window we actually observed. That is a genuine
+ * connection-quality signal built from the one time series we own.
+ */
+const WINDOW_HOURS = 24;
+
+function networkDerived(health) {
+  // Index the returned buckets by hour, then walk the FULL 24-hour grid. The
+  // endpoint only returns hours that have rows, so iterating the array alone
+  // makes 3 observed hours look like continuous coverage — the unobserved 21
+  // are simply absent, not marked. Coverage has to be measured against the
+  // window, never against the data that happens to exist.
+  const byHour = new Map(
+    (health && health.points ? health.points : []).map((pt) => [pt.bucket, pt]),
+  );
+  let drops = 0, observedHours = 0, onlineHours = 0, longestGapH = 0, gap = 0;
+  let prev = null;
+  const now = Date.now();
+  for (let h = WINDOW_HOURS - 1; h >= 0; h--) {
+    const bucket = new Date(Math.floor((now - h * 3600_000) / 3600_000) * 3600_000);
+    const pt = byHour.get(bucket.toISOString());
+    // Presence-carrying readings only; metrics rows hold no presence field.
+    const denom = pt ? (pt.presenceSamples ?? 0) : 0;
+    if (denom === 0) {
+      gap += 1;
+      longestGapH = Math.max(longestGapH, gap);
+      prev = null;              // a gap breaks the chain; do not infer a drop across it
+      continue;
+    }
+    gap = 0;
+    observedHours += 1;
+    const up = pt.onlineSamples / denom >= 0.5;
+    if (up) onlineHours += 1;
+    if (prev === true && !up) drops += 1;
+    prev = up;
+  }
+  return {
+    drops, observedHours, longestGapH, windowHours: WINDOW_HOURS,
+    availability: observedHours > 0 ? Math.round((onlineHours / observedHours) * 100) : null,
+  };
+}
+
+const humanBytes = (n) => {
+  if (!Number.isFinite(n) || n <= 0) return "0";
+  const u = ["B", "KB", "MB", "GB", "TB"];
+  const i = Math.min(u.length - 1, Math.floor(Math.log(n) / Math.log(1024)));
+  return `${(n / 1024 ** i).toFixed(i === 0 ? 0 : 1)} ${u[i]}`;
+};
+
+/**
+ * Daily rx/tx as a bar chart.
+ *
+ * This is the only structured time series the platform exposes, and we reported
+ * it as inaccessible for weeks because we sent `x-tenant_id` — a header
+ * canvas-status ignores — and read the resulting "no tenant context" 403 as a
+ * permissions wall. It returns 30 days of daily counters for essentially every
+ * device.
+ *
+ * Bars are scaled to the device's own peak, so the shape shows that device's
+ * pattern rather than the fleet's. Days with no row render as a flat stub: an
+ * unreported day is not a zero-traffic day.
+ */
+function dataUsageChart(rows) {
+  if (!rows || rows.length === 0) {
+    return `<div class="kv"><span class="v na">No usage rows for this device</span></div>` +
+      `<div class="prov">The poller runs daily; a device added today has nothing yet.</div>`;
+  }
+  const totals = rows.map((r) => r.rxBytes + r.txBytes);
+  const peak = Math.max(...totals);
+  const rx = rows.reduce((a, r) => a + r.rxBytes, 0);
+  const tx = rows.reduce((a, r) => a + r.txBytes, 0);
+  const bars = rows.map((r, i) => {
+    const tot = totals[i];
+    const h = peak > 0 ? Math.max(3, Math.round((tot / peak) * 100)) : 0;
+    const cls = tot === 0 ? "zero" : tot === peak ? "peak" : "";
+    return `<i class="${cls}" style="height:${h}%"
+      title="${esc(r.date)} — down ${humanBytes(r.rxBytes)}, up ${humanBytes(r.txBytes)}"></i>`;
+  }).join("");
+  return `<div class="usage">${bars}</div>
+    <div class="ptl-x"><span>${esc(rows[0].date)}</span><span>${esc(rows[rows.length - 1].date)}</span></div>
+    ${kv("Downloaded (30 d)", humanBytes(rx))}
+    ${kv("Uploaded (30 d)", humanBytes(tx))}
+    ${kv("Busiest day", humanBytes(peak))}
+    ${kv("Days reported", `${rows.length} of 30`, rows.length >= 28 ? "ok" : "wn")}
+    <div class="prov">Scaled to this device's own peak. Amber marks the busiest day.
+      A flat stub is a day with no row, which is not the same as a quiet day.</div>`;
+}
+
+function tabNetwork(d) {
+  const l = d.latest || {};
+  const st = d.settings || {};
+  const n = networkDerived(d._health);
+  const tm = d._telemetry;
+  // Live signal/NTP read from the device (demo_command). undefined = still loading.
+  const signalRow = tm === undefined
+    ? kv("Signal (RSSI)", "reading&#8230;")
+    : (tm.rssiDbm == null
+        ? na("Signal (RSSI)", "wifi_strength not readable")
+        : tm.rssiDbm <= -110
+          ? kv("Signal (RSSI)", `${tm.rssiDbm} dBm — no wireless link (Ethernet or radio off)`, "na")
+          : kv("Signal (RSSI)", `${tm.rssiDbm} dBm`,
+               tm.rssiDbm >= -60 ? "ok" : tm.rssiDbm >= -75 ? "wn" : "bd"));
+  const ntpRow = tm === undefined
+    ? kv("NTP offset", "reading&#8230;")
+    : (tm.ntpOffsetMs == null
+        ? na("NTP offset", "chrony stats not returned")
+        : kv("NTP offset", `${tm.ntpOffsetMs} ms${tm.ntpServer ? ` · ${esc(tm.ntpServer)}` : ""}`,
+             Math.abs(tm.ntpOffsetMs) < 100 ? "ok" : "wn"));
+  return `<div class="two"><div>
+      <div class="grp"><p class="glb">&#128246; Connection</p>
+        ${kv("Presence now", esc(l.presence || d.status), l.presence === "online" ? "ok" : "wn")}
+        ${signalRow}
+        ${ntpRow}
+        ${kv("Last online", ago(d.lastOnlineTime))}
+        ${kv("Last reading", l.observedAt ? ago(l.observedAt) : "never")}
+        ${n.availability === null
+          ? na("Availability (24 h)", "no presence readings in the window")
+          : kv("Availability (24 h)", `${n.availability}% of ${n.observedHours} observed hour(s)`,
+               n.availability >= 99 ? "ok" : n.availability >= 90 ? "wn" : "bd")}
+        ${kv("Drops (24 h)", n.drops === 0 ? "none observed" : String(n.drops),
+             n.drops === 0 ? "ok" : "wn")}
+        ${kv("Observed", `${n.observedHours} of ${n.windowHours} hours`,
+             n.observedHours >= n.windowHours - 1 ? "ok" : "wn")}
+        ${n.longestGapH > 0
+          ? kv("Longest unobserved gap", `${n.longestGapH} h`, "wn")
+          : kv("Gaps", "none", "ok")}
+        <div class="prov">Derived from our own presence history, not from a platform
+          field &#8212; there is no RSSI, SSID or packet-loss metric to read. Availability
+          is a share of the hours we <em>observed</em>, so read it next to the observed
+          count &#8212; 100% of a handful of hours is not 100% of a day.</div>
+      </div>
+      <div class="grp"><p class="glb">&#128225; Addressing &amp; transport</p>
+        ${kv("Canvas id", esc(d.id))}
+        ${d.serialNo ? kv("Serial", esc(d.serialNo)) : na("Serial")}
+        ${kv("Command transport", "XMPP via sync_command")}
+        ${kv("Command reachable", l.presence === "online"
+              ? "presence says yes &#8212; use Ping presence to prove it"
+              : "device is offline", l.presence === "online" ? "ok" : "wn")}
+        <div class="prov">Online does not imply reachable: 2 of 5 AllSee units listed
+          online returned TIME_OUT to a real command.</div>
+      </div>
+      <div class="grp"><p class="glb">&#128200; Daily network usage &#8212; last 30 days</p>
+        ${dataUsageChart(d.dataUsage)}
+      </div>
+      <div class="grp"><p class="glb">&#128260; Content delivery</p>
+        ${l.downloading == null
+          ? na("Downloading now", "not reported")
+          : kv("Downloading now", l.downloading ? "Yes" : "No", l.downloading ? "wn" : "ok")}
+        ${l.pingQuality
+          ? kv("ping_quality", `${esc(l.pingQuality)} &#8212; constant fleet-wide, no information`, "na")
+          : na("ping_quality", "not reported")}
+      </div>
+      <div class="grp"><p class="glb">&#127760; IP configuration</p>
+        ${na("IP / subnet / gateway / DNS", "No such field anywhere in 107 operations")}
+        <div class="prov">ops_connect_to_network joins a WiFi SSID; it cannot set a static address.</div>
+      </div>
+    </div><div>
+      <div class="grp"><p class="glb">&#128268; Inputs</p>
+        ${st.available_sources
+          ? kv("Available sources", esc([].concat(st.available_sources).join(" &#183; ")))
+          : na("Available sources", "Not in the cached settings")}
+        ${st.current_source ? kv("Active source", esc(st.current_source), "ok") : na("Active source")}
+        ${"cec_enabled" in st
+          ? kv("HDMI-CEC", st.cec_enabled ? "Enabled" : "Disabled", st.cec_enabled ? "wn" : "ok")
+          : na("HDMI-CEC", "Only TCL panels report this")}
+      </div>
+      <div class="grp"><p class="glb">&#128225; Readable via demo_command (not yet surfaced here)</p>
+        ${["IP address (wifi_ip)", "SSID scan (ssid_scan_json)",
+           "Static IP / DNS config (set_ethernet_settings)"]
+          .map((x) => `<div class="gaprow"><span class="gd" style="background:var(--blue)"></span>
+            <span><span class="gn">${x}</span></span></div>`).join("")}
+      </div>
+      <div class="grp"><p class="glb">&#128683; Genuinely not available</p>
+        ${["Packet loss / jitter", "Aggregated fleet telemetry (per-device only)"]
+          .map((x) => `<div class="gaprow"><span class="gd"></span>
+            <span><span class="gn">${x}</span></span></div>`).join("")}
+      </div>
+      <div class="note"><b>Signal and NTP are read live from the device</b> (top-left),
+        which means a venue network fault can now be told from a device fault: RSSI,
+        NTP offset and reachability are all readable per device. This is the slow lane
+        &#8212; one command each &#8212; not a dashboard-cadence feed.</div>
+    </div></div>`;
+}
+
+function tabDisplay(d) {
+  const st = d.settings || {};
+  const has = (k) => k in st && st[k] !== null && st[k] !== "unavailable";
+  const slider = (label, id, val, min, max, note) =>
+    `<div class="sld"><div class="row"><label>${label}</label>
+       <input type="range" min="${min}" max="${max}" value="${val}" data-o="${id}">
+       <span class="n" id="n-${id}">${val}</span></div>
+       ${note ? `<div class="prov">${note}</div>` : ""}</div>`;
+
+  if (Object.keys(st).length === 0) {
+    return `<div class="note na"><b>No configuration snapshot for this device.</b>
+      Settings come from a per-device <code>ops_get_settings</code> command (~10 s each,
+      online devices only), not from a bulk poll. This device has not answered one yet.</div>`;
+  }
+  const rgb = st.color_table_offsets || {};
+  const volPct = (typeof st.volume === "number" && typeof st.max_volume === "number" && st.max_volume > 0)
+    ? Math.round((st.volume / st.max_volume) * 100) : null;
+  // An empty available_audio_outputs means the panel has no speaker at all.
+  // Every Canvas unit in this fleet reports [] while still carrying a volume
+  // number — reporting that as a level is how you get asked why a screen with
+  // no speaker is at 73% volume.
+  const hasAudio = Array.isArray(st.available_audio_outputs)
+    && st.available_audio_outputs.length > 0;
+
+  return `<div class="two"><div>
+      <div class="grp"><p class="glb">&#9728;&#65039; Brightness
+        <button class="btn sm" id="brightLive" style="margin-left:auto;font-weight:600">&#9210; Live</button>
+      </p>
+        ${has("brightness")
+          ? slider("Brightness %", "b", Math.max(1, Math.round((Number(st.brightness) / 255) * 100)), 1, 100,
+              "Drag to set. In <b>Live</b> mode it writes to the device as you drag " +
+              "and shows the value the device reports back &#8212; like the native Videri UI. " +
+              "Off Live, use Apply for the safe verify-and-rollback write.")
+          : na("Brightness")}
+        <div class="kv"><span class="k">On device now</span>
+          <span class="v" id="brightActual">${has("brightness")
+            ? Math.max(1, Math.round((Number(st.brightness) / 255) * 100)) + "%" : "&#8212;"}</span></div>
+        ${has("current_brightness")
+          ? kv("Actual (current_brightness)", esc(st.current_brightness),
+               st.current_brightness === st.brightness ? "ok" : "wn")
+          : ""}
+        ${has("auto_brightness_enabled")
+          ? kv("Auto-brightness", st.auto_brightness_enabled ? "On" : "Off",
+               st.auto_brightness_enabled ? "wn" : "ok") : ""}
+        ${has("brightness_schedule_enabled")
+          ? kv("Brightness schedule", st.brightness_schedule_enabled ? "On" : "Off") : ""}
+      </div>
+      <div class="grp"><p class="glb">&#127912; Colour</p>
+        ${has("color_saturation") ? slider("Saturation", "s", st.color_saturation, 0, 100, "") : na("Saturation")}
+        ${["r", "g", "b"].map((ch) => (ch in rgb)
+          ? slider(ch.toUpperCase() + " offset", "rgb" + ch, rgb[ch], -20, 20, "")
+          : "").join("")}
+        <div class="note na" style="margin-top:8px"><b>No picture mode, contrast,
+          sharpness or colour temperature.</b> <code>ops_get_settings</code> returns
+          brightness, saturation and RGB offsets only.</div>
+      </div>
+    </div><div>
+      <div class="grp"><p class="glb">&#128264; Audio</p>
+        ${!hasAudio
+          ? `<div class="kv"><span class="k">Audio hardware</span>
+               <span class="v na">None &#8212; this device reports no outputs</span></div>
+             <div class="note na"><b>Volume is not applicable to this device.</b>
+               <code>available_audio_outputs</code> is an empty array, so the panel has
+               no speaker. The firmware still reports
+               <code>volume: ${esc(st.volume)}</code> of <code>${esc(st.max_volume)}</code>,
+               but that is vestigial state with nothing to drive &#8212; showing it as a
+               level would invite someone to "fix" a speaker that does not exist.
+               All 94 Canvas units in this fleet are in this state.</div>`
+          : `${has("volume")
+              ? kv("Volume", `${st.volume}${volPct != null ? ` of ${st.max_volume} (${volPct}%)` : ""}`,
+                   volPct != null && volPct <= 10 ? "ok" : "wn")
+              : na("Volume", "Not reported by this hardware")}
+             ${has("current_audio_output")
+               ? kv("Output", esc(st.current_audio_output)) : na("Audio output")}
+             ${kv("Available outputs", esc([].concat(st.available_audio_outputs).join(" &#183; ")))}
+             <div class="prov">Scale is per-device: max_volume is 100 on TCL and 15 on
+               most Canvas units, so the raw number alone means nothing.</div>`}
+      </div>
+      <div class="grp"><p class="glb">&#128421; Mode</p>
+        ${has("res_w") ? kv("Resolution", `${st.res_w} &#215; ${st.res_h}`) : na("Resolution")}
+        ${has("framerate") ? kv("Framerate", Math.round(st.framerate * 100) / 100 + " Hz") : na("Framerate")}
+        ${has("default_scale_type") ? kv("Scaling", esc(st.default_scale_type)) : ""}
+      </div>
+      <div class="grp"><p class="glb">&#128197; Power schedule</p>
+        ${has("auto_on_off_enabled")
+          ? kv("Schedule enabled", st.auto_on_off_enabled ? "Yes" : "No",
+               st.auto_on_off_enabled ? "ok" : "wn") : na("Schedule enabled")}
+        ${has("turn_on_time") ? kv("Turns on", esc(st.turn_on_time)) : na("Turns on")}
+        ${has("turn_off_time") ? kv("Turns off", esc(st.turn_off_time)) : na("Turns off")}
+        ${has("daily_reboot_enabled")
+          ? kv("Nightly reboot", st.daily_reboot_enabled ? "On " + esc(st.daily_reboot_time || "") : "Off",
+               st.daily_reboot_enabled ? "ok" : "wn") : ""}
+        ${has("timezone") ? kv("Timezone", esc(st.timezone)) : na("Timezone")}
+      </div>
+      <div class="grp" style="margin-top:6px">
+        <button class="btn pri" id="applybtn" disabled>No changes to apply</button>
+        <button class="btn sm" id="revertbtn" style="margin-left:7px">Reset sliders</button>
+        <div class="prov" style="margin-top:8px">Brightness and saturation are
+          writable. <code>ops_set_settings</code> is undocumented &#8212; the spec types
+          <code>command_params</code> as a free-form object whose only examples are asset
+          operations &#8212; so the field names below are inferred from what
+          <code>ops_get_settings</code> returns. You will see the exact JSON and confirm
+          before anything is sent, and the device is re-read afterwards so the panel
+          shows what it actually holds rather than what we asked for.</div>
+      </div>
+    </div></div>`;
+}
+
+function tabCompliance(d) {
+  const c = d.compliance;
+  if (!c) {
+    return `<div class="note na"><b>Not scored.</b> Compliance needs a configuration
+      snapshot, and this device has not returned one. 140 of 250 devices are in this
+      state &#8212; they are excluded from the fleet average rather than counted as failures.</div>`;
+  }
+  const drift = c.drift || [];
+  const policy = drift.filter((x) => x.kind === "policy");
+  const calib = drift.filter((x) => x.kind !== "policy");
+  const row = (x) => `<div class="kv"><span class="k">${esc(x.label || x.field)}</span>
+    <span class="v ${x.verdict === "drift" ? "wn" : "na"}">${esc(x.actual)}
+    &#8212; expected ${esc(x.expected)}</span></div>`;
+  return `<div class="two"><div>
+      <div class="grp"><p class="glb">Configuration drift (${calib.length})</p>
+        ${calib.length ? calib.map(row).join("")
+          : `<div class="kv"><span class="v ok">No drift &#8212; every calibrated check passes</span></div>`}
+      </div>
+      <div class="grp"><p class="glb">Policy gaps (${policy.length})</p>
+        ${policy.length ? policy.map(row).join("")
+          : `<div class="kv"><span class="v ok">None</span></div>`}
+      </div>
+    </div><div>
+      <div class="grp"><p class="glb">How this score works</p>
+        ${kv("Template", esc(c.templateId))}
+        ${kv("Checks scored", c.checksTotal)}
+        ${kv("Passed", c.checksPassed, "ok")}
+        ${kv("Not applicable", c.checksNotApplicable, "na")}
+        ${kv("Drift score", c.score + "%", c.score >= 95 ? "ok" : "wn")}
+        ${kv("Config age", dur(c.settingsAgeSeconds))}
+        ${kv("Evaluated", ago(c.evaluatedAt))}
+      </div>
+      <div class="note">Drift and policy are scored <b>separately</b> on purpose.
+        Combined they produced 61% and flagged 109 of 110 devices &#8212; a number
+        nobody reads twice. Drift is "this device moved from its calibrated norm";
+        policy is "we never adopted this setting fleet-wide".</div>
+      <div class="note na">Checks for hardware a device does not have are
+        <b>excluded, not failed</b>. A Canvas reports no HDMI-CEC, so it is never
+        penalised for it.</div>
+    </div></div>`;
+}
+
+/**
+ * Slider handle -> the settings field it writes.
+ *
+ * Only these two. The colour-offset sliders (r/g/b) are deliberately absent:
+ * they live inside a nested `color_table_offsets` object, so the write shape for
+ * them is a second inference on top of the first, and getting it wrong miscolours
+ * a panel in a way that is not obvious from a dashboard.
+ */
+const SLIDER_FIELD = { b: "brightnessPercent" };
+
+/**
+ * Sliders move freely; committing is a separate, deliberate act.
+ *
+ * The payload shape for ops_set_settings is inferred from what ops_get_settings
+ * RETURNS, because the spec documents nothing. So: dial freely, see the exact
+ * JSON, confirm against the named device, then the device is re-read so the UI
+ * reflects reality rather than intent.
+ */
+/** Live-brightness state: armed by the "Live" toggle; debounced writes while dragging. */
+const BRIGHT = { live: false, timer: null, inflight: false, queued: null };
+
+function wireSliders() {
+  const body = $("#dbody");
+  const apply = $("#applybtn");
+  const revert = $("#revertbtn");
+  const liveBtn = $("#brightLive");
+  const actual = $("#brightActual");
+  const pending = {};
+  const original = {};
+  BRIGHT.live = false; // fresh per drawer open
+
+  /** One live write: fast set + read-back; update the "on device now" readout. */
+  async function liveWrite(pct) {
+    const id = S.dev && S.dev.id;
+    if (id == null) return;
+    if (BRIGHT.inflight) { BRIGHT.queued = pct; return; } // coalesce
+    BRIGHT.inflight = true;
+    try {
+      const res = await fetch("/api/devices/" + encodeURIComponent(id) + "/brightness", {
+        method: "POST",
+        headers: { "content-type": "application/json", ...(TOKEN ? { authorization: "Bearer " + TOKEN } : {}) },
+        body: JSON.stringify({ brightnessPercent: pct, confirm: true, mode: "live" }),
+      });
+      const b = await res.json();
+      const d = b.data || b;
+      if (actual) {
+        actual.textContent = d.observedPercent != null ? d.observedPercent + "%" : "no read-back";
+        actual.className = "v " + (d.applied ? "ok" : "wn");
+      }
+    } catch {
+      if (actual) { actual.textContent = "write failed"; actual.className = "v bd"; }
+    } finally {
+      BRIGHT.inflight = false;
+      // Drain the last value the user landed on while a write was in flight.
+      if (BRIGHT.queued != null) { const q = BRIGHT.queued; BRIGHT.queued = null; liveWrite(q); }
+    }
+  }
+
+  if (liveBtn) {
+    liveBtn.addEventListener("click", () => {
+      if (!BRIGHT.live) {
+        const name = (S.dev && (S.dev.name || S.dev.id)) || "this device";
+        if (!window.confirm(
+          'Arm LIVE brightness on "' + name + '"?\n\n' +
+          "While live, moving the slider writes to the device as you drag. Each " +
+          "value is applied immediately (no rollback). Turn off Live to stop.")) return;
+      }
+      BRIGHT.live = !BRIGHT.live;
+      liveBtn.textContent = BRIGHT.live ? "■ Live on" : "⏺ Live";
+      liveBtn.classList.toggle("pri", BRIGHT.live);
+      if (apply) apply.style.display = BRIGHT.live ? "none" : "";
+    });
+  }
+
+  body.querySelectorAll("input[type=range]").forEach((r) => {
+    const n = $("#n-" + r.dataset.o);
+    original[r.dataset.o] = r.value;
+    r.addEventListener("input", () => {
+      if (n) n.textContent = r.value;
+      const field = SLIDER_FIELD[r.dataset.o];
+      if (!field) return;
+
+      // LIVE mode (brightness only): debounce ~250ms, then write immediately.
+      if (BRIGHT.live && field === "brightnessPercent") {
+        if (BRIGHT.timer) clearTimeout(BRIGHT.timer);
+        const pct = Number(r.value);
+        BRIGHT.timer = setTimeout(() => liveWrite(pct), 250);
+        return;
+      }
+
+      if (!apply) return;
+      // Returning a slider to its starting value should clear it from the write,
+      // not queue a no-op change.
+      if (r.value === original[r.dataset.o]) delete pending[field];
+      else pending[field] = Number(r.value);
+      const count = Object.keys(pending).length;
+      apply.disabled = count === 0;
+      apply.textContent = count === 0
+        ? "No changes to apply"
+        : `Apply ${count} change${count === 1 ? "" : "s"}`;
+    });
+  });
+
+  if (revert) {
+    revert.addEventListener("click", () => {
+      body.querySelectorAll("input[type=range]").forEach((r) => {
+        r.value = original[r.dataset.o];
+        const n = $("#n-" + r.dataset.o);
+        if (n) n.textContent = r.value;
+        delete pending[SLIDER_FIELD[r.dataset.o]];
+      });
+      if (apply) { apply.disabled = true; apply.textContent = "No changes to apply"; }
+    });
+  }
+
+  if (apply) {
+    apply.addEventListener("click", async () => {
+      const id = S.dev && S.dev.id;
+      const name = (S.dev && (S.dev.name || S.dev.id)) || "this device";
+      const pct = pending.brightnessPercent;
+      if (id == null || pct == null) return;
+      const ok = window.confirm(
+        'Set brightness on "' + name + '" to ' + pct + '%?\n\n' +
+        "The write is bracketed: we read the current value, write, read back, and " +
+        "if it did not take we restore the original. The panel is never left at a " +
+        "value nobody chose."
+      );
+      if (!ok) return;
+      apply.disabled = true;
+      apply.textContent = "Writing & verifying…";
+      try {
+        const res = await fetch("/api/devices/" + encodeURIComponent(id) + "/brightness", {
+          method: "POST",
+          headers: { "content-type": "application/json", ...(TOKEN ? { authorization: "Bearer " + TOKEN } : {}) },
+          body: JSON.stringify({ brightnessPercent: pct, confirm: true }),
+        });
+        const body = await res.json();
+        const d = body.data || body;
+        // The endpoint's state is the whole story — surface it verbatim, good or bad.
+        const kind =
+          d.state === "verified" || d.state === "no_change" ? "warn"
+            : d.state === "unconfirmed_rollback_failed" ? "bad" : "bad";
+        const icon =
+          d.state === "verified" ? "&#9989;"
+            : d.state === "no_change" ? "&#8505;&#65039;" : "&#9888;&#65039;";
+        showCmdResult(`<span>${icon}</span><span><b>${esc(d.state || "error")}</b> &#8212; ` +
+          `${esc(d.message || body.error || res.status)}</span>`, kind);
+      } catch (e) {
+        showCmdResult(`<span>&#9888;&#65039;</span><span><b>Brightness write failed.</b> ` +
+          `${esc(e.message)}</span>`, "bad");
+      }
+      // Re-read the drawer so it reflects what the device actually holds now.
+      setTimeout(() => openDevice(id), 1400);
+    });
+  }
+
+  body.querySelectorAll(".sw").forEach((s) =>
+    s.addEventListener("click", () => s.setAttribute("aria-checked",
+      s.getAttribute("aria-checked") === "true" ? "false" : "true")));
+}
+
+/* ===================================================================
+   INSIGHTS -- derived from the live fleet, with the impossible modules
+   still shown so the gap stays visible instead of quietly absent.
+   =================================================================== */
+const VIEWS = [["health", "&#129658; Device health"], ["comp", "&#9989; Compliance"],
+               ["content", "&#127916; Content"], ["sla", "&#128202; SLA coverage"]];
+let ivw = "health";
+
+function topRows(list, n) {
+  const max = list.length ? Math.max.apply(null, list.map((x) => x[2] || 0)) : 1;
+  return list.slice(0, n).map((x) => [x[0], x[1], max > 0 ? Math.round((x[2] / max) * 100) : 0]);
+}
+
+/**
+ * Fleet by city, from the tenant's CITY metafield.
+ *
+ * This module reports its own uselessness rather than hiding when the dimension
+ * is degenerate. On VIDERISALES, CITY is populated on 250 of 250 devices and
+ * holds two values — LONDON on 249 and NORWICH on one. Rendering that as a
+ * grouping without comment implies a geography that is not there; hiding it
+ * entirely leaves the operator wondering why there is no city view at all.
+ * Saying "100% coverage, 2 values, not a usable dimension" answers both.
+ */
+function cityModule(devices) {
+  const counts = new Map();
+  let withCity = 0;
+  for (const d of devices) {
+    if (!d.city) continue;
+    withCity += 1;
+    counts.set(d.city, (counts.get(d.city) || 0) + 1);
+  }
+  if (withCity === 0) {
+    return { dead: 1, t: "&#127757; Fleet by city",
+      why: "No device reports a CITY metafield on this tenant.",
+      repl: "geo.coordinates covers 35% of devices and is the only other location signal." };
+  }
+  const rows = [...counts.entries()].sort((a, b) => b[1] - a[1]);
+  const topShare = rows[0][1] / withCity;
+  const degenerate = rows.length < 3 || topShare > 0.9;
+  if (degenerate) {
+    return { dead: 1, t: "&#127757; Fleet by city",
+      why: `CITY is set on ${withCity} of ${devices.length} devices but holds only ` +
+           `${rows.length} distinct value${rows.length === 1 ? "" : "s"} ` +
+           `(${rows.map(([c, n]) => `${c} ${n}`).join(", ")}). ` +
+           `Full coverage, one bucket — placeholder data, not deployment geography.`,
+      repl: "Coverage alone does not make a dimension: this is the same trap as ping_quality at 100% coverage with one value. Worth asking whether a customer tenant populates CITY properly." };
+  }
+  return { t: "&#127757; Fleet by city", bar: "b",
+    rows: rows.slice(0, 6).map(([c, n]) => [c, `${n} devices`, Math.round((n / rows[0][1]) * 100)]) };
+}
+
+function buildModules() {
+  const D = S.devices, C = S.compliance;
+  const offline = D.filter((d) => d.status === "offline" && d.lastOnlineTime)
+    .map((d) => [d.name || d.id, ago(d.lastOnlineTime),
+                 (Date.now() - new Date(d.lastOnlineTime).getTime()) / 86400000])
+    .sort((a, b) => b[2] - a[2]);
+  const worst = C.slice().sort((a, b) => a.score - b.score)
+    .map((c) => [c.name || c.deviceId, c.score + "%", 100 - c.score]);
+  const behind = D.filter((d) => d.firmwareBehind)
+    .map((d) => [d.name || d.id, esc(String(d.firmwareCurrent || "").slice(0, 22)), 1]);
+
+  const driftCounts = {};
+  for (const c of C) for (const x of (c.drift || [])) {
+    const k = x.label || x.field;
+    driftCounts[k] = (driftCounts[k] || 0) + 1;
+  }
+  const drift = Object.entries(driftCounts).sort((a, b) => b[1] - a[1])
+    .map(([k, n]) => [k, n + " devices", n]);
+
+  const playing = D.filter((d) => d.latest && d.latest.nowPlayingId).length;
+  const logo = D.filter((d) => d.latest && d.latest.showingLogo).length;
+  const black = D.filter((d) => d.latest && d.latest.isBlackScreen).length;
+  const noAsset = D.filter((d) => d.status === "online" && !(d.latest && d.latest.nowPlayingId)).length;
+
+  const sla = S.sla;
+  return {
+    health: [
+      { t: "&#128338; Longest offline", rows: topRows(offline, 5), bar: "a" },
+      // No meter: "behind latest" is a boolean, and a bar pinned at 100% on
+      // every row reads as data while carrying none. The version string is the
+      // information here.
+      { t: "&#128230; Firmware behind latest", rows: topRows(behind, 5), nometer: true },
+      { t: "&#128201; Worst compliance", rows: topRows(worst, 5), bar: "a" },
+      cityModule(D),
+      { dead: 1, t: "&#127777; Highest temperature",
+        why: "No temperature value exists in the platform payload, on any of 250 devices.",
+        repl: "Closest real signal: black-screen and logo-fallback duration, which is what a thermal fault actually produces." },
+    ],
+    comp: [
+      { t: "&#9888;&#65039; Most common drift", rows: topRows(drift, 5), bar: "a" },
+      { t: "&#128269; Configuration coverage", bar: "g", rows: [
+        ["Scored from a snapshot", C.length + " devices", C.length],
+        ["No snapshot yet", (D.length - C.length) + " devices", Math.max(0, D.length - C.length)]] },
+      { t: "&#9989; Compliance bands", bar: "g", rows: [
+        ["95% and above", C.filter((c) => c.score >= 95).length + " devices", C.filter((c) => c.score >= 95).length],
+        ["75 to 94%", C.filter((c) => c.score >= 75 && c.score < 95).length + " devices", C.filter((c) => c.score >= 75 && c.score < 95).length],
+        ["Below 75%", C.filter((c) => c.score < 75).length + " devices", C.filter((c) => c.score < 75).length]] },
+      { dead: 1, t: "&#128444; Screenshot verification",
+        why: "Devices upload screenshots to S3 but the presigned URL is verb: put and a GET on it returns 403. No capture command exists.",
+        repl: "The single cheapest platform ask: one read endpoint over a bucket Videri already fills." },
+    ],
+    content: [
+      { t: "&#127916; What is on screen now", bar: "b", rows: [
+        ["Reporting an asset", playing + " devices", playing],
+        ["Online but no asset", noAsset + " devices", noAsset],
+        ["Showing logo fallback", logo + " devices", logo],
+        ["Black screen", black + " devices", black]] },
+      { dead: 1, t: "&#128250; Proof of play by slot",
+        why: "Playback exists only as a per-device async file export with an undocumented schema and no aggregation at any scope.",
+        repl: "The scheduled half IS computable from publisher events; the delivered half needs a batch pipeline we would own." },
+      { dead: 1, t: "&#128202; Audience / dwell",
+        why: "Zero API surface. No sensor, visitor or proximity field exists in any of the eleven services.",
+        repl: "com.videri.proximityscanner is installed on the hardware, so the capability exists somewhere. Worth asking where its output goes." },
+    ],
+    sla: sla ? [
+      { t: "&#128207; Collection coverage", bar: "g", rows: [
+        ["Buckets observed", (sla.fleetCollectionCoverage * 100).toFixed(1) + "%", sla.fleetCollectionCoverage * 100],
+        ["Devices assessed", String(sla.devicesAssessed), 100],
+        ["Devices claimable", String(sla.devicesClaimable), sla.devicesAssessed ? (sla.devicesClaimable / sla.devicesAssessed) * 100 : 0]] },
+      { t: "&#9201; Reporting lag", bar: "a", rows: [
+        ["p50", dur(sla.reportingLag.p50), 50],
+        ["p95", dur(sla.reportingLag.p95), 80],
+        ["max", dur(sla.reportingLag.max), 100]] },
+      { t: "&#128683; Not measurable at all", nometer: true, rows:
+        (sla.unmeasurable || []).slice(0, 6).map((u) => [u.dimension, "no source", 0]) },
+      { dead: 1, t: "&#9989; Contractual uptime",
+        why: "Uptime can only be claimed for windows we actually observed. Device push cadence is 15-22 minutes, so sub-15-minute outages are invisible by construction.",
+        repl: "We report observedUptime and collectionCoverage as two separate numbers, and never multiply them into one reassuring figure." },
+    ] : [],
+  };
+}
+
+function drawModules() {
+  const MODS = buildModules();
+  const M = $("#mods");
+  M.innerHTML = "";
+  (MODS[ivw] || []).forEach((m) => {
+    const c = document.createElement("div");
+    c.className = "mod" + (m.dead ? " dead" : "");
+    c.innerHTML = `<div class="mhd"><h3>${m.t}</h3>
+      <span class="ctl">${m.dead
+        ? '<span style="color:var(--na);font-size:11px;font-weight:600">NO DATA SOURCE</span>' : ""}</span></div>` +
+      (m.dead
+        ? `<div class="deadbody">${esc(m.why)}<div class="repl">&#8627; ${esc(m.repl)}</div></div>`
+        : (m.rows || []).length === 0
+          ? `<div class="empty">Nothing to show.</div>`
+          : m.rows.map((r, i) => `<div class="mrow">
+              <span class="rk ${i > 2 ? "g" : ""}">${i + 1}</span>
+              <span class="nm">${esc(r[0])}</span>
+              ${m.nometer ? "<span></span>"
+                : `<span class="mtr"><i class="${m.bar || ""}" style="width:${r[2]}%"></i></span>`}
+              <span class="vv">${esc(r[1])}</span></div>`).join(""));
+    M.appendChild(c);
+  });
+}
+
+VIEWS.forEach(([k, l]) => {
+  const b = document.createElement("button");
+  b.className = "fp"; b.innerHTML = l;
+  b.setAttribute("aria-pressed", String(k === ivw));
+  b.addEventListener("click", () => {
+    ivw = k;
+    document.querySelectorAll("#iv .fp").forEach((x, i) =>
+      x.setAttribute("aria-pressed", String(VIEWS[i][0] === k)));
+    drawModules();
+  });
+  $("#iv").appendChild(b);
+});
+
+/* ===================================================================
+   COMPLIANCE + SLA views
+   =================================================================== */
+function renderCompliance() {
+  const el = $("#comptable");
+  const rows = S.compliance.slice().sort((a, b) => a.score - b.score);
+  const scored = rows.length;
+  const unscored = S.devices.length - scored;
+  $("#compsub").textContent =
+    `${scored} scored · ${unscored} without a config snapshot (offline devices cannot be read)`;
+  if (scored === 0) { el.innerHTML = `<div class="empty">No device has returned a config snapshot yet.</div>`; return; }
+  el.innerHTML =
+    `<div class="tblwrap"><table class="dt"><thead><tr>
+      <th>Device</th><th>Class</th><th>Template</th><th>Drift score</th>
+      <th>Passed</th><th>Policy gaps</th><th>Config age</th></tr></thead><tbody>` +
+    rows.map((c) => {
+      const policy = (c.drift || []).filter((x) => x.kind === "policy").length;
+      const cls = c.score >= 95 ? "ok" : c.score >= 75 ? "wn" : "bd";
+      return `<tr class="r" data-id="${esc(c.deviceId)}">
+        <td><b>${esc(c.name || c.deviceId)}</b></td>
+        <td>${esc(c.deviceClass)}</td>
+        <td>${esc(c.templateId)}</td>
+        <td class="n"><span class="v ${cls}">${c.score}%</span></td>
+        <td class="n">${c.checksPassed}/${c.checksTotal}${c.checksNotApplicable ? ` <span class="prov">+${c.checksNotApplicable} n/a</span>` : ""}</td>
+        <td class="n">${policy || "&#8212;"}</td>
+        <td class="n">${dur(c.settingsAgeSeconds)}</td></tr>`;
+    }).join("") + `</tbody></table></div>` +
+    `<div class="pg">Drift and policy are scored separately &#8212; combined they flagged 109 of 110 devices.</div>`;
+  el.querySelectorAll("tr.r").forEach((r) =>
+    r.addEventListener("click", () => openDevice(r.dataset.id)));
+}
+
+function renderSla() {
+  const el = $("#slabody");
+  const s = S.sla;
+  if (!s) { el.innerHTML = `<div class="empty">SLA data unavailable.</div>`; return; }
+  const pct = (v) => `${(v * 100).toFixed(1)}%`;
+  el.innerHTML =
+    `<div class="two"><div>
+      <div class="grp"><p class="glb">What we can claim</p>
+        ${kv("Devices assessed", s.devicesAssessed)}
+        ${kv("Devices claimable", s.devicesClaimable,
+             s.devicesClaimable > 0 ? "ok" : "wn")}
+        ${kv("Fleet collection coverage", pct(s.fleetCollectionCoverage),
+             s.fleetCollectionCoverage > 0.9 ? "ok" : "wn")}
+        ${s.fleetObservedUptimeClaimable === null
+          ? na("Claimable observed uptime", "not yet claimable for any device")
+          : kv("Claimable observed uptime", pct(s.fleetObservedUptimeClaimable), "ok")}
+        ${kv("Bucket size", dur(s.bucketSeconds))}
+        ${kv("Window", `${s.windowHours} h`)}
+      </div>
+      <div class="grp"><p class="glb">Reporting lag</p>
+        ${kv("p50", dur(s.reportingLag.p50))}
+        ${kv("p95", dur(s.reportingLag.p95))}
+        ${kv("max", dur(s.reportingLag.max))}
+        <div class="prov">Devices push telemetry every ~15&#8211;22 min. That is a
+          platform floor, not a tuning choice &#8212; sub-15-minute outages are
+          invisible by construction.</div>
+      </div>
+    </div><div>
+      <div class="grp"><p class="glb">Confidence distribution</p>
+        ${Object.entries(s.confidenceBreakdown).map(([k, v]) =>
+          kv(k, v, k === "high" ? "ok" : k === "none" ? "na" : "")).join("")}
+      </div>
+      ${(s.blindWindows || []).length ? `<div class="grp"><p class="glb">Blind windows (${s.blindWindows.length})</p>
+        ${s.blindWindows.slice(0, 5).map((b) =>
+          kv(`${new Date(b.from).toISOString().slice(5, 16).replace("T", " ")}`,
+             `${dur(b.durationSeconds)} · ${b.devicesReporting} reporting`, "wn")).join("")}
+      </div>` : ""}
+      <div class="grp"><p class="glb">Not measurable at all (${(s.unmeasurable || []).length})</p>
+        ${(s.unmeasurable || []).map((u) =>
+          `<div class="gaprow"><span class="gd"></span><span><span class="gn">${esc(u.dimension)}</span>
+            <span class="gw">${esc(u.reason)}</span></span></div>`).join("")}
+      </div>
+      <div class="note"><b>Observed uptime and collection coverage are never
+        multiplied together.</b> One is what the fleet did; the other is how much of
+        the window we actually watched. A single blended number would let a
+        collection outage read as fleet uptime.</div>
+    </div></div>`;
+}
+
+/* ===================================================================
+   COMMAND PALETTE — the "one click to anything" promise made literal.
+   ⌘K (or /) then type: any device by name, id, serial or city; any tab;
+   refresh. No index to maintain: it searches the state already loaded.
+   =================================================================== */
+const PAL = { open: false, items: [], sel: 0 };
+
+function switchTab(v) {
+  const b = document.querySelector(`#nav button[data-v="${v}"]`);
+  if (b) b.click();
+}
+
+function palIndex() {
+  const fixed = [
+    { kind: "view", name: "Brief", act: () => switchTab("brief") },
+    { kind: "view", name: "Alerts", act: () => switchTab("alerts") },
+    { kind: "view", name: "Devices", act: () => switchTab("devices") },
+    { kind: "view", name: "Insights", act: () => switchTab("insights") },
+    { kind: "action", name: "Refresh data", act: () => load() },
+  ];
+  const devices = S.devices.map((d) => ({
+    kind: "device",
+    name: d.name || d.id,
+    sub: `${d.deviceClass} · ${d.status}`,
+    hay: [d.name, d.id, d.serialNo, d.city, d.deviceClass].filter(Boolean).join(" ").toLowerCase(),
+    act: () => openDevice(d.id),
+  }));
+  return [...fixed, ...devices];
+}
+
+/** Substring beats subsequence; prefix beats substring. Cheap and predictable. */
+function palScore(hay, q) {
+  const i = hay.indexOf(q);
+  if (i === 0) return 3;
+  if (i > 0) return 2;
+  let qi = 0;
+  for (const c of hay) if (c === q[qi]) qi++;
+  return qi === q.length ? 1 : 0;
+}
+
+function palRender() {
+  const list = $("#pallist");
+  if (PAL.items.length === 0) {
+    list.innerHTML = `<div class="pal-empty">Nothing matches.</div>`;
+    return;
+  }
+  list.innerHTML = PAL.items.map((it, i) =>
+    `<button class="pal-row" data-i="${i}" aria-selected="${i === PAL.sel}">
+       <span class="pk">${it.kind}</span>
+       <span class="pn">${esc(it.name)}</span>
+       ${it.sub ? `<span class="ps">${esc(it.sub)}</span>` : ""}
+     </button>`).join("");
+  list.querySelectorAll(".pal-row").forEach((b) =>
+    b.addEventListener("click", () => palRun(Number(b.dataset.i))));
+  const selEl = list.querySelector(`[data-i="${PAL.sel}"]`);
+  if (selEl) selEl.scrollIntoView({ block: "nearest" });
+}
+
+function palFilter() {
+  const q = $("#palq").value.trim().toLowerCase();
+  const all = palIndex();
+  PAL.items = !q
+    ? all.slice(0, 12)
+    : all
+        .map((it) => ({ it, s: palScore(it.hay || it.name.toLowerCase(), q) }))
+        .filter((x) => x.s > 0)
+        .sort((a, b) => b.s - a.s)
+        .slice(0, 12)
+        .map((x) => x.it);
+  PAL.sel = 0;
+  palRender();
+}
+
+function palOpen() {
+  PAL.open = true;
+  $("#pal").classList.add("on");
+  $("#pscrim").classList.add("on");
+  $("#palq").value = "";
+  palFilter();
+  $("#palq").focus();
+}
+function palClose() {
+  PAL.open = false;
+  $("#pal").classList.remove("on");
+  $("#pscrim").classList.remove("on");
+}
+function palRun(i) {
+  const it = PAL.items[i];
+  palClose();
+  if (it) it.act();
+}
+
+$("#pscrim").addEventListener("click", palClose);
+$("#palq").addEventListener("input", palFilter);
+$("#palq").addEventListener("keydown", (e) => {
+  if (e.key === "ArrowDown") { e.preventDefault(); PAL.sel = Math.min(PAL.sel + 1, PAL.items.length - 1); palRender(); }
+  else if (e.key === "ArrowUp") { e.preventDefault(); PAL.sel = Math.max(PAL.sel - 1, 0); palRender(); }
+  else if (e.key === "Enter") { e.preventDefault(); palRun(PAL.sel); }
+});
+addEventListener("keydown", (e) => {
+  const typing = /^(input|textarea|select)$/i.test((e.target && e.target.tagName) || "");
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") { e.preventDefault(); PAL.open ? palClose() : palOpen(); }
+  else if (e.key === "/" && !typing && !PAL.open) { e.preventDefault(); palOpen(); }
+  else if (e.key === "Escape" && PAL.open) palClose();
+});
+
+/* ===================================================================
+   AUTO-REFRESH — an ops console must not quietly age.
+   Data reloads on the poll cadence; the freshness chip re-ages every
+   15 s locally so the "Xs old" figure is true between reloads. Hidden
+   tabs do not refetch: no one is looking, and the reload on return is
+   immediate via visibilitychange.
+   =================================================================== */
+const REFRESH_MS = 120_000;
+setInterval(() => {
+  if (document.visibilityState === "visible" && !S.loading) load();
+}, REFRESH_MS);
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible" && !S.loading) load();
+});
+setInterval(() => { if (S.fresh) renderFreshness(); }, 15_000);
+
+/* ---- wiring ------------------------------------------------------ */
+$("#dx").addEventListener("click", closeDevice);
+$("#scrim").addEventListener("click", closeDevice);
+addEventListener("keydown", (e) => { if (e.key === "Escape") closeDevice(); });
+$("#q").addEventListener("input", (e) => { S.q = e.target.value; renderDevices(); });
+$("#reload").addEventListener("click", () => load());
+
+const VIEWS_ALL = ["overview", "alerts", "devices", "compliance", "brief", "insights", "sla"];
+document.querySelectorAll("#nav button").forEach((b) => b.addEventListener("click", () => {
+  document.querySelectorAll("#nav button").forEach((x) =>
+    x.setAttribute("aria-selected", String(x === b)));
+  const v = b.dataset.v;
+  for (const name of VIEWS_ALL) {
+    const el = document.getElementById("v-" + name);
+    if (el) el.classList.toggle("hide", name !== v);
+  }
+  const [h, s] = PAGES[v] || ["", ""];
+  $("#phead").textContent = h;
+  $("#psub").textContent = s;
+  window.scrollTo({ top: 0, behavior: "instant" });
+}));
+
+document.querySelectorAll("[data-goto]").forEach((b) =>
+  b.addEventListener("click", () => switchTab(b.dataset.goto)));
+$("#gq").addEventListener("focus", () => { $("#gq").blur(); palOpen(); });
+$("#gq").addEventListener("click", palOpen);
+$("#shotLive").addEventListener("click", toggleLive);
+$("#gapsbtn").addEventListener("click", () => {
+  switchTab("overview");
+  setTimeout(() => $("#wgaps").scrollIntoView({ behavior: "smooth", block: "center" }), 60);
+});
+/* Export is a real download built from state already in the browser — no
+   server round trip, and it carries the freshness stamp so an exported report
+   can never be mistaken for live data. */
+$("#exportbtn").addEventListener("click", () => {
+  const h = healthScore();
+  const report = {
+    generatedAt: new Date().toISOString(),
+    tenant: "VIDERISALES",
+    freshness: S.fresh,
+    healthScore: h && { score: h.score, counted: h.dims, excluded: h.excluded },
+    fleet: S.summary && S.summary.snapshot,
+    sla: S.sla,
+    openAlerts: S.alerts.length,
+    compliance: { scored: S.compliance.length, devices: S.devices.length },
+    knownPlatformGaps: GAPS.map(([name, why]) => ({ name, why })),
+  };
+  const blob = new Blob([JSON.stringify(report, null, 2)], { type: "application/json" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `videri-fleet-report-${new Date().toISOString().slice(0, 10)}.json`;
+  a.click();
+  URL.revokeObjectURL(a.href);
+});
+
+async function load() {
+  if (S.loading) return;
+  S.loading = true;
+  try {
+    const [summary, alerts, devices, compliance, pipeline, sla, brief, shots] = await Promise.all([
+      api("/api/fleet/summary"),
+      apiAll("/api/alerts"),
+      apiAll("/api/devices"),
+      apiAll("/api/compliance"),
+      api("/api/pipeline/status"),
+      api("/api/sla/coverage").catch(() => null),
+      // 404 until the first brief is generated, which is a normal state.
+      api("/api/fleet/brief").catch(() => null),
+      // A wall of HEAD requests upstream, so it is allowed to fail without
+      // taking the dashboard with it.
+      api("/api/screenshots?limit=12&maxAgeMinutes=10").catch(() => null),
+    ]);
+    S.summary = summary.data;
+    S.alerts = alerts.data;
+    S.devices = devices.data;
+    S.compliance = compliance.data;
+    S.pipeline = pipeline.data;
+    S.sla = sla && sla.data;
+    S.brief = brief && brief.data;
+    S.shots = shots && shots.data;
+    S.fresh = (summary.meta && summary.meta.freshness) || null;
+
+    // ageSeconds is only true at fetch time; recompute from the timestamp so
+    // the 15 s re-render shows real age, not the age at last fetch.
+    if (S.fresh && S.fresh.newestSampleAt) {
+      S.fresh.ageSeconds = Math.max(0, (Date.now() - new Date(S.fresh.newestSampleAt).getTime()) / 1000);
+    }
+    renderFreshness();
+    $("#nb-alerts").textContent = S.alerts.length;
+    $("#nb-alerts").classList.toggle("hot", S.alerts.some((a) => a.severity === "critical"));
+    $("#nb-devices").textContent = S.devices.length;
+    $("#nb-comp").textContent = S.compliance.length;
+    renderOverview();
+    renderBrief();
+    renderAlertFilters(); renderAlerts(); renderInert();
+    renderDeviceFilters(); renderDevices();
+    renderCompliance(); renderSla();
+    drawModules();
+  } catch (e) {
+    $("#staleness").innerHTML =
+      `<div class="banner bad"><span>&#9888;&#65039;</span><span><b>Could not load the API.</b>
+       ${esc(e.message)}. Is the read API running on this origin?</span></div>`;
+  } finally {
+    S.loading = false;
+  }
+}
+load();
+</script>
