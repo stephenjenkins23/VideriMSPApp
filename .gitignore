@@ -2,3 +2,7 @@ node_modules/
 dist/
 .env
 *.log
+
+# One-off live probe / research scripts — never committed (they hold
+# credential-shaped test literals and are not part of the app).
+*.mjs
