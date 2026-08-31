@@ -2704,9 +2704,28 @@ function renderActions() {
       ? `<button class="btn sm pri" data-act-open="${esc((r.deviceIds && r.deviceIds[0]) || "")}">Apply on device &#8594;</button>`
       : `<span class="fp" style="cursor:default;align-self:center"><span class="d" style="background:${SEV_COLOR[r.severity]}"></span>${Math.round((r.confidence||0)*100)}%</span>`}</div>`;
 
+  // Correlated findings (Epic 2) — root-cause patterns that contextualise the
+  // individual recommendations. Honest notes (e.g. degenerate location) render
+  // as muted lines, never dressed up as findings.
+  const C = S.correlation;
+  const findings = (C && Array.isArray(C.findings)) ? C.findings : [];
+  const cnotes = (C && Array.isArray(C.notes)) ? C.notes : [];
+  const corrCard = (findings.length || cnotes.length)
+    ? `<div class="card" style="margin-bottom:16px"><div class="chd"><h2>&#128279; Correlated findings</h2>
+         <span class="na" style="font-size:12px">Root-cause patterns — many symptoms, one cause</span></div>
+       <div class="wbody">
+         ${findings.map((f) => `<div class="arow" style="cursor:default;align-items:flex-start">
+           <span class="thumb" style="background:${SEV_COLOR[f.severity]}22;display:flex;align-items:center;justify-content:center;color:${SEV_COLOR[f.severity]};font-weight:700;font-size:11px">${(f.severity||"?")[0].toUpperCase()}</span>
+           <span><span class="ti">${esc(f.summary||"")}</span>
+             <span class="ds">${esc(f.rationale||"")}</span>
+             <span class="mt">${(f.affectedDeviceIds||[]).length} device(s) affected</span></span></div>`).join("")}
+         ${cnotes.map((n) => `<div class="na" style="font-size:12px;padding:9px 4px;border-top:1px solid var(--bd-2)">&#8505;&#65039; ${esc(n.message||n.summary||"")}</div>`).join("")}
+       </div></div>`
+    : "";
+
   const CAP = 60;
   const advShown = advisory.slice(0, CAP);
-  el.innerHTML = header +
+  el.innerHTML = header + corrCard +
     (oneClick.length
       ? `<div class="card" style="margin-bottom:16px"><div class="chd"><h2>&#9889; One-click fixes</h2>
            <span class="na" style="font-size:12px">${oneClick.length} device${oneClick.length===1?"":"s"} with a verified fix available</span></div>
@@ -2891,7 +2910,7 @@ async function load() {
   if (S.loading) return;
   S.loading = true;
   try {
-    const [summary, alerts, devices, compliance, pipeline, sla, brief, shots, remediation] = await Promise.all([
+    const [summary, alerts, devices, compliance, pipeline, sla, brief, shots, remediation, correlation] = await Promise.all([
       api("/api/fleet/summary"),
       apiAll("/api/alerts"),
       apiAll("/api/devices"),
@@ -2905,6 +2924,8 @@ async function load() {
       api("/api/screenshots?limit=12&maxAgeMinutes=10").catch(() => null),
       // Self-heal recommendations — allowed to fail without sinking the page.
       api("/api/remediation").catch(() => null),
+      // Correlated findings (root causes) — same, allowed to fail.
+      api("/api/correlation").catch(() => null),
     ]);
     S.summary = summary.data;
     S.alerts = alerts.data;
@@ -2915,6 +2936,7 @@ async function load() {
     S.brief = brief && brief.data;
     S.shots = shots && shots.data;
     S.remediation = remediation && remediation.data;
+    S.correlation = correlation && correlation.data;
     S.fresh = (summary.meta && summary.meta.freshness) || null;
 
     // ageSeconds is only true at fetch time; recompute from the timestamp so
