@@ -26,6 +26,7 @@ import type { VideriHttp } from "../videri/http.js";
 import { registerCommandRoutes } from "./routes/commands.js";
 import { registerScreenshotRoutes } from "./routes/screenshots.js";
 import { registerRemediationRoutes } from "./routes/remediation.js";
+import { registerCorrelationRoutes } from "./routes/correlation.js";
 
 export interface BuildServerOptions {
   pool: Pool;
@@ -144,6 +145,7 @@ export async function buildServer(options: BuildServerOptions): Promise<FastifyI
   await registerCommandRoutes(app, ctx);
   await registerScreenshotRoutes(app, ctx);
   await registerRemediationRoutes(app, ctx);
+  await registerCorrelationRoutes(app, ctx);
 
   return app;
 }

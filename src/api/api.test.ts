@@ -984,3 +984,66 @@ test("remediation on an empty fleet is an empty list, not an error", async () =>
   assert.equal(body.data.summary.total, 0);
   await app.close();
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Correlation endpoint (Epic 2). Reuses the SAME remediation assembly, so the
+// stub's `remediationRows` drives it. The rule logic itself is covered
+// exhaustively in intelligence/correlation.test.ts; here we only prove the
+// endpoint wires the query to the engine, carries freshness, and stays honest on
+// degenerate data (a real query would 500 if the engine touched a field the
+// DeviceView does not carry).
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("correlation endpoint returns findings, notes, freshness on real DeviceView fields", async () => {
+  // A tight temporal drop of 3 co-located devices across distinct sites — a
+  // real finding — plus enough distinct locations to keep it non-degenerate.
+  const off = (id: string, city: string, at: string) =>
+    remediationRow({ id, city, status: "offline", last_online_time: new Date(at) });
+  const app = await build({
+    remediationRows: [
+      off("d1", "Boston", "2026-08-31T11:50:00Z"),
+      off("d2", "Chicago", "2026-08-31T11:52:00Z"),
+      off("d3", "Denver", "2026-08-31T11:54:00Z"),
+      remediationRow({ id: "d4", city: "Miami", status: "online" }),
+    ],
+  });
+  const res = await app.inject({ method: "GET", url: "/api/correlation", headers: auth });
+  assert.equal(res.statusCode, 200, "endpoint must not 500 on real DeviceView fields");
+  const body = res.json();
+  assert.ok(body.meta.freshness, "must carry freshness");
+  assert.equal(body.data.devicesConsidered, 4);
+  assert.ok(Array.isArray(body.data.findings));
+  assert.ok(Array.isArray(body.data.notes));
+  await app.close();
+});
+
+test("correlation endpoint on an empty fleet is an empty report, not an error", async () => {
+  const app = await build({ remediationRows: [] });
+  const res = await app.inject({ method: "GET", url: "/api/correlation", headers: auth });
+  assert.equal(res.statusCode, 200);
+  const body = res.json();
+  assert.deepEqual(body.data.findings, []);
+  assert.equal(body.data.devicesConsidered, 0);
+  await app.close();
+});
+
+test("correlation endpoint emits the honest degenerate-location note, not a bogus venue cluster", async () => {
+  // All-LONDON, all offline — the degenerate placeholder location this tenant
+  // actually has. The engine must refuse to invent one giant venue.
+  const rows = Array.from({ length: 8 }, (_, i) =>
+    remediationRow({ id: `L${i}`, city: "LONDON", status: "offline",
+      last_online_time: new Date("2026-08-31T11:59:00Z") }),
+  );
+  const app = await build({ remediationRows: rows });
+  const body = (await app.inject({ method: "GET", url: "/api/correlation", headers: auth })).json();
+  assert.ok(
+    body.data.notes.some((n: { kind: string }) => n.kind === "location-degenerate"),
+    "expected the honest degenerate-location note",
+  );
+  assert.equal(
+    body.data.findings.find((f: { kind: string }) => f.kind === "venue"),
+    undefined,
+    "no venue cluster from degenerate location data",
+  );
+  await app.close();
+});
