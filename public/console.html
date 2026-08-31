@@ -1622,21 +1622,42 @@ function paintDevice() {
   // and start in a "reading…" state; loadTelemetry() fills them in. Temperature
   // is the one that is genuinely unavailable — no verb returns it — so it stays
   // a plain "not reported" rather than a live tile.
+  const isOnline = d.status === "online";
+  // Resolve the offline case BEFORE the tiles are built. An offline screen answers
+  // nothing, so there is no read to wait for — leaving it undefined would paint
+  // "reading from device…" forever on a device we are never going to ask.
+  if (!isOnline && S.dev._telemetry === undefined) {
+    S.dev._telemetry = { read: [], cpuPercent: null, ramUsedPercent: null,
+      ramTotalGb: null, storageUsedPercent: null, rssiDbm: null,
+      ntpOffsetMs: null, ntpServer: null, offline: true };
+  }
   const tm = S.dev._telemetry;
+  // WHY a tile is empty matters, and there are three different reasons. Saying
+  // "this hardware does not report it" when the truth is "the screen is offline"
+  // blames the platform for our own unreachability — so the reason is chosen from
+  // what actually happened: offline, answered-nothing, or answered-without-this-field.
+  const answeredNothing = tm && Array.isArray(tm.read) && tm.read.length === 0;
+  const whyEmpty = (field) =>
+    !isOnline ? "The screen is offline, so it cannot be asked"
+    : answeredNothing ? "The screen did not answer the request"
+    : field;
   tiles.push(runtimeTile("CPU load", tm ? (tm.cpuPercent == null ? "na" : "ok") : "loading",
     tm && tm.cpuPercent != null ? tm.cpuPercent + "%" : null, tm && tm.cpuPercent,
-    "read_proc_stat not populated on this device"));
+    whyEmpty("This model does not report CPU load")));
   tiles.push(runtimeTile("RAM used", tm ? (tm.ramUsedPercent == null ? "na" : "ok") : "loading",
     tm && tm.ramUsedPercent != null ? tm.ramUsedPercent + "%" : null, tm && tm.ramUsedPercent,
-    "meminfo not readable", tm && tm.ramTotalGb ? `of ${tm.ramTotalGb} GB` : ""));
+    whyEmpty("This model did not return a memory reading"),
+    tm && tm.ramTotalGb ? `of ${tm.ramTotalGb} GB` : ""));
   tiles.push(runtimeTile("Storage used", tm ? (tm.storageUsedPercent == null ? "na" : "ok") : "loading",
     tm && tm.storageUsedPercent != null ? tm.storageUsedPercent + "%" : null, tm && tm.storageUsedPercent,
-    "no readable storage path"));
+    whyEmpty("No readable storage on this model")));
   tiles.push(`<div class="met na"><div class="v">&#8212;</div><div class="k">Temperature</div>
-    <div class="why">No temperature verb returns a value on this hardware</div></div>`);
+    <div class="why">Nothing reports temperature on this hardware &#8212; on any model</div></div>`);
   $("#dmets").innerHTML = tiles.join("");
-  // Kick off the live read once per drawer open.
-  if (S.dev._telemetry === undefined && !S.dev._telLoading) loadTelemetry(d.id);
+  // Kick off the live read once per drawer open — ONLINE devices only (the offline
+  // case was already resolved above, so asking would burn ~10 s of per-field
+  // timeouts to learn what presence already told us).
+  if (isOnline && S.dev._telemetry === undefined && !S.dev._telLoading) loadTelemetry(d.id);
 
   // Auto-refresh the screen capture, once per drawer open. Someone looking at a
   // device expects the picture to be of NOW — waiting for them to notice a
@@ -1650,7 +1671,10 @@ function paintDevice() {
     const shot = S.dev._shot;
     const needsFresh = !shot || !shot.available || shot.stale;
     const cooling = (CAPCOOL[d.id] || 0) > Date.now();
-    if (needsFresh && !cooling) captureFresh();
+    // Deferred a tick: the screenshot panel (and its button + status line) is
+    // rendered later in this same paint, so calling straight through would drop
+    // the "asking the device…" message into a DOM that does not exist yet.
+    if (needsFresh && !cooling) setTimeout(captureFresh, 0);
   }
 
   $("#dtabs").innerHTML = DTABS.map(([k, l]) =>
@@ -1778,6 +1802,11 @@ async function captureFresh() {
   // Disable for the cooldown so clicks cannot out-pace the server throttle.
   // Recorded in CAPCOOL so a paintDevice() re-render re-asserts it.
   const hold = (ms) => { CAPCOOL[id] = Date.now() + ms; applyCaptureCooldown(); };
+  const release = () => { CAPCOOL[id] = 0; const b = $("#shotcap"); if (b) b.disabled = false; };
+  // Hold the cooldown from the FIRST moment, not after the POST resolves —
+  // otherwise the manual button stays live during an auto-capture and a click can
+  // out-pace the server throttle. Early-failure paths below call release().
+  hold(CAPTURE_COOLDOWN_MS);
   if (btn) btn.disabled = true;
   setMsg("&#8987; Asking the device to capture a fresh frame&#8230;");
 
@@ -1790,13 +1819,13 @@ async function captureFresh() {
     body = await res.json().catch(() => ({}));
   } catch (e) {
     setMsg("Capture request failed: " + esc(e.message) + ".", "wn");
-    if (btn) btn.disabled = false;
+    release();
     return;
   }
 
   if (res.status === 503) {
     setMsg("This server holds no Videri credentials, so it cannot drive a capture.", "wn");
-    if (btn) btn.disabled = false;
+    release();
     return;
   }
   if (res.status === 429) {
@@ -1810,7 +1839,7 @@ async function captureFresh() {
     // 409 (no serial / not addressable) and anything else: show the reason, and
     // re-enable so it stays legible rather than a dead greyed button.
     setMsg("Cannot capture: " + esc((body && (body.message || body.error)) || res.status) + ".", "wn");
-    if (btn) btn.disabled = false;
+    release();
     return;
   }
 
@@ -2013,7 +2042,7 @@ function tabNetwork(d) {
   const signalRow = tm === undefined
     ? kv("Signal (RSSI)", "reading&#8230;")
     : (tm.rssiDbm == null
-        ? na("Signal (RSSI)", "wifi_strength not readable")
+        ? na("Signal (RSSI)", "the screen did not answer the signal request")
         : tm.rssiDbm <= -110
           ? kv("Signal (RSSI)", `${tm.rssiDbm} dBm — no wireless link (Ethernet or radio off)`, "na")
           : kv("Signal (RSSI)", `${tm.rssiDbm} dBm`,
@@ -2021,7 +2050,7 @@ function tabNetwork(d) {
   const ntpRow = tm === undefined
     ? kv("NTP offset", "reading&#8230;")
     : (tm.ntpOffsetMs == null
-        ? na("NTP offset", "chrony stats not returned")
+        ? na("NTP offset", "this screen does not report clock sync")
         : kv("NTP offset", `${tm.ntpOffsetMs} ms${tm.ntpServer ? ` · ${esc(tm.ntpServer)}` : ""}`,
              Math.abs(tm.ntpOffsetMs) < 100 ? "ok" : "wn"));
   return `<div class="two"><div>
@@ -2042,15 +2071,17 @@ function tabNetwork(d) {
         ${n.longestGapH > 0
           ? kv("Longest unobserved gap", `${n.longestGapH} h`, "wn")
           : kv("Gaps", "none", "ok")}
-        <div class="prov">Derived from our own presence history, not from a platform
-          field &#8212; there is no RSSI, SSID or packet-loss metric to read. Availability
-          is a share of the hours we <em>observed</em>, so read it next to the observed
-          count &#8212; 100% of a handful of hours is not 100% of a day.</div>
+        <div class="prov">Availability and drops are derived from our own presence
+          history, not from a platform field. Signal and NTP above ARE read from the
+          screen itself, one request at a time &#8212; packet loss and jitter are the
+          ones nothing reports. Availability is a share of the hours we
+          <em>observed</em>, so read it next to the observed count &#8212; 100% of a
+          handful of hours is not 100% of a day.</div>
       </div>
       <div class="grp"><p class="glb">&#128225; Addressing &amp; transport</p>
         ${kv("Canvas id", esc(d.id))}
         ${d.serialNo ? kv("Serial", esc(d.serialNo)) : na("Serial")}
-        ${kv("Command transport", "XMPP via sync_command")}
+        ${kv("Command transport", "the platform's device messaging channel")}
         ${kv("Command reachable", l.presence === "online"
               ? "presence says yes &#8212; use Ping presence to prove it"
               : "device is offline", l.presence === "online" ? "ok" : "wn")}
@@ -2835,8 +2866,28 @@ function renderActions() {
            <div class="pills">${Object.entries(P.summary.byReason||{}).map(([k,v])=>`<span class="fp" style="cursor:default"><b>${v}</b> ${esc(k)}</span>`).join("")}</div>
          </div>
          <div class="na" style="font-size:12px;margin-top:10px">
-           A gap = active schedule, but the screen was off / black / logo. Sampled
-           ${P.batch?.considered ?? "—"} of ${P.batch?.eligibleDevices ?? "—"} devices${P.batch?.truncated?" (bounded batch)":""}${P.batch?.schedulesUnreadable?` · ${P.batch.schedulesUnreadable} schedule(s) unreadable`:""}${P.summary.screenStateUnknown?` · ${P.summary.screenStateUnknown} screen-state unknown`:""}.
+           A gap = active schedule, but the screen was off / black / logo.
+           ${/* The endpoint reports its sample two different ways depending on the
+                 path it served: `coverage` on the fleet-wide PERSISTED path,
+                 `batch` on the bounded live-publisher path. Reading only `batch`
+                 rendered this whole caveat as "Sampled — of — devices" on the
+                 persisted path, i.e. a deliberate honesty statement silently
+                 blanked. Read whichever the payload actually carries. */""}
+           ${(() => {
+             const c = P.coverage, b = P.batch;
+             const seen = c ? c.withPersistedSchedule : b ? b.considered : null;
+             const of = c ? c.fleetDevices : b ? b.eligibleDevices : null;
+             const how = c ? "from stored schedules" : "sampled live";
+             const extra = [
+               b && b.truncated ? "bounded batch" : "",
+               b && b.schedulesUnreadable ? `${b.schedulesUnreadable} schedule(s) unreadable` : "",
+               P.summary.screenStateUnknown ? `${P.summary.screenStateUnknown} screen-state unknown` : "",
+             ].filter(Boolean).join(" · ");
+             const base = (seen == null || of == null)
+               ? "Sample size not reported by the server."
+               : `Covers <b>${seen} of ${of}</b> devices (${how})`;
+             return base + (extra ? ` &#183; ${extra}` : "") + ".";
+           })()}
            ${esc(P.basis||"")}</div>
        </div></div>`
     : "";
