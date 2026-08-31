@@ -205,3 +205,179 @@ test("listGroups re-asks with count=total when the first page under-reads", asyn
   assert.equal(res.meta.groupsRead, 12);
   assert.equal(calls.filter((p) => p === "/v1/groups").length, 2);
 });
+
+// ─── the `count=`-only pagination trap ────────────────────────────────────────
+//
+// `rpm /v1/groups` silently IGNORES `page`, `size` and `offset` and defaults to
+// ~10 groups. That is the single most dangerous behaviour on this route: a
+// paginator written the conventional way returns 10 of 94 groups and the fleet
+// total comes out ~90% short with no error anywhere. The tests above only counted
+// calls; these pin the actual query parameters.
+
+/** Records the query object handed to every `/v1/groups` request. */
+function recordingHttp(opts: { pages: RawGroup[][]; total?: number }) {
+  const queries: Array<Record<string, unknown> | undefined> = [];
+  let page = 0;
+  const http = {
+    async request(_service: string, path: string, reqOpts?: { query?: Record<string, unknown> }) {
+      if (path === "/v1/groups") {
+        queries.push(reqOpts?.query);
+        const groups = opts.pages[Math.min(page, opts.pages.length - 1)] ?? [];
+        page++;
+        return {
+          groups,
+          ...(opts.total === undefined ? {} : { meta: { total: opts.total } }),
+        };
+      }
+      return { current: { totalCanvasesCount: 1 } };
+    },
+  } as unknown as import("../http.js").VideriHttp;
+  return { http, queries, groupCalls: () => queries.length };
+}
+
+test("listGroups asks for a wide first page by count, and never by page/size/offset", async () => {
+  const first = Array.from({ length: 40 }, (_, i) => ({ uuid: `g${i}` }));
+  const { http, queries } = recordingHttp({ pages: [first], total: 40 });
+  const groups = await new AggregatorService(http).listGroups();
+
+  assert.equal(groups.length, 40);
+  assert.equal(queries.length, 1, "one wide page was enough");
+  assert.deepEqual(queries[0], { count: 100 }, "the first ask is a wide count, nothing else");
+  for (const q of queries) {
+    for (const ignored of ["page", "size", "offset", "limit"]) {
+      assert.equal(ignored in (q ?? {}), false, `${ignored} is silently ignored by rpm — never send it`);
+    }
+  }
+});
+
+test("the widened re-ask uses count=meta.total exactly, and stops at two calls", async () => {
+  // A tenant larger than the 100-wide first page: the second ask must request the
+  // reported total, and there must be no third call (no unbounded paginate loop).
+  const firstPage = Array.from({ length: 100 }, (_, i) => ({ uuid: `g${i}` }));
+  const everything = Array.from({ length: 137 }, (_, i) => ({ uuid: `g${i}` }));
+  const { http, queries } = recordingHttp({ pages: [firstPage, everything], total: 137 });
+  const groups = await new AggregatorService(http).listGroups();
+
+  assert.equal(groups.length, 137, "the whole tenant was read, not just the first page");
+  assert.equal(queries.length, 2, "at most two calls — never a paginate loop");
+  assert.deepEqual(queries[0], { count: 100 });
+  assert.deepEqual(queries[1], { count: 137 }, "re-ask must be count=meta.total");
+});
+
+test("a first page that already holds everything is not re-asked for", async () => {
+  const all = Array.from({ length: 7 }, (_, i) => ({ uuid: `g${i}` }));
+  const { http, queries } = recordingHttp({ pages: [all], total: 7 });
+  assert.equal((await new AggregatorService(http).listGroups()).length, 7);
+  assert.equal(queries.length, 1, "no pointless second round-trip");
+});
+
+test("an absent meta.total is trusted as complete rather than re-asked forever", async () => {
+  // No `meta` at all: total falls back to what came back, so the page is taken as
+  // the whole list. The alternative — re-asking on a missing total — would double
+  // every call on a route that reports no meta.
+  const all = Array.from({ length: 5 }, (_, i) => ({ uuid: `g${i}` }));
+  const { http, queries } = recordingHttp({ pages: [all] });
+  assert.equal((await new AggregatorService(http).listGroups()).length, 5);
+  assert.equal(queries.length, 1);
+});
+
+test("a group list with no groups key is an empty list, not a crash", async () => {
+  const { http } = recordingHttp({ pages: [[]] });
+  assert.deepEqual(await new AggregatorService(http).listGroups(), []);
+});
+
+test("an empty tenant is an honest empty rollup, not a failure", async () => {
+  const { http } = fakeHttp([], () => ({ current: { totalCanvasesCount: 1 } }));
+  const res = await new AggregatorService(http).fleetRollups();
+  assert.deepEqual(res.groups, []);
+  assert.deepEqual(res.meta, { groupsRead: 0, groupsFailed: 0 });
+  // Zero groups genuinely sums to zero — and `groupsRead: 0` is what tells the
+  // caller this is an empty tenant rather than 94 groups that all failed.
+  assert.equal(res.fleet.totalCanvases, 0);
+});
+
+// ─── bounded fan-out and addressing ──────────────────────────────────────────
+
+test("the metrics fan-out never exceeds its concurrency ceiling", async () => {
+  // No rate limit is documented anywhere in the Videri API and no operation
+  // declares a 429, so we have no published budget to work to; parallelism must
+  // stay where we set it.
+  const groups = Array.from({ length: 30 }, (_, i) => ({ uuid: `g${i}` }));
+  let inFlight = 0;
+  let peak = 0;
+  const http = {
+    async request(_service: string, path: string) {
+      if (path === "/v1/groups") return { groups, meta: { total: groups.length } };
+      inFlight++;
+      peak = Math.max(peak, inFlight);
+      await new Promise((r) => setTimeout(r, 1));
+      inFlight--;
+      return { current: { totalCanvasesCount: 1 } };
+    },
+  } as unknown as import("../http.js").VideriHttp;
+
+  const res = await new AggregatorService(http).fleetRollups(4);
+  assert.equal(res.meta.groupsRead, 30, "every group was still read");
+  assert.ok(peak <= 4, `peak in-flight ${peak} exceeded the ceiling of 4`);
+  assert.ok(peak > 1, "and the fan-out is actually parallel, not serialised");
+});
+
+test("every group is read even when the whole fan-out fails, and all are counted", async () => {
+  // The invariant: 94 failures must be visible as 94 failures. A total of 0 with
+  // groupsRead 0 / groupsFailed 94 reads as "we could not see the fleet"; the same
+  // total with groupsFailed 0 would read as "the fleet is empty".
+  const groups = Array.from({ length: 6 }, (_, i) => ({ uuid: `g${i}` }));
+  const { http } = fakeHttp(groups, () => {
+    throw new Error("aggregator 500");
+  });
+  const res = await new AggregatorService(http).fleetRollups(3);
+  assert.deepEqual(res.meta, { groupsRead: 0, groupsFailed: 6 });
+  assert.equal(res.fleet.totalCanvases, 0);
+  assert.deepEqual(res.groups, []);
+});
+
+test("a group uuid is URL-encoded into the metrics path", async () => {
+  const paths: string[] = [];
+  const http = {
+    async request(_service: string, path: string) {
+      paths.push(path);
+      return { current: { totalCanvasesCount: 1 } };
+    },
+  } as unknown as import("../http.js").VideriHttp;
+  await new AggregatorService(http).fetchGroupMetrics("a b/c?d");
+  assert.equal(paths[0], "/api/v1/groups/a%20b%2Fc%3Fd/metrics");
+});
+
+test("summariseRollups never mutates the array it was handed", async () => {
+  // The sort is on a copy: the caller's list (and the cached rollup upstream)
+  // must keep its own order.
+  const input = [
+    rollup({ uuid: "a", name: "A", offline30d: 1 }),
+    rollup({ uuid: "b", name: "B", offline30d: 9 }),
+  ];
+  const res = summariseRollups(input, 0);
+  assert.deepEqual(input.map((g) => g.uuid), ["a", "b"], "input order preserved");
+  assert.deepEqual(res.groups.map((g) => g.uuid), ["b", "a"]);
+});
+
+test("a negative or absurd count from the platform still sums arithmetically", async () => {
+  // The platform has never returned a negative count, but if it does the sum must
+  // stay a number rather than silently becoming NaN and rendering as "-".
+  const res = summariseRollups(
+    [rollup({ totalCanvases: -3, offline30d: 2 }), rollup({ totalCanvases: 10 })],
+    0,
+  );
+  assert.equal(res.fleet.totalCanvases, 7);
+  assert.ok(Number.isFinite(res.fleet.totalCanvases));
+});
+
+test("a non-numeric count from the platform is coerced to 0, never NaN in the sum", async () => {
+  const g = groupRollupFromMetrics(
+    { uuid: "u" },
+    { current: { totalCanvasesCount: "12" as unknown as number, thirtyDaysMoreOfflineCanvasesCount: 5 } },
+  );
+  assert.equal(g.totalCanvases, 0, "a stray string is not silently trusted as a count");
+  const res = summariseRollups([g], 0);
+  assert.ok(Number.isFinite(res.fleet.totalCanvases));
+  assert.equal(res.fleet.offline30d, 5, "the readable sibling field still contributes");
+});

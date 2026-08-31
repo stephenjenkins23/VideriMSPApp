@@ -773,6 +773,29 @@ export class ReadQueries {
       : null;
   }
 
+  /**
+   * The latest generated AI action plan (US-5.2). Same contract as latestBrief:
+   * never generated on request, and the row's `generated_at` rides along so the
+   * endpoint can say how old the plan is rather than implying it is live.
+   */
+  async latestActionPlan(): Promise<Record<string, unknown> | null> {
+    const { rows } = await this.pool.query<{
+      generated_at: Date; window_hours: number; plan: unknown; model: string | null;
+    }>(
+      `SELECT generated_at, window_hours, plan, model
+         FROM action_plans ORDER BY generated_at DESC LIMIT 1`,
+    );
+    const row = rows[0];
+    return row
+      ? {
+          generatedAt: row.generated_at.toISOString(),
+          windowHours: row.window_hours,
+          model: row.model,
+          plan: row.plan,
+        }
+      : null;
+  }
+
   /** Fleet-wide telemetry availability — drives the "why is this empty" UI. */
   async telemetryAvailability(): Promise<Record<string, { readable: number; total: number }>> {
     const { rows } = await this.pool.query<Record<string, string>>(

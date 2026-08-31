@@ -46,6 +46,8 @@ interface StubOptions {
   aggregatorGroups?: Array<{ uuid: string; displayName?: string; active?: boolean }>;
   /** Per-group aggregator metrics; throwing simulates an unreadable group. */
   aggregatorMetrics?: (uuid: string) => unknown;
+  /** Row from queries.latestActionPlan (US-5.2). Absent = no plan generated yet. */
+  actionPlanRow?: Record<string, unknown>;
 }
 
 function stubPool(opts: StubOptions = {}): Pool {
@@ -179,6 +181,11 @@ function stubPool(opts: StubOptions = {}): Pool {
         };
       }
       if (sql.includes("FROM briefs")) return { rows: [], rowCount: 0 };
+      if (sql.includes("FROM action_plans")) {
+        return opts.actionPlanRow
+          ? { rows: [opts.actionPlanRow], rowCount: 1 }
+          : { rows: [], rowCount: 0 };
+      }
       // time_bucket must be checked BEFORE the FILTER branch: the device-health
       // query contains both `FROM health_samples` and `FILTER`, so matching on
       // FILTER first would hand it the availability row and it would 500.
@@ -469,6 +476,41 @@ test("a missing brief is a 404 with guidance", async () => {
   const res = await app.inject({ method: "GET", url: "/api/fleet/brief", headers: auth });
   assert.equal(res.statusCode, 404);
   assert.match(res.json().message, /npm run brief/);
+  await app.close();
+});
+
+// ─── action plan (US-5.2) ───────────────────────────────────────────────────
+
+test("a missing action plan is a 404 with guidance, never an empty plan", async () => {
+  const app = await build();
+  const res = await app.inject({ method: "GET", url: "/api/action-plan", headers: auth });
+  // An empty items array would read as "nothing to do" — the opposite of the truth.
+  assert.equal(res.statusCode, 404);
+  assert.equal(res.json().error, "no_action_plan");
+  assert.match(res.json().message, /npm run plan/);
+  await app.close();
+});
+
+test("the latest action plan is served with its own age", async () => {
+  const app = await build({
+    actionPlanRow: {
+      generated_at: new Date(Date.now() - 3600_000),
+      window_hours: 24,
+      model: "claude-opus-5",
+      plan: {
+        focus: "Firmware 3.3.8 is the fleet's single biggest problem.",
+        items: [{ rank: 1, title: "Upgrade the 3.3.8 cohort", affectedCount: 22, kind: "manual" }],
+        notCovered: ["temperature has no readable source"],
+      },
+    },
+  });
+  const body = (await app.inject({ method: "GET", url: "/api/action-plan", headers: auth })).json();
+
+  assert.equal(body.data.plan.items[0].affectedCount, 22);
+  assert.equal(body.data.windowHours, 24);
+  // A plan is a snapshot of when it was generated, never presented as live.
+  assert.ok(body.data.ageSeconds >= 3500 && body.data.ageSeconds <= 3700, "plan age must ride along");
+  assert.ok(body.meta.freshness, "standard freshness envelope");
   await app.close();
 });
 

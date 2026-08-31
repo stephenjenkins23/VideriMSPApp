@@ -198,3 +198,141 @@ test("honours an explicit schedule date over the evaluation instant's date", asy
   });
   assert.equal(repo.saved[0]!.s.date, "2026-01-01");
 });
+
+test("the default schedule date is the evaluation instant's UTC date, across the day seam", async () => {
+  // The publisher endpoint is per-date, so the date the poller asks for must track
+  // the instant it is evaluating — including either side of midnight UTC, where
+  // taking a local date would ask for the wrong day's schedule.
+  const late = stubRepo();
+  await pollScheduleSlowLane(late, [target(1)], stubReader({ "canvas-1": [alwaysOn] }), {
+    at: new Date("2026-08-31T23:59:00Z"),
+  });
+  assert.equal(late.saved[0]!.s.date, "2026-08-31");
+
+  const early = stubRepo();
+  await pollScheduleSlowLane(early, [target(1)], stubReader({ "canvas-1": [alwaysOn] }), {
+    at: new Date("2026-09-01T00:01:00Z"),
+  });
+  assert.equal(early.saved[0]!.s.date, "2026-09-01");
+});
+
+test("the reader is asked for the same date the snapshot records", async () => {
+  // A mismatch here would persist a snapshot labelled with a date whose schedule
+  // was never actually read — a silently wrong row rather than an error.
+  const repo = stubRepo();
+  const asked: Array<{ id: string; date: string }> = [];
+  const reader: ScheduleReader = async (t, date) => {
+    asked.push({ id: t.id, date });
+    return [alwaysOn];
+  };
+  await pollScheduleSlowLane(repo, [target(1)], reader, { at: AT });
+  assert.deepEqual(asked, [{ id: "canvas-1", date: "2026-08-31" }]);
+  assert.equal(repo.saved[0]!.s.date, "2026-08-31");
+});
+
+test("the publisher fan-out never exceeds its concurrency ceiling", async () => {
+  // One publisher call per canvas and no documented rate limit anywhere in the
+  // Videri API, so a fleet-sized tick must stay pinned to the ceiling we set.
+  const repo = stubRepo();
+  const targets = Array.from({ length: 25 }, (_, i) => target(i));
+  let inFlight = 0;
+  let peak = 0;
+  const reader: ScheduleReader = async () => {
+    inFlight++;
+    peak = Math.max(peak, inFlight);
+    await new Promise((r) => setTimeout(r, 1));
+    inFlight--;
+    return [alwaysOn];
+  };
+
+  const result = await pollScheduleSlowLane(repo, targets, reader, { at: AT, concurrency: 4 });
+  assert.equal(result.batchesOk, 25, "every canvas was still read");
+  assert.ok(peak <= 4, `peak in-flight ${peak} exceeded the ceiling of 4`);
+  assert.ok(peak > 1, "and the sweep is actually parallel, not serialised");
+});
+
+test("distinct failure reasons are reported separately, never merged into one line", async () => {
+  // The collapse is for REPEATED identical failures. Two different faults are two
+  // different operator actions, so merging them would hide one of them.
+  const repo = stubRepo();
+  const reader: ScheduleReader = async (t) => {
+    if (t.id === "canvas-1") throw new Error("publisher 500");
+    if (t.id === "canvas-2") throw new Error("canvas not found");
+    return [alwaysOn];
+  };
+  const result = await pollScheduleSlowLane(repo, [target(1), target(2), target(3)], reader, {
+    at: AT,
+  });
+
+  assert.equal(result.batchesFailed, 2);
+  assert.equal(result.errors.length, 2);
+  assert.ok(result.errors.some((e) => /publisher 500/.test(e)));
+  assert.ok(result.errors.some((e) => /canvas not found/.test(e)));
+  // Neither is counted as a repeat.
+  for (const e of result.errors) assert.equal(/×/.test(e), false);
+});
+
+test("a whole-batch failure is a zero yield with every canvas accounted for", async () => {
+  // The honest shape of "the publisher is down": yield 0 over the full targeted
+  // denominator, nothing written, and no device silently dropped from the count.
+  const repo = stubRepo();
+  const targets = [target(1), target(2), target(3)];
+  const result = await pollScheduleSlowLane(repo, targets, stubReader({}), { at: AT });
+
+  assert.equal(result.devicesTargeted, 3);
+  assert.equal(result.batchesOk, 0);
+  assert.equal(result.batchesFailed, 3, "failures are counted, not dropped");
+  assert.equal(result.rowsWritten, 0);
+  assert.equal(result.telemetryYield, 0);
+  assert.equal(repo.saved.length, 0, "nothing was persisted from an unreadable sweep");
+});
+
+test("the run reports its own identity and duration for the poller_runs record", async () => {
+  const repo = stubRepo();
+  const result = await pollScheduleSlowLane(repo, [target(1)], stubReader({ "canvas-1": [alwaysOn] }), {
+    at: AT,
+  });
+  assert.equal(result.poller, "schedule-slowlane");
+  assert.ok(Number.isFinite(result.durationMs), "duration is always recorded");
+  assert.ok(result.durationMs >= 0);
+});
+
+test("an empty target list records a duration and no yield, so it is not read as a 0% sweep", async () => {
+  const repo = stubRepo();
+  const result = await pollScheduleSlowLane(repo, [], stubReader({}), { at: AT });
+  assert.equal(result.telemetryYield, null, "null, never a fabricated 0% coverage");
+  assert.equal(result.batchesOk, 0);
+  assert.equal(result.batchesFailed, 0);
+  assert.deepEqual(result.errors, []);
+  assert.ok(Number.isFinite(result.durationMs));
+});
+
+test("every scheduled item that covers now is persisted, not just the count", async () => {
+  // The gap detector reasons over the ITEMS, so a snapshot that kept only the
+  // count would leave the fleet-wide path with nothing to judge.
+  const repo = stubRepo();
+  await pollScheduleSlowLane(
+    repo,
+    [target(1)],
+    stubReader({ "canvas-1": [alwaysOn, morningOnly] }),
+    { at: AT }, // 10:00 — both windows cover it
+  );
+  const saved = repo.saved[0]!.s;
+  assert.equal(saved.scheduledCount, 2);
+  assert.equal(saved.scheduledItems.length, 2);
+  assert.deepEqual(saved.scheduledItems.map((i) => i.assetUuid).sort(), ["a1", "a2"]);
+});
+
+test("out-of-window items are excluded from the persisted snapshot, not just uncounted", async () => {
+  const repo = stubRepo();
+  await pollScheduleSlowLane(
+    repo,
+    [target(1)],
+    stubReader({ "canvas-1": [alwaysOn, morningOnly] }),
+    { at: new Date("2026-08-31T14:00:00Z") }, // morningOnly has closed
+  );
+  const saved = repo.saved[0]!.s;
+  assert.equal(saved.scheduledCount, 1);
+  assert.deepEqual(saved.scheduledItems.map((i) => i.assetUuid), ["a1"]);
+  assert.equal(saved.hasActiveSchedule, true);
+});

@@ -20,6 +20,7 @@ import assert from "node:assert/strict";
 import {
   assemblePersistedProofOfPlay,
   detectGaps,
+  normalizeEvents,
   scheduledNow,
   windowCoversAt,
   type PersistedScheduleRow,
@@ -99,6 +100,127 @@ test("scheduledNow filters a mixed set to only the active windows", () => {
   ];
   const active = scheduledNow(events, at("2026-08-31T12:00:00Z")).map((e) => e.assetUuid);
   assert.deepEqual(active.sort(), ["always", "on"]);
+});
+
+// ─── publisher-shape normalisation ────────────────────────────────────────────
+//
+// `normalizeEvents` is the ONE place that knows the publisher's per-canvas events
+// shape — both the live-sample route and the fleet-wide slow lane parse through
+// it, so a device's schedule is only ever as trustworthy as this function. The
+// envelope is not pinned by a published spec, hence the three accepted shapes and
+// the "unknown shape means no schedule, never a gap" rule tested below.
+
+test("normalizeEvents accepts a bare array envelope", () => {
+  const out = normalizeEvents([
+    { assetUuid: "a1", assetType: "image", durationMs: 10000, startTime: "08:00", endTime: "18:00", priority: 2, frequency: "loop" },
+  ]);
+  assert.deepEqual(out, [
+    { assetUuid: "a1", assetType: "image", durationMs: 10000, startTime: "08:00", endTime: "18:00", priority: 2, frequency: "loop" },
+  ]);
+});
+
+test("normalizeEvents accepts the NestJS `data` envelope", () => {
+  const out = normalizeEvents({ data: [{ assetUuid: "a1" }, { assetUuid: "a2" }] });
+  assert.deepEqual(out.map((e) => e.assetUuid), ["a1", "a2"]);
+});
+
+test("normalizeEvents accepts the Spring `content` envelope", () => {
+  const out = normalizeEvents({ content: [{ assetUuid: "a1" }] });
+  assert.deepEqual(out.map((e) => e.assetUuid), ["a1"]);
+});
+
+test("an unrecognised envelope yields no schedule, which can never become a gap", () => {
+  // The engine reads [] as "nothing scheduled now", so an unparseable payload can
+  // only ever UNDER-claim. It must never throw and never invent an event.
+  for (const raw of [null, undefined, "nope", 42, true, {}, { data: "not-an-array" }, { content: 7 }, { items: [{}] }]) {
+    assert.deepEqual(normalizeEvents(raw), [], `unexpected parse of ${JSON.stringify(raw)}`);
+  }
+  // And the empty report that follows asserts nothing about the device.
+  const report = detectGaps([dev({ scheduled: normalizeEvents({ nope: true }) })]);
+  assert.equal(report.summary.devicesWithSchedule, 0);
+  assert.equal(report.summary.gaps, 0);
+});
+
+test("normalizeEvents keeps exactly the seven known fields and drops the rest", () => {
+  const out = normalizeEvents([{ assetUuid: "a1", playedAt: "2026-08-31T00:00:00Z", confirmed: true }]);
+  assert.deepEqual(Object.keys(out[0]!).sort(), [
+    "assetType", "assetUuid", "durationMs", "endTime", "frequency", "priority", "startTime",
+  ]);
+  // Notably `confirmed`/`playedAt` are NOT carried through: there is no readable
+  // render log, so nothing resembling confirmed playback may enter the engine.
+  assert.equal("confirmed" in out[0]!, false);
+});
+
+test("absent string fields normalise to null, never to an empty string", () => {
+  const [e] = normalizeEvents([{}]);
+  assert.deepEqual(e, {
+    assetUuid: null, assetType: null, durationMs: null,
+    startTime: null, endTime: null, priority: null, frequency: null,
+  });
+});
+
+test("blank and whitespace-only string fields are honest nulls, not values", () => {
+  const [e] = normalizeEvents([{ assetUuid: "", assetType: "   ", frequency: "\t\n" }]);
+  assert.equal(e!.assetUuid, null);
+  assert.equal(e!.assetType, null);
+  assert.equal(e!.frequency, null);
+});
+
+test("a null or non-object element becomes an all-null event rather than throwing", () => {
+  const out = normalizeEvents([null, undefined, 5]);
+  assert.equal(out.length, 3, "elements are never silently dropped");
+  for (const e of out) assert.equal(e.assetUuid, null);
+});
+
+test("numeric fields accept pg/JSON string numbers and reject unparseable ones", () => {
+  const [ok] = normalizeEvents([{ durationMs: "10000", priority: "3" }]);
+  assert.equal(ok!.durationMs, 10000);
+  assert.equal(ok!.priority, 3);
+  const [bad] = normalizeEvents([{ durationMs: "not-a-number", priority: null }]);
+  assert.equal(bad!.durationMs, null, "an unparseable duration is null, never 0");
+  assert.equal(bad!.priority, null);
+});
+
+test("non-finite numeric fields are null, never NaN or Infinity leaking into the payload", () => {
+  const [e] = normalizeEvents([{ durationMs: Number.NaN, priority: Number.POSITIVE_INFINITY }]);
+  assert.equal(e!.durationMs, null);
+  assert.equal(e!.priority, null);
+});
+
+// Regression: numOrNull used to coerce blindly — Number("") is 0 and
+// Number(true) is 1 — so a blank durationMs read as a zero-length asset and a
+// blank priority read as 0, i.e. TOP priority. Fixed to accept only a real
+// number or a non-blank numeric string.
+test(
+  "HONEST NULL: blank numeric fields must be null, not a fabricated 0",
+  () => {
+    const [e] = normalizeEvents([{ durationMs: "", priority: "  " }]);
+    assert.equal(e!.durationMs, null, "a blank duration is unread, not zero-length");
+    assert.equal(e!.priority, null, "a blank priority is unread, not top priority");
+    const [b] = normalizeEvents([{ durationMs: true, priority: [] }]);
+    assert.equal(b!.durationMs, null, "a boolean is not a duration");
+    assert.equal(b!.priority, null, "an array is not a priority");
+  },
+);
+
+test("the demo tenant's always-on payload round-trips into a covered window", () => {
+  // End to end through the real parse: this is the exact shape the tenant returns
+  // (empty daypart bounds), and it must read as scheduled at any instant.
+  const events = normalizeEvents({
+    data: [{ assetUuid: "asset-1", assetType: "image", durationMs: 10000, startTime: "", endTime: "", frequency: "loop" }],
+  });
+  assert.equal(scheduledNow(events, at("2026-08-31T03:00:00Z")).length, 1);
+  assert.equal(scheduledNow(events, at("2026-08-31T22:45:00Z")).length, 1);
+});
+
+test("a real daypart survives normalisation and is still filtered by window", () => {
+  const events = normalizeEvents([
+    { assetUuid: "morning", startTime: "08:00", endTime: "12:00" },
+    { assetUuid: "evening", startTime: "18:00", endTime: "22:00" },
+  ]);
+  assert.deepEqual(scheduledNow(events, at("2026-08-31T10:00:00Z")).map((e) => e.assetUuid), ["morning"]);
+  assert.deepEqual(scheduledNow(events, at("2026-08-31T20:00:00Z")).map((e) => e.assetUuid), ["evening"]);
+  assert.deepEqual(scheduledNow(events, at("2026-08-31T15:00:00Z")), []);
 });
 
 // ─── gap detection ────────────────────────────────────────────────────────────

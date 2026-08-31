@@ -29,6 +29,7 @@ import { registerRemediationRoutes } from "./routes/remediation.js";
 import { registerCorrelationRoutes } from "./routes/correlation.js";
 import { registerProofOfPlayRoutes } from "./routes/proof-of-play.js";
 import { registerRollupRoutes } from "./routes/rollups.js";
+import { registerActionPlanRoutes } from "./routes/action-plan.js";
 
 export interface BuildServerOptions {
   pool: Pool;
@@ -150,6 +151,7 @@ export async function buildServer(options: BuildServerOptions): Promise<FastifyI
   await registerCorrelationRoutes(app, ctx);
   await registerProofOfPlayRoutes(app, ctx);
   await registerRollupRoutes(app, ctx);
+  await registerActionPlanRoutes(app, ctx);
 
   return app;
 }

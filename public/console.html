@@ -1012,8 +1012,11 @@ function renderAlertWidget() {
   }
   const counts = {};
   for (const a of S.alerts) counts[a.severity] = (counts[a.severity] || 0) + 1;
+  // Clickable: a severity count an operator can see is a filter they will try to
+  // press. Each jumps to Alerts already filtered to that severity.
   const pills = SEV.filter(([s]) => counts[s]).map(([s, dot]) =>
-    `<span class="fp" style="cursor:default"><span class="d ${dot}"></span><b>${counts[s]}</b> ${s}</span>`).join("");
+    `<button class="fp" data-sev="${s}" title="Show only ${s} alerts">
+       <span class="d ${dot}"></span><b>${counts[s]}</b> ${s}</button>`).join("");
   el.innerHTML =
     `<div class="pills">${pills}</div>` +
     (crit.length ? `<div class="sechd">&#128308; Critical &#8212; requires action</div>` : "") +
@@ -1026,6 +1029,12 @@ function renderAlertWidget() {
         <span class="btn sm">Open</span></button>`).join("");
   el.querySelectorAll(".arow").forEach((b) =>
     b.addEventListener("click", () => openDevice(b.dataset.id)));
+  el.querySelectorAll("[data-sev]").forEach((b) =>
+    b.addEventListener("click", () => {
+      S.sev = b.dataset.sev;
+      switchTab("alerts");
+      renderAlertFilters(); renderAlerts();
+    }));
 }
 
 function renderFirmwareWidget() {
@@ -1232,7 +1241,12 @@ function renderBrief() {
 const SEV = [["critical", "red"], ["high", "red"], ["medium", "amb"], ["info", "blu"]];
 
 function renderAlertFilters() {
-  const counts = (S.summary && S.summary.snapshot.openAlertsBySeverity) || {};
+  // Counted from the alerts these chips actually filter, NOT the stored snapshot.
+  // The snapshot is computed on a 5-minute cadence, so it drifts from the live
+  // rows and the chip would claim a count the list below it contradicts (the same
+  // trap already fixed for the device status chips).
+  const counts = {};
+  for (const a of S.alerts) counts[a.severity] = (counts[a.severity] || 0) + 1;
   const wrap = $("#fp");
   wrap.innerHTML = "";
   for (const [sev, dot] of SEV) {
@@ -1624,6 +1638,21 @@ function paintDevice() {
   // Kick off the live read once per drawer open.
   if (S.dev._telemetry === undefined && !S.dev._telLoading) loadTelemetry(d.id);
 
+  // Auto-refresh the screen capture, once per drawer open. Someone looking at a
+  // device expects the picture to be of NOW — waiting for them to notice a
+  // "Capture fresh" button means the default experience is a months-old frame
+  // presented as the screen. Guarded so this stays gentle: ONLINE devices only
+  // (an offline panel just burns the command timeout), only when the frame is
+  // actually stale or missing, once per open, and never while the per-device
+  // throttle is still cooling. The button remains for a manual re-capture.
+  if (!S.dev._shotAuto && S.dev._shot !== undefined && d.status === "online") {
+    S.dev._shotAuto = true;
+    const shot = S.dev._shot;
+    const needsFresh = !shot || !shot.available || shot.stale;
+    const cooling = (CAPCOOL[d.id] || 0) > Date.now();
+    if (needsFresh && !cooling) captureFresh();
+  }
+
   $("#dtabs").innerHTML = DTABS.map(([k, l]) =>
     `<button data-t="${k}" aria-selected="${k === S.dtab}">${l}</button>`).join("");
   $("#dtabs").querySelectorAll("button").forEach((b) =>
@@ -1863,12 +1892,17 @@ function tabOverview(d) {
       </div>
       <div class="grp"><p class="glb">Tenant metafields
         <span style="font-weight:400;text-transform:none;letter-spacing:0;color:var(--tx-3)">&#8212; set by the tenant, not the platform</span></p>
+        ${kv("Last read from the tenant", ago(d.lastSyncedAt),
+             d.lastSyncedAt ? "ok" : "na")}
         ${Object.keys(d.metafields || {}).length === 0
           ? `<div class="kv"><span class="v na">None recorded</span></div>`
           : Object.entries(d.metafields).map(([k, v]) =>
               kv(esc(k), /^https?:\/\//.test(String(v))
                 ? `<a href="${esc(v)}" target="_blank" rel="noopener noreferrer">link</a>`
                 : esc(v))).join("")}
+        <div class="prov">Re-read on every device sync (~15 min), so a value edited in
+          the Videri console lands here within a cycle &#8212; watch the timestamp above to
+          confirm it is still moving. If it stops, the device poller stopped, not the metafield.</div>
       </div>
       <div class="note na"><b>No performance chart.</b> A CPU / temperature / RAM
         time series needs those metrics to exist. Swept all 107 read operations
@@ -2031,12 +2065,14 @@ function tabNetwork(d) {
           ? na("Downloading now", "not reported")
           : kv("Downloading now", l.downloading ? "Yes" : "No", l.downloading ? "wn" : "ok")}
         ${l.pingQuality
-          ? kv("ping_quality", `${esc(l.pingQuality)} &#8212; constant fleet-wide, no information`, "na")
-          : na("ping_quality", "not reported")}
+          ? kv("Network reachability", `${esc(l.pingQuality)} &#8212; reads the same on every screen, so it tells us nothing`, "na")
+          : na("Network reachability", "not reported")}
       </div>
       <div class="grp"><p class="glb">&#127760; IP configuration</p>
-        ${na("IP / subnet / gateway / DNS", "not yet surfaced")}
-        <div class="prov">Readable via demo_command wm_network / wifi_ip and settable via set_ethernet_settings (static_ip, subnet, router, dns1/dns2) — VFI has not wired the read, and the write is a gated disruptive command. Not a platform gap.</div>
+        ${na("IP / subnet / gateway / DNS", "not shown yet")}
+        <div class="prov">The screen can report its address, and it can also be set &#8212;
+          we simply haven't built these readouts, and we deliberately don't expose the
+          change (a wrong address strands the screen). Not a platform limitation.</div>
       </div>
     </div><div>
       <div class="grp"><p class="glb">&#128268; Inputs</p>
@@ -2048,16 +2084,20 @@ function tabNetwork(d) {
           ? kv("HDMI-CEC", st.cec_enabled ? "Enabled" : "Disabled", st.cec_enabled ? "wn" : "ok")
           : na("HDMI-CEC", "Only TCL panels report this")}
       </div>
-      <div class="grp"><p class="glb">&#128225; Readable via demo_command (not yet surfaced here)</p>
-        ${["IP address (wifi_ip)", "SSID scan (ssid_scan_json)",
-           "Static IP / DNS config (set_ethernet_settings)"]
-          .map((x) => `<div class="gaprow"><span class="gd" style="background:var(--blue)"></span>
-            <span><span class="gn">${x}</span></span></div>`).join("")}
+      <div class="grp"><p class="glb">&#128225; The device can report these &#8212; we haven't built the screens yet</p>
+        ${[["IP address", "which address this screen is using on the venue network"],
+           ["Nearby Wi-Fi networks", "what the screen can see, for diagnosing a weak signal"],
+           ["Static IP / DNS settings", "changeable, but we keep this off by design &#8212; a wrong address strands the screen"]]
+          .map(([n, why]) => `<div class="gaprow"><span class="gd" style="background:var(--blue)"></span>
+            <span><span class="gn">${n}</span><span class="gw">${why}</span></span></div>`).join("")}
+        <div class="prov">Nothing is missing from the platform here &#8212; the screen answers
+          these when asked. They are on our build list, not a limitation.</div>
       </div>
-      <div class="grp"><p class="glb">&#128683; Genuinely not available</p>
-        ${["Packet loss / jitter", "Aggregated fleet telemetry (per-device only)"]
-          .map((x) => `<div class="gaprow"><span class="gd"></span>
-            <span><span class="gn">${x}</span></span></div>`).join("")}
+      <div class="grp"><p class="glb">&#128683; Nothing reports these &#8212; anywhere</p>
+        ${[["Packet loss / jitter", "so venue congestion can't be fully separated from a screen fault"],
+           ["Fleet-wide hardware totals", "hardware is readable one screen at a time, never as a single fleet number"]]
+          .map(([n, why]) => `<div class="gaprow"><span class="gd"></span>
+            <span><span class="gn">${n}</span><span class="gw">${why}</span></span></div>`).join("")}
       </div>
       <div class="note"><b>Signal and NTP are read live from the device</b> (top-left),
         which means a venue network fault can now be told from a device fault: RSSI,
@@ -2801,9 +2841,39 @@ function renderActions() {
        </div></div>`
     : "";
 
+  // The AI action plan (Epic 5 US-5.2) leads, because it is the one surface that
+  // has reasoned ACROSS all the signals below and put them in an order. It is a
+  // generated artifact: stamped with its model and age, and its own notCovered
+  // list is rendered in full so its blind spots travel with its advice.
+  const PL = S.plan;
+  const plan = PL && PL.plan;
+  const planCard = (plan && Array.isArray(plan.items) && plan.items.length)
+    ? `<div class="card" style="margin-bottom:16px"><div class="chd">
+         <h2>&#10024; Do this first <span class="na" style="font-size:12px;font-weight:400">&#8212; AI-ranked plan</span></h2>
+         <span class="na" style="font-size:12px">${esc(PL.model || "")} &#183; ${ago(PL.generatedAt)}</span></div>
+       <div class="wbody">
+         ${plan.focus ? `<div class="note" style="margin-bottom:10px">${esc(plan.focus)}</div>` : ""}
+         ${plan.items.map((it) => `<div class="arow" style="cursor:default;align-items:flex-start">
+           <span class="thumb" style="background:var(--violet)22;display:flex;align-items:center;justify-content:center;color:var(--violet);font-weight:800;font-size:13px">${it.rank}</span>
+           <span><span class="ti">${esc(it.title || "")}
+             ${it.kind === "auto-safe" ? `<span class="v ok" style="font-size:11px">one-click</span>` : ""}</span>
+             <span class="ds">${esc(it.action || "")}</span>
+             <span class="mt">${esc(it.reasoning || "")}</span>
+             ${it.expectedImpact ? `<span class="mt"><b>Impact:</b> ${esc(it.expectedImpact)}</span>` : ""}</span>
+           <span class="fp" style="cursor:default;align-self:center"><b>${it.affectedCount ?? "—"}</b></span></div>`).join("")}
+         ${(plan.notCovered || []).length
+           ? `<div class="sechd">&#128683; The plan could not assess</div>` +
+             (plan.notCovered).map((n) => `<div class="na" style="font-size:12px;padding:7px 4px;border-top:1px solid var(--bd-2)">${esc(n)}</div>`).join("")
+           : ""}
+       </div></div>`
+    : (PL === null || PL === undefined
+        ? `<div class="card" style="margin-bottom:16px"><div class="wbody"><div class="empty">
+             No AI action plan yet &#8212; generate one with <code>npm run plan</code>.</div></div></div>`
+        : "");
+
   const CAP = 60;
   const advShown = advisory.slice(0, CAP);
-  el.innerHTML = header + corrCard + popCard +
+  el.innerHTML = header + planCard + corrCard + popCard +
     (oneClick.length
       ? `<div class="card" style="margin-bottom:16px"><div class="chd"><h2>&#9889; One-click fixes</h2>
            <span class="na" style="font-size:12px">${oneClick.length} device${oneClick.length===1?"":"s"} with a verified fix available</span></div>
@@ -2988,7 +3058,7 @@ async function load() {
   if (S.loading) return;
   S.loading = true;
   try {
-    const [summary, alerts, devices, compliance, pipeline, sla, brief, shots, remediation, correlation, pop] = await Promise.all([
+    const [summary, alerts, devices, compliance, pipeline, sla, brief, shots, remediation, correlation, pop, plan] = await Promise.all([
       api("/api/fleet/summary"),
       apiAll("/api/alerts"),
       apiAll("/api/devices"),
@@ -3006,6 +3076,8 @@ async function load() {
       api("/api/correlation").catch(() => null),
       // Proof-of-play (scheduled + screen-state gaps) — same, allowed to fail.
       api("/api/proof-of-play").catch(() => null),
+      // The AI action plan — 404 until `npm run plan` has been run, a normal state.
+      api("/api/action-plan").catch(() => null),
     ]);
     S.summary = summary.data;
     S.alerts = alerts.data;
@@ -3018,6 +3090,7 @@ async function load() {
     S.remediation = remediation && remediation.data;
     S.correlation = correlation && correlation.data;
     S.pop = pop && pop.data;
+    S.plan = plan && plan.data;
     S.fresh = (summary.meta && summary.meta.freshness) || null;
 
     // ageSeconds is only true at fetch time; recompute from the timestamp so

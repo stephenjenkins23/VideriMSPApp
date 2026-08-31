@@ -423,3 +423,20 @@ CREATE TABLE IF NOT EXISTS device_schedule (
 );
 CREATE INDEX IF NOT EXISTS device_schedule_latest_idx
   ON device_schedule (device_id, observed_at DESC);
+
+-- ── Generated AI action plans (US-5.2) ───────────────────────────────────────
+-- Kept separate from `briefs`: the payloads differ (a plan stores the structured
+-- intelligence it was built from, not a fleet bundle), and both endpoints serve
+-- "the most recent row" — one table with two row-types would have the brief
+-- endpoint returning plans. `input` is the snapshot every item traces back to.
+CREATE TABLE IF NOT EXISTS action_plans (
+  id            bigserial   PRIMARY KEY,
+  generated_at  timestamptz NOT NULL DEFAULT now(),
+  window_hours  integer     NOT NULL,
+  plan          jsonb       NOT NULL,
+  input         jsonb,
+  model         text,
+  input_tokens  integer,
+  output_tokens integer
+);
+CREATE INDEX IF NOT EXISTS action_plans_generated_idx ON action_plans (generated_at DESC);

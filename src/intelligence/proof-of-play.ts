@@ -230,9 +230,16 @@ export function normalizeEvents(raw: unknown): ScheduledEvent[] {
     const o = (e ?? {}) as Record<string, unknown>;
     const str = (v: unknown): string | null =>
       typeof v === "string" && v.trim() !== "" ? v : null;
+    // Blind coercion breaks the honest-null rule this module is built on:
+    // `Number("")` is 0 and `Number(true)` is 1, so a BLANK durationMs would
+    // become a zero-length asset and a blank priority would become 0 — which is
+    // TOP priority. The platform does emit blanks on this payload (that is why
+    // `str()` above maps them to null), so accept only a real number or a
+    // non-blank numeric string, and let everything else stay unreadable.
     const numOrNull = (v: unknown): number | null => {
-      if (v === null || v === undefined) return null;
-      const n = typeof v === "number" ? v : Number(v);
+      if (typeof v === "number") return Number.isFinite(v) ? v : null;
+      if (typeof v !== "string" || v.trim() === "") return null;
+      const n = Number(v);
       return Number.isFinite(n) ? n : null;
     };
     return {
