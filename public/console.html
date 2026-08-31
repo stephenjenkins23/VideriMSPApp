@@ -578,6 +578,11 @@ table.dt td.n{font-variant-numeric:tabular-nums}
         <div class="whd"><h3>&#128683; What this platform cannot tell us</h3></div>
         <div class="wbody" id="wgaps"></div>
       </div>
+      <div class="w w-12">
+        <div class="whd"><h3>&#128250; Content &amp; canvas health
+          <span class="prov">— aggregator rollup across all groups</span></h3></div>
+        <div class="wbody" id="wrollups"><div class="na">Loading fleet content rollup…</div></div>
+      </div>
     </div>
   </section>
 
@@ -2658,6 +2663,48 @@ function switchTab(v) {
 }
 
 /**
+ * Fleet content-health rollup (US-4.6, aggregator groups). Lazy-loaded and cached
+ * server-side (~14s cold, 30-min TTL), so it NEVER blocks the main dashboard — it
+ * fires once per session after the page has rendered and fills its card in when
+ * ready. Complements per-device telemetry, which only reaches online devices.
+ */
+let ROLLUPS_LOADING = false;
+async function loadRollups() {
+  if (ROLLUPS_LOADING || S.rollups) return;
+  ROLLUPS_LOADING = true;
+  const res = await api("/api/fleet/rollups").catch(() => null);
+  ROLLUPS_LOADING = false;
+  S.rollups = res && res.data;
+  renderRollups();
+}
+function renderRollups() {
+  const el = $("#wrollups");
+  if (!el) return;
+  const r = S.rollups;
+  if (!r || !r.fleet) { el.innerHTML = `<div class="na">Content rollup unavailable.</div>`; return; }
+  const f = r.fleet, total = f.totalCanvases || 0;
+  const pct = (n) => (total ? Math.round((n / total) * 100) : 0);
+  const stat = (label, n, sub, warn) => `<div style="min-width:104px">
+    <div style="font-size:24px;font-weight:800;letter-spacing:-.02em${warn ? ";color:var(--amber)" : ""}">${(n||0).toLocaleString()}</div>
+    <div class="na" style="font-size:11.5px">${label}${sub ? ` <span class="prov">${sub}</span>` : ""}</div></div>`;
+  const worst = (r.groups || []).filter((g) => (g.offline30d || 0) > 0).slice(0, 6);
+  el.innerHTML =
+    `<div style="display:flex;gap:24px;flex-wrap:wrap;align-items:baseline;margin-bottom:12px">
+       ${stat("Total canvases", total, "", false)}
+       ${stat("Offline &#8805;30d", f.offline30d, pct(f.offline30d) + "%", pct(f.offline30d) >= 25)}
+       ${stat("Offline &#8805;6mo", f.offline6mo, pct(f.offline6mo) + "%", false)}
+       ${stat("No content events", f.noEvents, "", (f.noEvents || 0) > 0)}
+       ${stat("Single content", f.singleContent, "", false)}
+     </div>` +
+    (worst.length
+      ? `<div class="prov" style="margin-bottom:6px">Worst groups by long-offline canvases</div>` +
+        worst.map((g) => `<div class="kv"><span class="k">${esc(g.name || g.uuid)}</span>
+          <span class="v wn">${g.offline30d} of ${g.totalCanvases} offline &#8805;30d</span></div>`).join("")
+      : "") +
+    `<div class="na" style="font-size:11.5px;margin-top:8px">Summed across ${r.meta?.groupsRead ?? "—"} groups${r.meta?.groupsFailed ? ` &#183; ${r.meta.groupsFailed} unreadable` : ""}. Canvas-level counts from the platform's group rollup &#8212; the offline signal reaches devices our per-device telemetry cannot.</div>`;
+}
+
+/**
  * Self-heal recommendations (Epic 1). The engine ranks symptom → action; we
  * surface it, split into ONE-CLICK fixes (we hold a verified write) and ADVISORY
  * (we can only recommend). A one-click never fires blind from here — it opens the
@@ -2990,6 +3037,9 @@ async function load() {
     renderCompliance(); renderSla();
     renderActions();
     drawModules();
+    // Fire-and-forget: the aggregator rollup is a ~14s cold fan-out, so it must
+    // never block the dashboard render. It fills its Overview card when ready.
+    loadRollups();
   } catch (e) {
     $("#staleness").innerHTML =
       `<div class="banner bad"><span>&#9888;&#65039;</span><span><b>Could not load the API.</b>
