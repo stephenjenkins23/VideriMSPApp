@@ -2723,9 +2723,33 @@ function renderActions() {
        </div></div>`
     : "";
 
+  // Proof of play (Epic 3) — scheduled content vs what the screen could show.
+  // Honest by construction: "scheduled, not confirmed", the basis caveat and the
+  // bounded-sample note both render so no one mistakes this for confirmed playback.
+  const P = S.pop;
+  const popCard = (P && P.summary)
+    ? `<div class="card" style="margin-bottom:16px"><div class="chd">
+         <h2>&#128250; Proof of play <span class="na" style="font-size:12px;font-weight:400">&#8212; scheduled, not confirmed</span></h2>
+         <span class="na" style="font-size:12px">Content scheduled vs what the screen could actually show</span></div>
+       <div class="wbody">
+         <div style="display:flex;gap:22px;flex-wrap:wrap;align-items:baseline">
+           <div><div style="font-size:26px;font-weight:800">${P.summary.devicesWithSchedule ?? 0}</div>
+             <div class="na" style="font-size:12px">devices scheduled</div></div>
+           <div><div style="font-size:26px;font-weight:800;color:${(P.summary.gaps||0)>0?"var(--amber)":"var(--green)"}">${P.summary.gaps ?? 0}</div>
+             <div class="na" style="font-size:12px">play gaps</div></div>
+           <div style="flex:1"></div>
+           <div class="pills">${Object.entries(P.summary.byReason||{}).map(([k,v])=>`<span class="fp" style="cursor:default"><b>${v}</b> ${esc(k)}</span>`).join("")}</div>
+         </div>
+         <div class="na" style="font-size:12px;margin-top:10px">
+           A gap = active schedule, but the screen was off / black / logo. Sampled
+           ${P.batch?.considered ?? "—"} of ${P.batch?.eligibleDevices ?? "—"} devices${P.batch?.truncated?" (bounded batch)":""}${P.batch?.schedulesUnreadable?` · ${P.batch.schedulesUnreadable} schedule(s) unreadable`:""}${P.summary.screenStateUnknown?` · ${P.summary.screenStateUnknown} screen-state unknown`:""}.
+           ${esc(P.basis||"")}</div>
+       </div></div>`
+    : "";
+
   const CAP = 60;
   const advShown = advisory.slice(0, CAP);
-  el.innerHTML = header + corrCard +
+  el.innerHTML = header + corrCard + popCard +
     (oneClick.length
       ? `<div class="card" style="margin-bottom:16px"><div class="chd"><h2>&#9889; One-click fixes</h2>
            <span class="na" style="font-size:12px">${oneClick.length} device${oneClick.length===1?"":"s"} with a verified fix available</span></div>
@@ -2910,7 +2934,7 @@ async function load() {
   if (S.loading) return;
   S.loading = true;
   try {
-    const [summary, alerts, devices, compliance, pipeline, sla, brief, shots, remediation, correlation] = await Promise.all([
+    const [summary, alerts, devices, compliance, pipeline, sla, brief, shots, remediation, correlation, pop] = await Promise.all([
       api("/api/fleet/summary"),
       apiAll("/api/alerts"),
       apiAll("/api/devices"),
@@ -2926,6 +2950,8 @@ async function load() {
       api("/api/remediation").catch(() => null),
       // Correlated findings (root causes) — same, allowed to fail.
       api("/api/correlation").catch(() => null),
+      // Proof-of-play (scheduled + screen-state gaps) — same, allowed to fail.
+      api("/api/proof-of-play").catch(() => null),
     ]);
     S.summary = summary.data;
     S.alerts = alerts.data;
@@ -2937,6 +2963,7 @@ async function load() {
     S.shots = shots && shots.data;
     S.remediation = remediation && remediation.data;
     S.correlation = correlation && correlation.data;
+    S.pop = pop && pop.data;
     S.fresh = (summary.meta && summary.meta.freshness) || null;
 
     // ageSeconds is only true at fetch time; recompute from the timestamp so
