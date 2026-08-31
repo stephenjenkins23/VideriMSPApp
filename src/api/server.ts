@@ -27,6 +27,7 @@ import { registerCommandRoutes } from "./routes/commands.js";
 import { registerScreenshotRoutes } from "./routes/screenshots.js";
 import { registerRemediationRoutes } from "./routes/remediation.js";
 import { registerCorrelationRoutes } from "./routes/correlation.js";
+import { registerProofOfPlayRoutes } from "./routes/proof-of-play.js";
 
 export interface BuildServerOptions {
   pool: Pool;
@@ -146,6 +147,7 @@ export async function buildServer(options: BuildServerOptions): Promise<FastifyI
   await registerScreenshotRoutes(app, ctx);
   await registerRemediationRoutes(app, ctx);
   await registerCorrelationRoutes(app, ctx);
+  await registerProofOfPlayRoutes(app, ctx);
 
   return app;
 }

@@ -34,6 +34,12 @@ interface StubOptions {
   device?: Record<string, unknown> | null;
   /** Rows returned by the remediation query (queries.remediationDevices). */
   remediationRows?: Array<Record<string, unknown>>;
+  /** Rows returned by the bounded screen-state query (queries.popScreenState). */
+  popScreenRows?: Array<Record<string, unknown>>;
+  /** Total eligible devices for proof-of-play, if larger than the returned batch. */
+  popEligibleTotal?: number;
+  /** Per-canvas schedule for proof-of-play; throwing simulates an unreadable schedule. */
+  popEvents?: (canvasId: string) => unknown;
 }
 
 function stubPool(opts: StubOptions = {}): Pool {
@@ -101,6 +107,20 @@ function stubPool(opts: StubOptions = {}): Pool {
               rowCount: 1,
             }
           : { rows: [], rowCount: 0 };
+      }
+      // Proof-of-play bounded screen-state (queries.popScreenState) — both its
+      // count and rows queries carry the `hs.observed_at IS NOT NULL` eligibility
+      // filter, which no other query uses. Must precede the generic device
+      // count/list branches below, which would otherwise swallow them.
+      if (sql.includes("hs.observed_at IS NOT NULL") && sql.includes("COUNT(*)::text AS count")) {
+        return {
+          rows: [{ count: String(opts.popEligibleTotal ?? opts.popScreenRows?.length ?? 0) }],
+          rowCount: 1,
+        };
+      }
+      if (sql.includes("hs.observed_at IS NOT NULL")) {
+        const rows = opts.popScreenRows ?? [];
+        return { rows, rowCount: rows.length };
       }
       if (sql.includes("COUNT(*)::text AS count") && sql.includes("FROM devices")) {
         return { rows: [{ count: String(deviceCount) }], rowCount: 1 };
@@ -182,12 +202,25 @@ const stubRepo = (opts: StubOptions = {}): Repository =>
     async markScreenshotRequested() { return 0; },
   }) as unknown as Repository;
 
-/** A fake Videri client that routes sync_command through the test's script. */
-function fakeVideri(script: (arg: string) => { response_code: string; message?: string }) {
+/**
+ * A fake Videri client. Routes the publisher per-canvas events read (Epic 3)
+ * through `popEvents`, and sync_command through `videriScript`. Kept as one fake
+ * so a test can exercise both control-plane paths at once.
+ */
+function fakeVideri(opts: StubOptions) {
   return {
-    async request(_service: string, _path: string, opts: { body?: { command_params?: { arg?: string } } }) {
-      const arg = opts.body?.command_params?.arg ?? "";
-      return script(arg);
+    async request(
+      _service: string,
+      path: string,
+      reqOpts?: { body?: { command_params?: { arg?: string } } },
+    ) {
+      const events = /\/canvases\/([^/]+)\/events\//.exec(path ?? "");
+      if (events) {
+        // Callers throw to simulate an unreadable schedule; propagate it.
+        return opts.popEvents ? opts.popEvents(decodeURIComponent(events[1]!)) : [];
+      }
+      const arg = reqOpts?.body?.command_params?.arg ?? "";
+      return opts.videriScript ? opts.videriScript(arg) : { response_code: "ok" };
     },
   } as unknown as import("../videri/http.js").VideriHttp;
 }
@@ -197,7 +230,7 @@ const build = (opts: StubOptions = {}, allowAnonymous = false) =>
     pool: stubPool(opts),
     repo: stubRepo(opts),
     auth: allowAnonymous ? { token: null, allowAnonymous: true } : { token: TOKEN, allowAnonymous: false },
-    ...(opts.videriScript ? { videri: fakeVideri(opts.videriScript) } : {}),
+    ...(opts.videriScript || opts.popEvents ? { videri: fakeVideri(opts) } : {}),
   });
 
 const auth = { authorization: `Bearer ${TOKEN}` };
@@ -1045,5 +1078,103 @@ test("correlation endpoint emits the honest degenerate-location note, not a bogu
     undefined,
     "no venue cluster from degenerate location data",
   );
+  await app.close();
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Proof-of-play endpoint (Epic 3). Screen-state comes from the bounded
+// popScreenState query; the per-canvas schedule comes from the fake Videri
+// client's popEvents. The window/gap logic itself is covered exhaustively in
+// intelligence/proof-of-play.test.ts; here we prove the endpoint wires the
+// query + publisher fan-out to the engine, carries freshness, reports the batch
+// honestly, and never fabricates a gap from a missing screen-state (a real query
+// would 500 if the route touched a field the row does not carry).
+// ─────────────────────────────────────────────────────────────────────────────
+
+const popScreenRow = (over: Record<string, unknown> = {}) => ({
+  id: "canvas-1", name: "Lobby North",
+  is_screen_on: true, is_black_screen: false, showing_logo: false,
+  observed_at: new Date("2026-08-31T12:00:00Z"),
+  ...over,
+});
+
+/** An always-on event, the shape publisher v1 returns for the demo tenant. */
+const alwaysOnEvent = { assetUuid: "a1", assetType: "image", durationMs: 10000,
+  startTime: null, endTime: null, priority: 1, frequency: "loop" };
+
+test("proof-of-play joins schedule with screen-state and flags gaps, with freshness", async () => {
+  const app = await build({
+    popScreenRows: [
+      popScreenRow({ id: "healthy" }),
+      popScreenRow({ id: "black", is_black_screen: true }),
+      popScreenRow({ id: "logo", showing_logo: true }),
+    ],
+    popEvents: () => [alwaysOnEvent],
+  });
+  const res = await app.inject({ method: "GET", url: "/api/proof-of-play", headers: auth });
+  assert.equal(res.statusCode, 200, "endpoint must not 500 on real popScreenState fields");
+  const body = res.json();
+
+  assert.ok(body.meta.freshness, "must carry freshness");
+  assert.ok(body.data.basis.includes("Scheduled, not confirmed"), "must carry the honesty basis");
+  assert.equal(body.data.controlPlane, true);
+  assert.equal(body.data.summary.devicesWithSchedule, 3);
+  assert.equal(body.data.summary.gaps, 2);
+  assert.equal(body.data.summary.byReason["screen black"], 1);
+  assert.equal(body.data.summary.byReason["screen logo"], 1);
+  assert.equal(body.data.batch.considered, 3);
+  assert.equal(body.data.batch.truncated, false);
+  await app.close();
+});
+
+test("proof-of-play never fabricates a gap from an unread screen-state", async () => {
+  const app = await build({
+    popScreenRows: [
+      popScreenRow({ id: "unknown", is_screen_on: null, is_black_screen: null, showing_logo: null }),
+    ],
+    popEvents: () => [alwaysOnEvent],
+  });
+  const body = (await app.inject({ method: "GET", url: "/api/proof-of-play", headers: auth })).json();
+  assert.equal(body.data.summary.gaps, 0, "an unread panel is never a gap");
+  assert.equal(body.data.summary.screenStateUnknown, 1);
+  assert.equal(body.data.devices[0].gap, false);
+  await app.close();
+});
+
+test("proof-of-play reports batch truncation honestly, never silently drops the tail", async () => {
+  const app = await build({
+    popScreenRows: [popScreenRow({ id: "c1" })],
+    popEligibleTotal: 500, // far more eligible than the returned batch
+    popEvents: () => [alwaysOnEvent],
+  });
+  const body = (await app.inject({ method: "GET", url: "/api/proof-of-play", headers: auth })).json();
+  assert.equal(body.data.batch.eligibleDevices, 500);
+  assert.equal(body.data.batch.considered, 1);
+  assert.equal(body.data.batch.truncated, true);
+  await app.close();
+});
+
+test("proof-of-play counts an unreadable schedule, never as a gap", async () => {
+  const app = await build({
+    popScreenRows: [popScreenRow({ id: "black", is_black_screen: true })],
+    popEvents: () => { throw new Error("publisher 500"); },
+  });
+  const body = (await app.inject({ method: "GET", url: "/api/proof-of-play", headers: auth })).json();
+  // Schedule unreadable → the device has no known schedule, so no gap despite the
+  // black screen, and the unreadable count is surfaced rather than hidden.
+  assert.equal(body.data.batch.schedulesUnreadable, 1);
+  assert.equal(body.data.summary.devicesWithSchedule, 0);
+  assert.equal(body.data.summary.gaps, 0);
+  await app.close();
+});
+
+test("proof-of-play without a control plane is an honest empty report, not a 500", async () => {
+  const app = await build({ popScreenRows: [popScreenRow()] }); // no popEvents → no videri
+  const res = await app.inject({ method: "GET", url: "/api/proof-of-play", headers: auth });
+  assert.equal(res.statusCode, 200);
+  const body = res.json();
+  assert.equal(body.data.controlPlane, false);
+  assert.ok(body.data.note.includes("credentials"), "must say why schedules are unread");
+  assert.deepEqual(body.data.devices, []);
   await app.close();
 });

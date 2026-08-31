@@ -610,6 +610,65 @@ export class ReadQueries {
     });
   }
 
+  /**
+   * A bounded batch of devices carrying a recent screen-state reading, for the
+   * scheduled proof-of-play join (Epic 3).
+   *
+   * Only devices with a health sample inside `windowHours` are eligible — a
+   * device we have not heard from has no screen-state to judge a schedule
+   * against, and inventing one would be exactly the fabricated-null this system
+   * refuses. The batch is capped (the route fans out one publisher call per
+   * device to read its schedule, so this must stay bounded), ordered
+   * freshest-first, and the *total* eligible count is returned alongside so the
+   * caller can report truncation honestly rather than silently dropping the tail.
+   */
+  async popScreenState(
+    limit: number,
+    windowHours = 24,
+  ): Promise<{
+    devices: Array<{
+      id: string;
+      name: string | null;
+      isScreenOn: boolean | null;
+      isBlackScreen: boolean | null;
+      showingLogo: boolean | null;
+      screenObservedAt: string | null;
+    }>;
+    eligibleTotal: number;
+  }> {
+    const eligibleFrom = `
+       FROM devices d ${LATEST_SAMPLE_LATERAL}
+      WHERE hs.observed_at IS NOT NULL
+        AND hs.observed_at > now() - ($1::text || ' hours')::interval`;
+
+    const [countResult, rowsResult] = await Promise.all([
+      this.pool.query<{ count: string }>(
+        `SELECT COUNT(*)::text AS count ${eligibleFrom}`,
+        [String(windowHours)],
+      ),
+      this.pool.query(
+        `SELECT d.id, d.name, hs.is_screen_on, hs.is_black_screen, hs.showing_logo,
+                hs.observed_at
+           ${eligibleFrom}
+          ORDER BY hs.observed_at DESC
+          LIMIT ${Number(limit)}`,
+        [String(windowHours)],
+      ),
+    ]);
+
+    return {
+      eligibleTotal: Number(countResult.rows[0]?.count ?? 0),
+      devices: rowsResult.rows.map((r) => ({
+        id: r["id"] as string,
+        name: (r["name"] as string | null) ?? null,
+        isScreenOn: (r["is_screen_on"] as boolean | null) ?? null,
+        isBlackScreen: (r["is_black_screen"] as boolean | null) ?? null,
+        showingLogo: (r["showing_logo"] as boolean | null) ?? null,
+        screenObservedAt: (r["observed_at"] as Date | null)?.toISOString() ?? null,
+      })),
+    };
+  }
+
   async alertRules(): Promise<Array<Record<string, unknown>>> {
     const { rows } = await this.pool.query<{
       id: string; definition: Record<string, unknown>; enabled: boolean; updated_at: Date;
