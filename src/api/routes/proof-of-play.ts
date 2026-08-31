@@ -2,7 +2,9 @@ import type { FastifyInstance } from "fastify";
 import { envelope } from "../freshness.js";
 import {
   BASIS,
+  assemblePersistedProofOfPlay,
   detectGaps,
+  normalizeEvents,
   scheduledNow,
   type PopDevice,
   type ScheduledEvent,
@@ -19,43 +21,6 @@ const DEVICE_CAP = 40;
 
 /** Outbound concurrency for the per-device schedule fan-out. */
 const FETCH_CONCURRENCY = 8;
-
-/**
- * The publisher's per-canvas events endpoint returns the day's schedule. Its
- * envelope is not pinned by a published spec, so we accept the three shapes the
- * platform's services use (bare array / NestJS `data` / Spring `content`) and
- * normalise to honest nulls. An unrecognised shape yields `[]`, which the engine
- * reads as "no schedule", not a gap.
- */
-function normalizeEvents(raw: unknown): ScheduledEvent[] {
-  const arr: unknown[] = Array.isArray(raw)
-    ? raw
-    : Array.isArray((raw as { data?: unknown })?.data)
-      ? ((raw as { data: unknown[] }).data)
-      : Array.isArray((raw as { content?: unknown })?.content)
-        ? ((raw as { content: unknown[] }).content)
-        : [];
-
-  return arr.map((e): ScheduledEvent => {
-    const o = (e ?? {}) as Record<string, unknown>;
-    const str = (v: unknown): string | null =>
-      typeof v === "string" && v.trim() !== "" ? v : null;
-    const numOrNull = (v: unknown): number | null => {
-      if (v === null || v === undefined) return null;
-      const n = typeof v === "number" ? v : Number(v);
-      return Number.isFinite(n) ? n : null;
-    };
-    return {
-      assetUuid: str(o["assetUuid"]),
-      assetType: str(o["assetType"]),
-      durationMs: numOrNull(o["durationMs"]),
-      startTime: str(o["startTime"]),
-      endTime: str(o["endTime"]),
-      priority: numOrNull(o["priority"]),
-      frequency: str(o["frequency"]),
-    };
-  });
-}
 
 /** Run `fn` over `items` with a bounded number of in-flight calls. */
 async function mapWithConcurrency<T, R>(
@@ -78,33 +43,73 @@ async function mapWithConcurrency<T, R>(
 
 export async function registerProofOfPlayRoutes(app: FastifyInstance, ctx: ApiContext): Promise<void> {
   /**
-   * Scheduled proof-of-play + screen-state gap detection (Epic 3, docs/19).
+   * Scheduled proof-of-play + screen-state gap detection (Epic 3/4, docs/19).
    *
-   * Reads the platform SCHEDULE (publisher v1 events, per canvas, for today) for
-   * a bounded batch of devices that have a recent screen-state, joins it against
-   * the latest screen-state we hold, and runs the pure gap detector.
+   * PREFERS the fleet-wide PERSISTED schedules (US-4.5). The schedule slow lane
+   * (`schedule-slowlane`) stores a per-canvas "scheduled now" snapshot in
+   * `device_schedule`, so gap detection can run over the WHOLE fleet from our own
+   * tables — one query, no outbound calls, no cap — joined against the latest
+   * screen-state we hold. Coverage is reported honestly (how many of the fleet
+   * have a snapshot yet) and every snapshot carries its `fetchedAt` age, so a
+   * partial or stale sweep never reads as fabricated liveness.
    *
-   * HONESTY, load-bearing:
+   * FALLS BACK to the original bounded LIVE sample when the table is still empty
+   * (before the poller's first sweep), so the endpoint works pre-poll: it reads
+   * the publisher v1 events per device for a capped batch and joins the same way.
+   *
+   * HONESTY, load-bearing in both paths:
    *   - "Scheduled, not confirmed." No render log is readable, so a schedule is
    *     never presented as playback. `BASIS` states this in the payload.
    *   - A gap requires a definitive bad screen signal (off / black / logo) while
    *     content is scheduled. An unread panel is reported as unknown, never a gap.
-   *   - The batch is capped and the cap + eligible total + unreadable count are
-   *     all in the payload: no silent truncation, no fabricated coverage.
+   *   - Coverage/truncation is always in the payload: no silent drop, no
+   *     fabricated coverage.
    *
    * GET reads only — this endpoint never writes to a device. Carries the standard
-   * freshness envelope, since a schedule/screen join is only as live as the
-   * screen-state behind it.
+   * freshness envelope, since a schedule/screen join is only as live as the data
+   * behind it.
    */
   app.get("/api/proof-of-play", async (_request, reply) => {
-    const [batch, freshness] = await Promise.all([
-      ctx.queries.popScreenState(DEVICE_CAP),
+    const [persisted, freshness] = await Promise.all([
+      ctx.queries.popPersistedSchedules(),
       ctx.freshness(),
     ]);
 
     // Today's date for the per-canvas events lookup (UTC; the schedules on this
     // tenant are always-on so the date boundary never bites — noted, not hidden).
     const date = new Date().toISOString().slice(0, 10);
+
+    // ── Preferred path: fleet-wide persisted schedules ──
+    // Present iff the slow lane has written at least one snapshot. Reads only our
+    // own tables, so it covers every device with a snapshot with no cap.
+    if (persisted.devices.length > 0) {
+      const { devices, coverage, staleness } = assemblePersistedProofOfPlay(
+        persisted.devices,
+        persisted.fleetDevices,
+      );
+      const report = detectGaps(devices);
+      return reply.send(
+        envelope(
+          {
+            date,
+            basis: BASIS,
+            source: "persisted fleet-wide (device_schedule slow lane)",
+            mode: "persisted",
+            controlPlane: true,
+            devices: report.devices,
+            summary: report.summary,
+            coverage,
+            staleness,
+          },
+          freshness,
+        ),
+      );
+    }
+
+    // ── Fallback path: bounded live sample (pre-poll) ──
+    // The table is empty, so read the publisher live for a capped batch of the
+    // freshest-screen-state devices — the endpoint's original behaviour.
+    const batch = await ctx.queries.popScreenState(DEVICE_CAP);
 
     // No control plane configured → we can read screen-state but not schedules.
     // Return an honest empty report rather than pretending, or 500ing.
@@ -115,6 +120,7 @@ export async function registerProofOfPlayRoutes(app: FastifyInstance, ctx: ApiCo
             date,
             basis: BASIS,
             source: "publisher v1 per-device (bounded batch)",
+            mode: "live-sample",
             controlPlane: false,
             note: "No Videri credentials configured, so schedules cannot be read; screen-state is unjoined.",
             devices: [],
@@ -178,6 +184,7 @@ export async function registerProofOfPlayRoutes(app: FastifyInstance, ctx: ApiCo
           date,
           basis: BASIS,
           source: "publisher v1 per-device (bounded batch)",
+          mode: "live-sample",
           controlPlane: true,
           devices: report.devices,
           summary: report.summary,

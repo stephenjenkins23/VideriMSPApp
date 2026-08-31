@@ -248,6 +248,84 @@ export function normalizeEvents(raw: unknown): ScheduledEvent[] {
 }
 
 /**
+ * One device's latest PERSISTED schedule snapshot joined with its latest
+ * screen-state, as the fleet-wide read (`popPersistedSchedules`) returns it.
+ * `scheduledItems` is the "scheduled now" set the slow lane already computed at
+ * `fetchedAt`; it is NOT re-evaluated against the current wall clock, so the
+ * report is honest only when `fetchedAt` (its age) rides along with it.
+ */
+export interface PersistedScheduleRow {
+  id: string;
+  name: string | null;
+  scheduledItems: ScheduledEvent[];
+  /** When the publisher was read for this row (ISO, UTC). Carries staleness. */
+  fetchedAt: string;
+  isScreenOn: boolean | null;
+  isBlackScreen: boolean | null;
+  showingLogo: boolean | null;
+}
+
+/** How much of the fleet the persisted path can actually speak to — honest denominator. */
+export interface PersistedCoverage {
+  /** Every device we track (the honest denominator). */
+  fleetDevices: number;
+  /** Devices with at least one persisted schedule snapshot to judge. */
+  withPersistedSchedule: number;
+  /** Share covered, or null when the fleet is empty — never a fabricated 0/0. */
+  coveragePct: number | null;
+}
+
+/** The age envelope of the persisted snapshots, so none is presented as live. */
+export interface ScheduleStaleness {
+  oldestFetchedAt: string | null;
+  newestFetchedAt: string | null;
+}
+
+/**
+ * Shape the fleet-wide persisted rows into the gap detector's inputs, plus the
+ * coverage and staleness the endpoint reports alongside (US-4.5).
+ *
+ * Pure: the caller runs `detectGaps` over `devices`. `scheduledItems` is passed
+ * straight through as the device's "scheduled now" set — it was already filtered
+ * to the fetch instant by the slow lane, so re-filtering here against a different
+ * clock would silently drop content the snapshot legitimately holds. Freshness is
+ * carried instead (oldest/newest `fetchedAt`), so a stale sweep reads as stale
+ * rather than as fabricated liveness. ISO timestamps compare lexicographically.
+ */
+export function assemblePersistedProofOfPlay(
+  rows: readonly PersistedScheduleRow[],
+  fleetDevices: number,
+): { devices: PopDevice[]; coverage: PersistedCoverage; staleness: ScheduleStaleness } {
+  const devices: PopDevice[] = rows.map((r) => ({
+    deviceId: r.id,
+    deviceLabel: r.name ?? r.id,
+    scheduled: r.scheduledItems,
+    screen: {
+      isScreenOn: r.isScreenOn,
+      isBlackScreen: r.isBlackScreen,
+      showingLogo: r.showingLogo,
+    },
+  }));
+
+  let oldestFetchedAt: string | null = null;
+  let newestFetchedAt: string | null = null;
+  for (const r of rows) {
+    if (oldestFetchedAt === null || r.fetchedAt < oldestFetchedAt) oldestFetchedAt = r.fetchedAt;
+    if (newestFetchedAt === null || r.fetchedAt > newestFetchedAt) newestFetchedAt = r.fetchedAt;
+  }
+
+  return {
+    devices,
+    coverage: {
+      fleetDevices,
+      withPersistedSchedule: rows.length,
+      coveragePct: fleetDevices === 0 ? null : rows.length / fleetDevices,
+    },
+    staleness: { oldestFetchedAt, newestFetchedAt },
+  };
+}
+
+/**
  * Join per-device schedule against screen-state and flag the gaps.
  *
  * A device is "with schedule" iff it has at least one event scheduled now. Of

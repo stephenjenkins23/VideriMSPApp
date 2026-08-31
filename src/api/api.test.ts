@@ -38,6 +38,8 @@ interface StubOptions {
   popScreenRows?: Array<Record<string, unknown>>;
   /** Total eligible devices for proof-of-play, if larger than the returned batch. */
   popEligibleTotal?: number;
+  /** Rows from the fleet-wide persisted-schedule query (queries.popPersistedSchedules). */
+  persistedScheduleRows?: Array<Record<string, unknown>>;
   /** Per-canvas schedule for proof-of-play; throwing simulates an unreadable schedule. */
   popEvents?: (canvasId: string) => unknown;
   /** Groups returned by `rpm /v1/groups`, for the aggregator rollup (US-4.6). */
@@ -124,6 +126,14 @@ function stubPool(opts: StubOptions = {}): Pool {
       }
       if (sql.includes("hs.observed_at IS NOT NULL")) {
         const rows = opts.popScreenRows ?? [];
+        return { rows, rowCount: rows.length };
+      }
+      // Fleet-wide persisted schedules (queries.popPersistedSchedules) — the main
+      // query joins device_schedule; its fleetDevices COUNT falls through to the
+      // generic "FROM devices" count below (driven by deviceCount). Must precede
+      // the generic "FROM devices d" list branch, which would otherwise swallow it.
+      if (sql.includes("FROM device_schedule")) {
+        const rows = opts.persistedScheduleRows ?? [];
         return { rows, rowCount: rows.length };
       }
       if (sql.includes("COUNT(*)::text AS count") && sql.includes("FROM devices")) {
@@ -1192,6 +1202,83 @@ test("proof-of-play without a control plane is an honest empty report, not a 500
   assert.equal(body.data.controlPlane, false);
   assert.ok(body.data.note.includes("credentials"), "must say why schedules are unread");
   assert.deepEqual(body.data.devices, []);
+  await app.close();
+});
+
+// ── proof-of-play fleet-wide PERSISTED path (US-4.5) ──────────────────────────
+// When device_schedule holds snapshots, the endpoint prefers them: it joins the
+// latest persisted schedule with the latest screen-state over the WHOLE fleet
+// from our own tables, no publisher fan-out, and reports coverage honestly. When
+// the table is empty it must fall back to the live-sample path so it works pre-poll.
+
+/** A row as queries.popPersistedSchedules returns it (Date columns, jsonb array). */
+const persistedRow = (over: Record<string, unknown> = {}) => ({
+  id: "canvas-1", name: "Lobby North",
+  scheduled_items: [{ assetUuid: "a1", assetType: "image", durationMs: 10000,
+    startTime: null, endTime: null, priority: 1, frequency: "loop" }],
+  scheduled_count: 1,
+  schedule_observed_at: new Date("2026-08-31T12:00:00Z"),
+  fetched_at: new Date("2026-08-31T12:00:00Z"),
+  is_screen_on: true, is_black_screen: false, showing_logo: false,
+  screen_observed_at: new Date("2026-08-31T12:00:00Z"),
+  ...over,
+});
+
+test("proof-of-play prefers the persisted fleet-wide path and reports honest coverage", async () => {
+  const app = await build({
+    persistedScheduleRows: [
+      persistedRow({ id: "healthy" }),
+      persistedRow({ id: "black", is_black_screen: true }),
+      persistedRow({ id: "logo", showing_logo: true }),
+    ],
+    deviceCount: 12, // fleet is larger than what has a snapshot → coverage < 1
+  });
+  const res = await app.inject({ method: "GET", url: "/api/proof-of-play", headers: auth });
+  assert.equal(res.statusCode, 200, "persisted path must not 500 on real popPersistedSchedules fields");
+  const body = res.json();
+
+  assert.equal(body.data.mode, "persisted");
+  assert.ok(body.data.source.includes("device_schedule"), "must name the persisted source");
+  assert.ok(body.data.basis.includes("Scheduled, not confirmed"), "must carry the honesty basis");
+  assert.equal(body.data.summary.devicesWithSchedule, 3);
+  assert.equal(body.data.summary.gaps, 2);
+  assert.equal(body.data.summary.byReason["screen black"], 1);
+  assert.equal(body.data.summary.byReason["screen logo"], 1);
+  // Coverage is honest: 3 of 12 devices have a snapshot so far.
+  assert.equal(body.data.coverage.fleetDevices, 12);
+  assert.equal(body.data.coverage.withPersistedSchedule, 3);
+  assert.equal(body.data.coverage.coveragePct, 0.25);
+  assert.ok(body.data.staleness.newestFetchedAt, "must carry snapshot age");
+  assert.ok(body.meta.freshness, "must carry freshness");
+  await app.close();
+});
+
+test("persisted path never fabricates a gap from an unread screen-state", async () => {
+  const app = await build({
+    persistedScheduleRows: [
+      persistedRow({ id: "unknown", is_screen_on: null, is_black_screen: null,
+        showing_logo: null, screen_observed_at: null }),
+    ],
+    deviceCount: 1,
+  });
+  const body = (await app.inject({ method: "GET", url: "/api/proof-of-play", headers: auth })).json();
+  assert.equal(body.data.summary.gaps, 0, "an unread panel is never a gap");
+  assert.equal(body.data.summary.screenStateUnknown, 1);
+  assert.equal(body.data.devices[0].gap, false);
+  await app.close();
+});
+
+test("proof-of-play falls back to the live sample when device_schedule is empty", async () => {
+  // No persistedScheduleRows → the persisted query returns []; the endpoint must
+  // fall through to the bounded live-sample path so it still works pre-poll.
+  const app = await build({
+    popScreenRows: [popScreenRow({ id: "c1", is_black_screen: true })],
+    popEvents: () => [alwaysOnEvent],
+  });
+  const body = (await app.inject({ method: "GET", url: "/api/proof-of-play", headers: auth })).json();
+  assert.equal(body.data.mode, "live-sample", "empty table → live fallback");
+  assert.equal(body.data.batch.considered, 1);
+  assert.equal(body.data.summary.gaps, 1); // black screen with an active schedule
   await app.close();
 });
 

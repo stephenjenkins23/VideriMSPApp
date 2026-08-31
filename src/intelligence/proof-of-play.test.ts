@@ -18,9 +18,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  assemblePersistedProofOfPlay,
   detectGaps,
   scheduledNow,
   windowCoversAt,
+  type PersistedScheduleRow,
   type PopDevice,
   type ScheduledEvent,
   type ScreenState,
@@ -198,4 +200,61 @@ test("an empty fleet is an empty report, not an error", () => {
   assert.deepEqual(report.devices, []);
   assert.equal(report.summary.devicesWithSchedule, 0);
   assert.equal(report.summary.gaps, 0);
+});
+
+// ── assemblePersistedProofOfPlay (US-4.5 fleet-wide persisted path) ───────────
+
+const persistedRow = (over: Partial<PersistedScheduleRow> = {}): PersistedScheduleRow => ({
+  id: "canvas-1",
+  name: "Lobby North",
+  scheduledItems: [ev()],
+  fetchedAt: "2026-08-31T12:00:00.000Z",
+  isScreenOn: true,
+  isBlackScreen: false,
+  showingLogo: false,
+  ...over,
+});
+
+test("assemblePersistedProofOfPlay maps rows into gap-detector inputs verbatim", () => {
+  const { devices } = assemblePersistedProofOfPlay(
+    [persistedRow({ id: "a", name: null, scheduledItems: [ev(), ev()] })],
+    10,
+  );
+  assert.equal(devices.length, 1);
+  assert.equal(devices[0]!.deviceId, "a");
+  assert.equal(devices[0]!.deviceLabel, "a"); // name null → falls back to id
+  // scheduledItems pass straight through — the slow lane already filtered to now.
+  assert.equal(devices[0]!.scheduled.length, 2);
+  // Feeding the result to detectGaps produces a real report.
+  const report = detectGaps(devices);
+  assert.equal(report.summary.devicesWithSchedule, 1);
+});
+
+test("assemblePersistedProofOfPlay reports honest coverage against the fleet", () => {
+  const { coverage } = assemblePersistedProofOfPlay(
+    [persistedRow({ id: "a" }), persistedRow({ id: "b" })],
+    8,
+  );
+  assert.equal(coverage.fleetDevices, 8);
+  assert.equal(coverage.withPersistedSchedule, 2);
+  assert.equal(coverage.coveragePct, 0.25);
+});
+
+test("assemblePersistedProofOfPlay never fabricates a 0/0 coverage ratio", () => {
+  const { coverage } = assemblePersistedProofOfPlay([], 0);
+  assert.equal(coverage.withPersistedSchedule, 0);
+  assert.equal(coverage.coveragePct, null); // honest null, never 0 dressed as data
+});
+
+test("assemblePersistedProofOfPlay carries the snapshot age envelope", () => {
+  const { staleness } = assemblePersistedProofOfPlay(
+    [
+      persistedRow({ id: "old", fetchedAt: "2026-08-31T09:00:00.000Z" }),
+      persistedRow({ id: "new", fetchedAt: "2026-08-31T15:00:00.000Z" }),
+      persistedRow({ id: "mid", fetchedAt: "2026-08-31T12:00:00.000Z" }),
+    ],
+    3,
+  );
+  assert.equal(staleness.oldestFetchedAt, "2026-08-31T09:00:00.000Z");
+  assert.equal(staleness.newestFetchedAt, "2026-08-31T15:00:00.000Z");
 });

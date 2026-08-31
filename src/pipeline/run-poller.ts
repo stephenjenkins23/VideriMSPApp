@@ -30,6 +30,11 @@ import { crossCheckVideriAlerts, renderCrossCheck } from "../alerting/videri-cro
 import { pollDeviceSettings } from "../compliance/settings-poller.js";
 import { runCompliance, seedTemplates, toPollerRun as complianceRun } from "../compliance/engine.js";
 import { pollTelemetrySlowLane, type TelemetrySlowLaneTarget } from "./pollers/telemetry-slowlane.js";
+import {
+  pollScheduleSlowLane,
+  type ScheduleReader,
+} from "./pollers/schedule-slowlane.js";
+import { normalizeEvents } from "../intelligence/proof-of-play.js";
 import type { TelemetryRunner } from "../videri/telemetry.js";
 import type { PollerResult } from "./pollers/types.js";
 
@@ -64,6 +69,17 @@ const makeTelemetryRunner = (t: TelemetrySlowLaneTarget): TelemetryRunner => asy
   });
   const code = r.response_code ?? r.responses?.[0]?.params?.response_code ?? "UNKNOWN";
   return { code, message: r.message ?? "" };
+};
+
+/** Read + normalise one canvas's publisher events — the same shape the
+ *  proof-of-play route and the standalone run-schedule-slowlane entrypoint read.
+ *  GET only; `normalizeEvents` is the one place that knows the envelope. */
+const readSchedule: ScheduleReader = async (t, date) => {
+  const raw = await http.request<unknown>(
+    "publisher",
+    `/api/v1/canvases/${encodeURIComponent(t.id)}/events/${date}`,
+  );
+  return normalizeEvents(raw);
 };
 
 /** Records every run and surfaces failures without letting them escape. */
@@ -192,6 +208,28 @@ if (!dryRun) {
         }
         const targets = await repo.telemetrySlowLaneTargets(10);
         record(await pollTelemetrySlowLane(repo, targets, makeTelemetryRunner, { concurrency: 4, log }));
+      },
+    },
+    {
+      // SLOW LANE. The platform SCHEDULE is per-canvas — one publisher v1 events
+      // GET per device — so this rotates a batch of the stalest-persisted devices
+      // each tick, computes "scheduled now", and persists it into device_schedule
+      // so proof-of-play gap detection can run FLEET-WIDE from stored rows instead
+      // of live-sampling a bounded batch on every request (US-4.5). Unlike the
+      // telemetry lane it is NOT online-only — a canvas has a schedule whether or
+      // not it is reachable, and the events endpoint is a control-plane read, not
+      // a device command. Opt-in behind ENABLE_SCHEDULE_SLOWLANE; ~30m so a
+      // several-hundred-device fleet sweeps in a handful of hours. GET reads only.
+      name: "schedule-slowlane",
+      intervalMs: 30 * 60_000,
+      runOnStart: false,
+      handler: async () => {
+        if (process.env["ENABLE_SCHEDULE_SLOWLANE"] !== "true") {
+          console.log("[schedule-slowlane] skipped — set ENABLE_SCHEDULE_SLOWLANE=true to enable");
+          return;
+        }
+        const targets = await repo.scheduleSlowLaneTargets(20);
+        record(await pollScheduleSlowLane(repo, targets, readSchedule, { concurrency: 8, log }));
       },
     },
     {
