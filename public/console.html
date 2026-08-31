@@ -2865,6 +2865,38 @@ function renderActions() {
            <div style="flex:1"></div>
            <div class="pills">${Object.entries(P.summary.byReason||{}).map(([k,v])=>`<span class="fp" style="cursor:default"><b>${v}</b> ${esc(k)}</span>`).join("")}</div>
          </div>
+         ${/* Name the devices. A count tells an operator a gap exists; only the list
+              tells them where to go. Each row also says whether the device is
+              REACHABLE, because that changes the fix completely: an offline screen
+              is an upstream/network problem, while an online screen that is dark
+              while content is scheduled is a genuine display/content fault. */""}
+         ${(() => {
+           const gaps = (P.devices || []).filter((x) => x.gap);
+           if (!gaps.length) return "";
+           const dev = (id) => (S.devices || []).find((x) => x.id === id);
+           const rows = gaps.map((g) => {
+             const dv = dev(g.deviceId);
+             // Judge on REACHABILITY (presence), never the derived status. The
+             // derived status of a reachable-but-dark screen is "warning" *because*
+             // its screen is off — the very thing being reported — so reading
+             // status here labelled a live device "offline" and contradicted the
+             // finding it was explaining.
+             const presence = dv && dv.latest ? dv.latest.presence : null;
+             const reachable = presence ? presence === "online" : (dv ? dv.status !== "offline" : null);
+             const cause = reachable === null
+               ? { txt: "reachability unknown", cls: "na" }
+               : reachable
+                 ? { txt: "device is reachable &#8212; a genuine display/content fault", cls: "wn" }
+                 : { txt: "device is offline &#8212; fix reachability first, not content", cls: "na" };
+             return `<button class="arow" data-pop-open="${esc(g.deviceId)}" style="align-items:flex-start">
+               <span class="thumb" style="background:var(--amber)22;display:flex;align-items:center;justify-content:center;color:var(--amber);font-weight:700;font-size:11px">!</span>
+               <span><span class="ti">${esc(g.deviceLabel || g.deviceId)}</span>
+                 <span class="ds">${esc(g.reason || "gap")} &#183; ${g.scheduledCount} item(s) scheduled now</span>
+                 <span class="mt"><span class="v ${cause.cls}">${cause.txt}</span></span></span>
+               <span class="btn sm">Open</span></button>`;
+           }).join("");
+           return `<div class="sechd">&#9888;&#65039; Scheduled, but the screen cannot be showing it</div>${rows}`;
+         })()}
          <div class="na" style="font-size:12px;margin-top:10px">
            A gap = active schedule, but the screen was off / black / logo.
            ${/* The endpoint reports its sample two different ways depending on the
@@ -2938,6 +2970,8 @@ function renderActions() {
 
   el.querySelectorAll("[data-act-open]").forEach((b) =>
     b.addEventListener("click", () => { const id = b.dataset.actOpen; if (id) openDevice(id); }));
+  el.querySelectorAll("[data-pop-open]").forEach((b) =>
+    b.addEventListener("click", () => { const id = b.dataset.popOpen; if (id) openDevice(id); }));
 }
 
 function palIndex() {
