@@ -55,6 +55,37 @@ const FRESH_WITHIN_SECONDS = 600;
 const MIN_SWEEP_INTERVAL_MS = 25_000;
 let lastSweepAt = 0;
 
+/**
+ * Per-device capture cursor for the drawer's on-demand button. Same budget as
+ * the sweep, but keyed by device so one operator hammering a single drawer
+ * cannot out-pace the fleet, while two operators looking at two devices are not
+ * throttled against each other. Bounded by fleet size; never pruned because a
+ * stale entry is a single timestamp and the map is at most one row per device.
+ */
+const lastCaptureByDevice = new Map<string, number>();
+
+export interface CaptureThrottleDecision {
+  allowed: boolean;
+  /** How long the caller must wait; 0 when allowed. */
+  retryAfterMs: number;
+}
+
+/**
+ * Pure throttle decision, extracted so the rate-limit rule is unit-tested
+ * without a server or a clock. `lastAt` is undefined for a device never asked.
+ */
+export function decideCaptureThrottle(
+  lastAt: number | undefined,
+  now: number,
+  minIntervalMs: number,
+): CaptureThrottleDecision {
+  if (lastAt === undefined) return { allowed: true, retryAfterMs: 0 };
+  const sinceLast = now - lastAt;
+  return sinceLast < minIntervalMs
+    ? { allowed: false, retryAfterMs: minIntervalMs - sinceLast }
+    : { allowed: true, retryAfterMs: 0 };
+}
+
 const screenshotUrl = (serial: string): string =>
   `${CDN_BASE}/${encodeURIComponent(serial)}.jpg`;
 
@@ -258,6 +289,84 @@ export async function registerScreenshotRoutes(
       freshness,
     );
   });
+
+  /**
+   * Drive ONE fresh capture, for the device drawer.
+   *
+   * The drawer shows the last CDN frame and its age; this lets an operator ask
+   * that one device to upload a current frame (`get_screenshot:=true` — a
+   * capture, no device-state change, the same benign verb the sweep issues) and
+   * then reads the fresh frame's age straight back so the client can show it
+   * without inferring freshness. Rate-limited PER DEVICE, so repeated clicks on
+   * one drawer cannot out-pace the fleet.
+   */
+  app.post<{ Params: { id: string } }>(
+    "/api/devices/:id/screenshot/capture",
+    async (request, reply) => {
+      if (!ctx.videri) {
+        return reply.code(503).send({
+          error: "capture_unavailable",
+          message: "This server has no Videri credentials, so it cannot ask a device to capture.",
+        });
+      }
+      const device = await ctx.queries.device(request.params.id);
+      if (!device) {
+        return reply.code(404).send({ error: "not_found", message: "No such device." });
+      }
+      const serial = (device as { serialNo?: string | null }).serialNo ?? null;
+
+      const target = await ctx.repo.evidenceCaptureTarget(device.id);
+      if (!target) {
+        // Null means we cannot honestly complete a capture. We know the serial
+        // from the detail lookup, so say WHICH identifier is missing: no serial
+        // means no CDN key to read the frame back from; a serial-but-null target
+        // means no routable JID to send the capture command to. Never a 500.
+        return reply.code(409).send(
+          serial
+            ? {
+                error: "not_addressable",
+                message: "This device has no routable JID, so a capture command cannot reach it.",
+              }
+            : {
+                error: "no_serial",
+                message: "This device has no hardware serial, which is the CDN key its frame is stored under.",
+              },
+        );
+      }
+
+      const now = Date.now();
+      const decision = decideCaptureThrottle(
+        lastCaptureByDevice.get(device.id), now, MIN_SWEEP_INTERVAL_MS,
+      );
+      if (!decision.allowed) {
+        return reply.code(429).send({
+          error: "capturing_too_fast",
+          retryAfterMs: decision.retryAfterMs,
+          message: "This device was asked to capture moments ago. Captures are rate-limited to protect the fleet.",
+        });
+      }
+      lastCaptureByDevice.set(device.id, now);
+
+      const result = await pollEvidenceCapture(ctx.videri, ctx.repo, [target], { batchSize: 1 });
+      // Read the fresh frame's age straight back (HEAD only, the meta path) so
+      // the client gets the new age without a second round-trip. A device that
+      // timed out leaves the old frame in place — meta then still carries its
+      // real age, so the UI stays honest rather than implying a refresh.
+      const [meta, freshness] = await Promise.all([
+        headScreenshot(device.id, serial),
+        ctx.freshness(),
+      ]);
+      return envelope(
+        {
+          accepted: result.batchesOk,
+          failed: result.batchesFailed,
+          note: result.errors.slice(0, 3),
+          meta,
+        },
+        freshness,
+      );
+    },
+  );
 
   /**
    * Drive a batch of fresh captures across the online estate.

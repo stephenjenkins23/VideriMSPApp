@@ -1620,6 +1620,9 @@ function paintDevice() {
   $("#dbody").innerHTML =
     ({ overview: tabOverview, network: tabNetwork, display: tabDisplay, compliance: tabCompliance })[S.dtab](d);
   wireSliders();
+  // The "Capture fresh" button lives in the overview's screen-evidence block.
+  const cap = $("#shotcap");
+  if (cap) { cap.addEventListener("click", captureFresh); applyCaptureCooldown(); }
 }
 
 /**
@@ -1661,24 +1664,143 @@ function presenceTimeline(health) {
  * screen" is worse than no image, because it looks like proof.
  */
 function screenEvidence(shot) {
+  // The button drives a fresh capture; enabled even when there is no frame yet,
+  // since a device with a serial can be asked to upload its first one.
+  const capBtn =
+    `<button class="btn" id="shotcap" style="margin-top:8px">&#128248; Capture fresh</button>` +
+    `<div class="prov" id="shotcapmsg"></div>`;
   if (!shot || !shot.available) {
     return `<div class="kv"><span class="v na">No capture available</span></div>` +
-      `<div class="prov">${esc((shot && shot.reason) || "the CDN has no object for this device")}</div>`;
+      `<div class="prov">${esc((shot && shot.reason) || "the CDN has no object for this device")}</div>` +
+      capBtn;
   }
   const when = shot.lastModified ? new Date(shot.lastModified).toLocaleString() : "unknown";
+  // Key the img by the frame's own timestamp: the src only changes when the
+  // frame actually changes, so a fresh capture refetches while an unchanged
+  // stale frame stays cached — a cache-bust that never lies about freshness.
+  const bust = shot.lastModified ? "?v=" + encodeURIComponent(shot.lastModified) : "";
   return `<div class="shotbig ${shot.stale ? "stale" : ""}">
-      <img src="${esc(shot.url)}" alt="Last screen capture" decoding="async">
+      <img src="${esc(shot.url + bust)}" alt="Last screen capture" decoding="async">
     </div>
     <div class="kv" style="margin-top:8px"><span class="k">Captured</span>
       <span class="v ${shot.stale ? "wn" : "ok"}">${shortAge(shot.ageSeconds)} ago</span></div>
     <div class="kv"><span class="k">Timestamp</span><span class="v">${esc(when)}</span></div>
     ${shot.stale
       ? `<div class="note"><b>This frame is history, not evidence.</b> It is older than
-          an hour, and devices push every 15&#8211;22 minutes, so it cannot describe what
-          is on screen now. Shown dimmed and dated rather than withheld, because a
-          months-old capture is still the last thing we know.</div>`
-      : `<div class="note na">Captured within the last hour, so this is a fair
-          representation of the current screen.</div>`}`;
+          ten minutes, so it cannot describe what is on screen now. Ask for a fresh
+          capture below; shown dimmed and dated rather than withheld, because the last
+          thing we know still beats nothing.</div>`
+      : `<div class="note na">Captured within the last ten minutes, so this is a fair
+          representation of the current screen.</div>`}` +
+    capBtn;
+}
+
+/** How long the drawer's capture button stays disabled after a capture, mirroring
+ *  the server's per-device throttle so repeated clicks cannot spam the fleet. */
+const CAPTURE_COOLDOWN_MS = 25_000;
+
+/** deviceId -> epoch ms the capture button stays disabled until. Kept out of
+ *  S.dev so a re-render (which rebuilds the button) cannot drop the cooldown. */
+const CAPCOOL = {};
+
+/** Re-assert the cooldown on the current button — called on every drawer paint,
+ *  so the throttle survives the paintDevice() that follows a successful capture. */
+function applyCaptureCooldown() {
+  const id = S.dev && S.dev.id;
+  const btn = $("#shotcap");
+  if (!id || !btn) return;
+  const remain = (CAPCOOL[id] || 0) - Date.now();
+  if (remain <= 0) return;
+  btn.disabled = true;
+  setTimeout(() => {
+    const b = $("#shotcap");
+    if (b && (CAPCOOL[id] || 0) <= Date.now()) b.disabled = false;
+  }, remain);
+}
+
+/**
+ * Ask ONE device to upload a current frame, then poll its meta until the fresh
+ * frame lands (or a bounded timeout), updating the shown frame and age.
+ *
+ * Freshness stays honest throughout: we never claim a refresh we did not
+ * observe. On timeout we say the capture was requested and the frame is still
+ * updating; on throttle we show the retry hint rather than an error.
+ */
+async function captureFresh() {
+  const id = S.dev && S.dev.id;
+  if (!id) return;
+  const btn = $("#shotcap");
+  const setMsg = (html, cls) => {
+    const m = $("#shotcapmsg");
+    if (m) { m.className = "prov" + (cls ? " " + cls : ""); m.innerHTML = html; }
+  };
+  // Disable for the cooldown so clicks cannot out-pace the server throttle.
+  // Recorded in CAPCOOL so a paintDevice() re-render re-asserts it.
+  const hold = (ms) => { CAPCOOL[id] = Date.now() + ms; applyCaptureCooldown(); };
+  if (btn) btn.disabled = true;
+  setMsg("&#8987; Asking the device to capture a fresh frame&#8230;");
+
+  let res, body;
+  try {
+    res = await fetch("/api/devices/" + encodeURIComponent(id) + "/screenshot/capture", {
+      method: "POST",
+      headers: TOKEN ? { authorization: "Bearer " + TOKEN } : {},
+    });
+    body = await res.json().catch(() => ({}));
+  } catch (e) {
+    setMsg("Capture request failed: " + esc(e.message) + ".", "wn");
+    if (btn) btn.disabled = false;
+    return;
+  }
+
+  if (res.status === 503) {
+    setMsg("This server holds no Videri credentials, so it cannot drive a capture.", "wn");
+    if (btn) btn.disabled = false;
+    return;
+  }
+  if (res.status === 429) {
+    const ms = (body && body.retryAfterMs) || CAPTURE_COOLDOWN_MS;
+    setMsg("Captured moments ago &#183; captures are rate-limited. Try again in ~" +
+      Math.ceil(ms / 1000) + "s.");
+    hold(ms);
+    return;
+  }
+  if (!res.ok) {
+    // 409 (no serial / not addressable) and anything else: show the reason, and
+    // re-enable so it stays legible rather than a dead greyed button.
+    setMsg("Cannot capture: " + esc((body && (body.message || body.error)) || res.status) + ".", "wn");
+    if (btn) btn.disabled = false;
+    return;
+  }
+
+  // Accepted — hold the button for the cooldown regardless of what lands.
+  hold(CAPTURE_COOLDOWN_MS);
+  const startAge = body && body.data && body.data.meta ? body.data.meta.ageSeconds : null;
+  setMsg("&#128248; Capture requested &#183; waiting for the fresh frame&#8230;");
+
+  // Poll meta for a bounded window until the frame is meaningfully newer.
+  const deadline = Date.now() + 16000;
+  let landed = false;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 2000));
+    if (!S.dev || S.dev.id !== id) return;   // drawer changed underneath us
+    const m = await api("/api/devices/" + encodeURIComponent(id) + "/screenshot/meta").catch(() => null);
+    const meta = m && m.data;
+    if (!meta || !meta.available || meta.ageSeconds == null) continue;
+    // Fresh = clearly younger than the baseline, or now seconds-old outright.
+    if (meta.ageSeconds <= 120 || (startAge != null && meta.ageSeconds < startAge - 30)) {
+      S.dev._shot = meta;
+      landed = true;
+      break;
+    }
+  }
+
+  if (landed) {
+    if (S.dtab === "overview") paintDevice();   // re-renders with the new age + frame
+    setMsg("&#9989; Fresh frame captured " + shortAge(S.dev._shot.ageSeconds) + " ago.");
+  } else {
+    setMsg("Capture requested &#8212; frame still updating. It may land shortly.");
+  }
 }
 
 const kv = (k, v, cls) =>

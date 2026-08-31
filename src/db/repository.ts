@@ -294,6 +294,40 @@ export class Repository {
   }
 
   /**
+   * A single device's capture target, for the drawer's on-demand "capture fresh"
+   * button — the one-device sibling of `evidenceCaptureTargets`.
+   *
+   * Returns null when the device cannot honestly be captured: unknown id, no
+   * `device_jid` (nothing to route the capture command to), or no `serial_no`
+   * (the CDN key the fresh frame is stored under — without it we could ask for a
+   * capture but never read it back). The route turns that null into a specific
+   * 4xx rather than attempting a capture it cannot complete. No online gate here:
+   * an operator staring at one device's drawer may well be trying to wake a
+   * flaky one, and pollEvidenceCapture already degrades to a timeout if it is
+   * offline — which is more useful than refusing outright.
+   */
+  async evidenceCaptureTarget(deviceId: string): Promise<
+    { id: string; deviceId: string; deviceJid: string | null; playerId: string | null; serialNo: string | null } | null
+  > {
+    const { rows } = await this.pool.query<{
+      id: string; device_id: string; device_jid: string | null;
+      player_id: string | null; serial_no: string | null;
+    }>(
+      `SELECT d.id, d.device_id, d.device_jid, d.player_id, d.serial_no
+         FROM devices d
+        WHERE d.id = $1
+        LIMIT 1`,
+      [deviceId],
+    );
+    const r = rows[0];
+    if (!r || !r.device_jid || !r.serial_no) return null;
+    return {
+      id: r.id, deviceId: r.device_id, deviceJid: r.device_jid,
+      playerId: r.player_id, serialNo: r.serial_no,
+    };
+  }
+
+  /**
    * The next batch of devices to read runtime telemetry from, stalest-first.
    *
    * The slow-lane sibling of `evidenceCaptureTargets`: same round-robin idea,

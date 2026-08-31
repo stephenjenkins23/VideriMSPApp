@@ -14,6 +14,7 @@ import type { Pool } from "pg";
 import type { Repository } from "../db/repository.js";
 import { buildServer } from "./server.js";
 import { resolveAuth, tokenMatches, extractBearer } from "./auth.js";
+import { decideCaptureThrottle } from "./routes/screenshots.js";
 
 const TOKEN = "test-token-at-least-16-chars";
 
@@ -161,6 +162,15 @@ const stubRepo = (opts: StubOptions = {}): Repository =>
         ? { deviceId: "SER123", deviceJid: "d@x", playerId: "p1" }
         : null;
     },
+    // Capturable iff a device row was supplied — mirrors the real method, which
+    // returns null when the device has no JID (unroutable) or no serial (no CDN
+    // key). The route turns that null into a 409.
+    async evidenceCaptureTarget() {
+      return opts.device
+        ? { id: "d1", deviceId: "SER123", deviceJid: "d@x", playerId: "p1", serialNo: "SER123" }
+        : null;
+    },
+    async markScreenshotRequested() { return 0; },
   }) as unknown as Repository;
 
 /** A fake Videri client that routes sync_command through the test's script. */
@@ -739,11 +749,12 @@ test("the console styles use no hardcoded colors outside the token blocks", asyn
 // (the decision logic itself is exhaustively covered in videri/brightness.test.ts)
 // ─────────────────────────────────────────────────────────────────────────────
 
-const brightDevice = () => ({
+const brightDevice = (over: Record<string, unknown> = {}) => ({
   id: "d1", name: "Test V4", location: null, device_class: "canvas", model_type: null,
   city: null, last_online_time: new Date(), firmware_current: "7.0", firmware_latest: "7.0",
   status: "online", observed_at: new Date(), presence: "online",
   serial_no: "SER123",
+  ...over,
 });
 
 test("brightness endpoint is 503 when the server has no Videri client", async () => {
@@ -819,4 +830,73 @@ test("brightness endpoint reports rollback (502) when the device ignores the wri
   assert.equal(res.statusCode, 502);
   assert.equal(res.json().data.state, "unconfirmed_rolled_back");
   assert.equal(res.json().data.applied, false);
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// On-demand screenshot capture (Phase 3) — per-device throttle + capture route
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("decideCaptureThrottle allows a device never asked, and one past the window", () => {
+  const now = 1_000_000;
+  // Never asked before.
+  assert.deepEqual(decideCaptureThrottle(undefined, now, 25_000), { allowed: true, retryAfterMs: 0 });
+  // Asked exactly the interval ago — the window has elapsed.
+  assert.deepEqual(decideCaptureThrottle(now - 25_000, now, 25_000), { allowed: true, retryAfterMs: 0 });
+  // Asked longer ago.
+  assert.deepEqual(decideCaptureThrottle(now - 60_000, now, 25_000), { allowed: true, retryAfterMs: 0 });
+});
+
+test("decideCaptureThrottle blocks a device asked within the window, with the remaining wait", () => {
+  const now = 1_000_000;
+  const d = decideCaptureThrottle(now - 5_000, now, 25_000);
+  assert.equal(d.allowed, false);
+  // The client is told exactly how long to wait — not just refused.
+  assert.equal(d.retryAfterMs, 20_000);
+});
+
+test("capture endpoint is 503 when the server has no Videri client", async () => {
+  const app = await build({ device: brightDevice() });
+  const res = await app.inject({
+    method: "POST", url: "/api/devices/d1/screenshot/capture", headers: auth,
+  });
+  assert.equal(res.statusCode, 503);
+  assert.equal(res.json().error, "capture_unavailable");
+  await app.close();
+});
+
+test("capture accepts once, then rate-limits an immediate second call per device", async () => {
+  const app = await build({
+    // Use a fresh device id so the module-level per-device cursor is clean for
+    // this test regardless of order.
+    device: brightDevice({ id: "cap-throttle-1" }),
+    videriScript: () => ({ response_code: "SUCCESS" }),
+  });
+  const first = await app.inject({
+    method: "POST", url: "/api/devices/cap-throttle-1/screenshot/capture", headers: auth,
+  });
+  assert.equal(first.statusCode, 200);
+  // One target, accepted by the stubbed device.
+  assert.equal(first.json().data.accepted, 1);
+  // The fresh-frame age rides along so the client needs no second round-trip.
+  assert.ok("meta" in first.json().data, "response must carry the fresh meta");
+
+  const second = await app.inject({
+    method: "POST", url: "/api/devices/cap-throttle-1/screenshot/capture", headers: auth,
+  });
+  assert.equal(second.statusCode, 429);
+  assert.equal(second.json().error, "capturing_too_fast");
+  assert.ok(second.json().retryAfterMs > 0, "429 must tell the client how long to wait");
+  await app.close();
+});
+
+test("capture is a clean 4xx (not 500) when the device cannot be captured", async () => {
+  // No device row → evidenceCaptureTarget resolves null. The device also does
+  // not resolve, so the route 404s rather than 500-ing on a missing target.
+  const app = await build({ videriScript: () => ({ response_code: "SUCCESS" }) });
+  const res = await app.inject({
+    method: "POST", url: "/api/devices/ghost/screenshot/capture", headers: auth,
+  });
+  assert.equal(res.statusCode, 404);
+  assert.ok(res.statusCode < 500, "an uncapturable device is the client's problem, not a server error");
+  await app.close();
 });
