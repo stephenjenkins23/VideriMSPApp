@@ -40,6 +40,10 @@ interface StubOptions {
   popEligibleTotal?: number;
   /** Per-canvas schedule for proof-of-play; throwing simulates an unreadable schedule. */
   popEvents?: (canvasId: string) => unknown;
+  /** Groups returned by `rpm /v1/groups`, for the aggregator rollup (US-4.6). */
+  aggregatorGroups?: Array<{ uuid: string; displayName?: string; active?: boolean }>;
+  /** Per-group aggregator metrics; throwing simulates an unreadable group. */
+  aggregatorMetrics?: (uuid: string) => unknown;
 }
 
 function stubPool(opts: StubOptions = {}): Pool {
@@ -212,12 +216,22 @@ function fakeVideri(opts: StubOptions) {
     async request(
       _service: string,
       path: string,
-      reqOpts?: { body?: { command_params?: { arg?: string } } },
+      reqOpts?: { body?: { command_params?: { arg?: string } }; query?: { count?: number } },
     ) {
       const events = /\/canvases\/([^/]+)\/events\//.exec(path ?? "");
       if (events) {
         // Callers throw to simulate an unreadable schedule; propagate it.
         return opts.popEvents ? opts.popEvents(decodeURIComponent(events[1]!)) : [];
+      }
+      if (path === "/v1/groups") {
+        const groups = opts.aggregatorGroups ?? [];
+        return { groups, meta: { total: groups.length } };
+      }
+      const groupMetrics = /\/groups\/([^/]+)\/metrics$/.exec(path ?? "");
+      if (groupMetrics) {
+        return opts.aggregatorMetrics
+          ? opts.aggregatorMetrics(decodeURIComponent(groupMetrics[1]!))
+          : { current: null, lastMonth: null };
       }
       const arg = reqOpts?.body?.command_params?.arg ?? "";
       return opts.videriScript ? opts.videriScript(arg) : { response_code: "ok" };
@@ -230,7 +244,9 @@ const build = (opts: StubOptions = {}, allowAnonymous = false) =>
     pool: stubPool(opts),
     repo: stubRepo(opts),
     auth: allowAnonymous ? { token: null, allowAnonymous: true } : { token: TOKEN, allowAnonymous: false },
-    ...(opts.videriScript || opts.popEvents ? { videri: fakeVideri(opts) } : {}),
+    ...(opts.videriScript || opts.popEvents || opts.aggregatorGroups
+      ? { videri: fakeVideri(opts) }
+      : {}),
   });
 
 const auth = { authorization: `Bearer ${TOKEN}` };
@@ -1176,5 +1192,54 @@ test("proof-of-play without a control plane is an honest empty report, not a 500
   assert.equal(body.data.controlPlane, false);
   assert.ok(body.data.note.includes("credentials"), "must say why schedules are unread");
   assert.deepEqual(body.data.devices, []);
+  await app.close();
+});
+
+// ─── fleet rollups (US-4.6) ───────────────────────────────────────────────────
+
+test("fleet rollups sum aggregator counts with an honest partial-failure count", async () => {
+  const app = await build({
+    aggregatorGroups: [
+      { uuid: "g1", displayName: "One", active: true },
+      { uuid: "g2", displayName: "Two", active: true },
+      { uuid: "g3", displayName: "Boom", active: true },
+    ],
+    aggregatorMetrics: (uuid) => {
+      if (uuid === "g3") throw new Error("aggregator 500");
+      return {
+        current: {
+          totalCanvasesCount: uuid === "g1" ? 10 : 5,
+          thirtyDaysMoreOfflineCanvasesCount: uuid === "g1" ? 4 : 1,
+          sixMonthsMoreOfflineCanvasesCount: 1,
+          canvasesWithNoEventsCount: 0,
+          canvasesWithSingleContentCount: 2,
+        },
+        lastMonth: null,
+      };
+    },
+  });
+  const res = await app.inject({ method: "GET", url: "/api/fleet/rollups", headers: auth });
+  assert.equal(res.statusCode, 200);
+  const body = res.json();
+  assert.deepEqual(body.data.fleet, {
+    totalCanvases: 15,
+    offline30d: 5,
+    offline6mo: 2,
+    noEvents: 0,
+    singleContent: 4,
+  });
+  assert.deepEqual(body.data.meta, { groupsRead: 2, groupsFailed: 1 });
+  // Worst-offline-first drill-down, and the rollup carries its own freshness.
+  assert.equal(body.data.groups[0].uuid, "g1");
+  assert.equal(body.data.cached, false);
+  assert.ok(typeof body.data.collectedAt === "string");
+  await app.close();
+});
+
+test("fleet rollups without a control plane return 503, not empty zeros", async () => {
+  const app = await build(); // no aggregatorGroups → no videri
+  const res = await app.inject({ method: "GET", url: "/api/fleet/rollups", headers: auth });
+  assert.equal(res.statusCode, 503);
+  assert.equal(res.json().error, "no_control_plane");
   await app.close();
 });
