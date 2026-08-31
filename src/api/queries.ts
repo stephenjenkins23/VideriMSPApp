@@ -17,6 +17,7 @@
  */
 
 import type { Pool } from "pg";
+import type { DeviceView } from "../intelligence/remediation.js";
 
 export interface DeviceListFilters {
   page: number;
@@ -521,6 +522,92 @@ export class ReadQueries {
         evaluatedAt: (r["evaluated_at"] as Date).toISOString(),
       })),
     };
+  }
+
+  /**
+   * Assemble the per-device facts the remediation engine reasons over (Epic 1).
+   *
+   * One query, four laterals — the latest screen-state, the latest slow-lane
+   * telemetry, the latest settings snapshot (for the current brightness), and the
+   * latest compliance verdict (for drift). Unbounded like `compliance()` above:
+   * the engine must see the whole fleet to rank across it, and every join is a
+   * cheap latest-row lookup. Honest nulls throughout — a metric we never read
+   * arrives as null and the engine produces no recommendation from it.
+   */
+  async remediationDevices(): Promise<DeviceView[]> {
+    const { rows } = await this.pool.query(
+      `SELECT d.id, d.name, d.city, d.firmware_current, d.firmware_latest,
+              ${STATUS_SQL} AS status,
+              d.last_online_time,
+              hs.is_black_screen, hs.showing_logo,
+              tel.observed_at AS telemetry_observed_at, tel.cpu_percent,
+              tel.ram_used_percent, tel.storage_used_percent, tel.rssi_dbm,
+              tel.ntp_offset_ms,
+              (st.settings ->> 'brightness') AS brightness_raw,
+              cr.drift
+         FROM devices d
+         ${LATEST_SAMPLE_LATERAL}
+         LEFT JOIN LATERAL (
+           SELECT observed_at, cpu_percent, ram_used_percent, storage_used_percent,
+                  rssi_dbm, ntp_offset_ms
+             FROM device_telemetry
+            WHERE device_id = d.id
+            ORDER BY observed_at DESC LIMIT 1
+         ) tel ON TRUE
+         LEFT JOIN LATERAL (
+           SELECT settings FROM device_settings
+            WHERE device_id = d.id
+            ORDER BY observed_at DESC LIMIT 1
+         ) st ON TRUE
+         LEFT JOIN LATERAL (
+           SELECT drift FROM compliance_results
+            WHERE device_id = d.id
+            ORDER BY evaluated_at DESC LIMIT 1
+         ) cr ON TRUE`,
+    );
+
+    return rows.map((r) => {
+      const current = r["firmware_current"] as string | null;
+      const latest = r["firmware_latest"] as string | null;
+      const hasTelemetry = r["telemetry_observed_at"] != null;
+      const rawDrift = (r["drift"] ?? []) as Array<Record<string, unknown>>;
+      return {
+        id: r["id"] as string,
+        name: (r["name"] as string | null) ?? null,
+        status: r["status"] as string,
+        lastOnlineTime: (r["last_online_time"] as Date | null)?.toISOString() ?? null,
+        city: (r["city"] as string | null) ?? null,
+        firmwareCurrent: current,
+        firmwareBehind: Boolean(current && latest && current !== latest),
+        screen: {
+          isBlackScreen: (r["is_black_screen"] as boolean | null) ?? null,
+          showingLogo: (r["showing_logo"] as boolean | null) ?? null,
+          // now_playing_id is not projected by the shared latest-sample lateral
+          // and the status poller does not yet write it, so it is always null
+          // here. No remediation rule reads it; wired as null until a content
+          // rule (and the poller write) needs it.
+          nowPlayingId: null,
+        },
+        telemetry: hasTelemetry
+          ? {
+              observedAt: (r["telemetry_observed_at"] as Date).toISOString(),
+              cpuPercent: num(r["cpu_percent"] as string | number | null),
+              ramUsedPercent: num(r["ram_used_percent"] as string | number | null),
+              storageUsedPercent: num(r["storage_used_percent"] as string | number | null),
+              rssiDbm: num(r["rssi_dbm"] as string | number | null),
+              ntpOffsetMs: num(r["ntp_offset_ms"] as string | number | null),
+            }
+          : null,
+        // The stored drift rows are full CheckResults; the engine only needs the
+        // identity fields, passed through verbatim.
+        drift: rawDrift.map((c) => ({
+          kind: String(c["kind"] ?? ""),
+          label: String(c["label"] ?? ""),
+          field: String(c["field"] ?? ""),
+        })),
+        brightnessRaw: num(r["brightness_raw"] as string | number | null),
+      };
+    });
   }
 
   async alertRules(): Promise<Array<Record<string, unknown>>> {

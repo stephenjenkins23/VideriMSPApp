@@ -32,6 +32,8 @@ interface StubOptions {
   videriScript?: (arg: string) => { response_code: string; message?: string };
   /** A device row for the detail/command queries; enables device lookups. */
   device?: Record<string, unknown> | null;
+  /** Rows returned by the remediation query (queries.remediationDevices). */
+  remediationRows?: Array<Record<string, unknown>>;
 }
 
 function stubPool(opts: StubOptions = {}): Pool {
@@ -114,6 +116,13 @@ function stubPool(opts: StubOptions = {}): Pool {
           return opts.device ? { rows: [opts.device], rowCount: 1 } : { rows: [], rowCount: 0 };
         }
         return { rows: deviceRows.slice(0, 1), rowCount: Math.min(1, deviceRows.length) };
+      }
+      // Remediation assembly — distinguished by the brightness settings lateral,
+      // which no other "FROM devices d" query selects. Must precede the generic
+      // device-list branch below.
+      if (sql.includes("st.settings ->> 'brightness'")) {
+        const rows = opts.remediationRows ?? [];
+        return { rows, rowCount: rows.length };
       }
       if (sql.includes("FROM devices d")) {
         return { rows: deviceRows, rowCount: deviceRows.length };
@@ -898,5 +907,80 @@ test("capture is a clean 4xx (not 500) when the device cannot be captured", asyn
   });
   assert.equal(res.statusCode, 404);
   assert.ok(res.statusCode < 500, "an uncapturable device is the client's problem, not a server error");
+  await app.close();
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Remediation endpoint (Epic 1) — the recommendation surface's contract.
+// (The rule logic itself is exhaustively covered in intelligence/remediation.test.ts.)
+// ─────────────────────────────────────────────────────────────────────────────
+
+const remediationRow = (over: Record<string, unknown> = {}) => ({
+  id: "rem-1", name: "Lobby North", city: "New York",
+  firmware_current: "7.0", firmware_latest: "7.0", status: "online",
+  last_online_time: new Date("2026-08-31T12:00:00Z"),
+  is_black_screen: false, showing_logo: false, now_playing_id: "c1",
+  telemetry_observed_at: null, cpu_percent: null, ram_used_percent: null,
+  storage_used_percent: null, rssi_dbm: null, ntp_offset_ms: null,
+  brightness_raw: null, drift: [],
+  ...over,
+});
+
+test("remediation endpoint returns a ranked list, a summary, and freshness", async () => {
+  const app = await build({
+    remediationRows: [
+      remediationRow({ id: "d-off", brightness_raw: "0" }), // auto-safe / high
+      remediationRow({
+        id: "d-stor", telemetry_observed_at: new Date("2026-08-31T12:00:00Z"),
+        storage_used_percent: "95",
+      }), // manual / medium
+    ],
+  });
+  const res = await app.inject({ method: "GET", url: "/api/remediation", headers: auth });
+  assert.equal(res.statusCode, 200);
+  const body = res.json();
+
+  // Envelope + freshness, like every other endpoint.
+  assert.ok(body.meta.freshness, "must carry freshness");
+  // Ranked: the high-severity auto-safe restore comes before the medium storage one.
+  assert.equal(body.data.recommendations[0].severity, "high");
+  assert.equal(body.data.recommendations[0].kind, "auto-safe");
+  assert.equal(body.data.recommendations[1].severity, "medium");
+  // Summary counts.
+  assert.equal(body.data.summary.total, 2);
+  assert.equal(body.data.summary.byKind["auto-safe"], 1);
+  assert.equal(body.data.summary.byKind.manual, 1);
+  assert.equal(body.data.devicesConsidered, 2);
+  await app.close();
+});
+
+test("remediation coerces pg numeric strings and honours honest nulls", async () => {
+  const app = await build({
+    // brightness_raw arrives from pg as the text "0"; it must be read as 0, not
+    // dropped as a truthy string. A device with all-null telemetry yields nothing.
+    remediationRows: [
+      remediationRow({ id: "d-off", brightness_raw: "0" }),
+      remediationRow({ id: "d-null" }), // all null → no recommendations
+    ],
+  });
+  const body = (await app.inject({ method: "GET", url: "/api/remediation", headers: auth })).json();
+  const forNull = body.data.recommendations.filter((r: { deviceIds: string[] }) =>
+    r.deviceIds.includes("d-null"),
+  );
+  assert.equal(forNull.length, 0, "an all-null device must yield nothing");
+  assert.ok(
+    body.data.recommendations.some((r: { id: string }) => r.id === "d-off::display-off"),
+    "the string \"0\" brightness must be read as display-off",
+  );
+  await app.close();
+});
+
+test("remediation on an empty fleet is an empty list, not an error", async () => {
+  const app = await build({ remediationRows: [] });
+  const res = await app.inject({ method: "GET", url: "/api/remediation", headers: auth });
+  assert.equal(res.statusCode, 200);
+  const body = res.json();
+  assert.deepEqual(body.data.recommendations, []);
+  assert.equal(body.data.summary.total, 0);
   await app.close();
 });
