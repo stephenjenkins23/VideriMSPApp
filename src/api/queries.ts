@@ -14,6 +14,14 @@
  * 2. **Never coerce an unreadable metric to zero.** `null` travels all the way to
  *    the client, and the response says which metrics are unavailable so the UI
  *    can grey out a tile instead of drawing a reassuring flat line at zero.
+ *
+ * 3. **Retired devices are excluded by default.** `devices.retired_at` marks a row
+ *    for a device the platform no longer has (soft-deleted by the discovery
+ *    reconcile). Every list, count and intelligence feed filters it out via
+ *    `ACTIVE_DEVICES`; the single exception is `device(id)`, which still resolves a
+ *    retired row so a deep link shows the last known state — with `retiredAt` in
+ *    the payload so the UI can say the device is gone rather than implying it is
+ *    live.
  */
 
 import type { Pool } from "pg";
@@ -95,6 +103,15 @@ const LATEST_SAMPLE_LATERAL = `
      LIMIT 1
   ) hs ON TRUE`;
 
+/**
+ * The active-fleet predicate. Aliased `d` everywhere it is used.
+ *
+ * Named rather than inlined so "which queries exclude retired devices?" is
+ * answerable by grepping one identifier — the question that matters when a fleet
+ * count is wrong by one.
+ */
+const ACTIVE_DEVICES = `d.retired_at IS NULL`;
+
 const ALERT_COUNTS_LATERAL = `
   LEFT JOIN LATERAL (
     SELECT COUNT(*) FILTER (WHERE severity = 'critical') AS critical,
@@ -121,7 +138,9 @@ export class ReadQueries {
   async devices(
     filters: DeviceListFilters,
   ): Promise<{ items: DeviceListItem[]; totalItems: number }> {
-    const where: string[] = [];
+    // Retired devices are never listed: they no longer exist upstream, and a list
+    // that includes them makes every total one too many.
+    const where: string[] = [ACTIVE_DEVICES];
     const params: unknown[] = [];
 
     if (filters.deviceClass) {
@@ -197,8 +216,11 @@ export class ReadQueries {
               d.serial_no, d.vendor, d.product_name, d.timezone, d.orientation,
               d.screen_width, d.screen_height, d.latitude, d.longitude,
               d.license_status, d.license_expiration, d.group_name, d.account_name,
-              d.tags, d.first_seen_at, d.last_synced_at, d.metafields, d.city
+              d.tags, d.first_seen_at, d.last_synced_at, d.metafields, d.city,
+              d.retired_at
          FROM devices d ${LATEST_SAMPLE_LATERAL} ${ALERT_COUNTS_LATERAL}
+        -- Deliberately NOT filtered on retired_at: a lookup by id should show a
+        -- retired device's last known state (with retiredAt set) rather than 404.
         WHERE d.id = $1`,
       [id],
     );
@@ -221,6 +243,10 @@ export class ReadQueries {
         city: row.city ?? null,
         firstSeenAt: row.first_seen_at?.toISOString() ?? null,
         lastSyncedAt: row.last_synced_at?.toISOString() ?? null,
+        // Non-null = the platform no longer lists this device; it is kept for its
+        // history and excluded from every fleet count. Surfaced so the drawer can
+        // say so instead of showing a stale device as if it were live.
+        retiredAt: row.retired_at?.toISOString() ?? null,
       } as Record<string, unknown>),
     };
   }
@@ -487,7 +513,7 @@ export class ReadQueries {
              SELECT * FROM compliance_results
               WHERE device_id = d.id ORDER BY evaluated_at DESC LIMIT 1
            ) cr ON TRUE
-          WHERE TRUE ${bandClause}`,
+          WHERE ${ACTIVE_DEVICES} ${bandClause}`,
       ),
       this.pool.query(
         `SELECT d.id, d.name, d.device_class, cr.template_id, cr.score,
@@ -498,7 +524,7 @@ export class ReadQueries {
              SELECT * FROM compliance_results
               WHERE device_id = d.id ORDER BY evaluated_at DESC LIMIT 1
            ) cr ON TRUE
-          WHERE TRUE ${bandClause}
+          WHERE ${ACTIVE_DEVICES} ${bandClause}
           ORDER BY cr.score ASC, d.name
           LIMIT ${filters.limit} OFFSET ${(filters.page - 1) * filters.limit}`,
       ),
@@ -534,10 +560,16 @@ export class ReadQueries {
    * the engine must see the whole fleet to rank across it, and every join is a
    * cheap latest-row lookup. Honest nulls throughout — a metric we never read
    * arrives as null and the engine produces no recommendation from it.
+   *
+   * `group_id` rides along as the join key into the group hierarchy (the site
+   * dimension venue correlation clusters on). `site` itself is left null here —
+   * resolving it needs the group tree, which is control-plane IO and belongs to
+   * the route, not to a SQL read. NEVER select group_name for this purpose: one
+   * device has a group_id with an empty group_name.
    */
   async remediationDevices(): Promise<DeviceView[]> {
     const { rows } = await this.pool.query(
-      `SELECT d.id, d.name, d.city, d.firmware_current, d.firmware_latest,
+      `SELECT d.id, d.name, d.city, d.group_id, d.firmware_current, d.firmware_latest,
               ${STATUS_SQL} AS status,
               d.last_online_time,
               hs.is_black_screen, hs.showing_logo,
@@ -564,7 +596,8 @@ export class ReadQueries {
            SELECT drift FROM compliance_results
             WHERE device_id = d.id
             ORDER BY evaluated_at DESC LIMIT 1
-         ) cr ON TRUE`,
+         ) cr ON TRUE
+        WHERE ${ACTIVE_DEVICES}`,
     );
 
     return rows.map((r) => {
@@ -578,6 +611,10 @@ export class ReadQueries {
         status: r["status"] as string,
         lastOnlineTime: (r["last_online_time"] as Date | null)?.toISOString() ?? null,
         city: (r["city"] as string | null) ?? null,
+        groupId: (r["group_id"] as string | null) ?? null,
+        // Resolved by the caller from the group tree; null here is "not yet
+        // resolved", which the engine treats as "site unknown" either way.
+        site: null,
         firmwareCurrent: current,
         firmwareBehind: Boolean(current && latest && current !== latest),
         screen: {
@@ -639,7 +676,8 @@ export class ReadQueries {
   }> {
     const eligibleFrom = `
        FROM devices d ${LATEST_SAMPLE_LATERAL}
-      WHERE hs.observed_at IS NOT NULL
+      WHERE ${ACTIVE_DEVICES}
+        AND hs.observed_at IS NOT NULL
         AND hs.observed_at > now() - ($1::text || ' hours')::interval`;
 
     const [countResult, rowsResult] = await Promise.all([
@@ -718,9 +756,14 @@ export class ReadQueries {
               ORDER BY observed_at DESC LIMIT 1
            ) sch ON TRUE
            ${LATEST_SAMPLE_LATERAL}
+          WHERE ${ACTIVE_DEVICES}
           ORDER BY sch.observed_at ASC`,
       ),
-      this.pool.query<{ count: string }>(`SELECT COUNT(*)::text AS count FROM devices`),
+      // The coverage denominator is the ACTIVE fleet — counting retired rows here
+      // would make coverage look permanently short of 100%.
+      this.pool.query<{ count: string }>(
+        `SELECT COUNT(*)::text AS count FROM devices d WHERE ${ACTIVE_DEVICES}`,
+      ),
     ]);
 
     return {

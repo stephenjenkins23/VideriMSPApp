@@ -256,14 +256,16 @@ test("a partial fan-out is served, and the cached copy keeps the failure count",
 
   const first = await get(app);
   assert.equal(first.statusCode, 200, "a partial read is still worth serving");
-  assert.deepEqual(first.body.data!["meta"], { groupsRead: 2, groupsFailed: 1 });
+  assert.deepEqual(first.body.data!["meta"], {
+    groupsRead: 2, groupsFailed: 1, groupsTotal: 3, truncated: false,
+  });
   assert.equal((first.body.data!["fleet"] as { totalCanvases: number }).totalCanvases, 8);
 
   const cached = await get(app);
   assert.equal(cached.body.data!["cached"], true);
   assert.deepEqual(
     cached.body.data!["meta"],
-    { groupsRead: 2, groupsFailed: 1 },
+    { groupsRead: 2, groupsFailed: 1, groupsTotal: 3, truncated: false },
     "the cached copy must not launder away the failed group",
   );
   await app.close();

@@ -102,7 +102,11 @@ test("summariseRollups sums the five fields across groups", () => {
     noEvents: 1,
     singleContent: 5,
   });
-  assert.deepEqual(res.meta, { groupsRead: 2, groupsFailed: 0 });
+  // groupsTotal/truncated default to "the platform said nothing" for a direct
+  // call on the pure summariser — it is handed rollups, not a group listing.
+  assert.deepEqual(res.meta, {
+    groupsRead: 2, groupsFailed: 0, groupsTotal: null, truncated: false,
+  });
 });
 
 test("summariseRollups sorts drill-down worst-offline-first", () => {
@@ -132,7 +136,9 @@ test("summariseRollups breaks a full tie by name for a stable order", () => {
 test("summariseRollups records groupsFailed and does not fabricate them into the sum", () => {
   const res = summariseRollups([rollup({ totalCanvases: 8, offline30d: 3 })], 4);
   assert.equal(res.fleet.totalCanvases, 8);
-  assert.deepEqual(res.meta, { groupsRead: 1, groupsFailed: 4 });
+  assert.deepEqual(res.meta, {
+    groupsRead: 1, groupsFailed: 4, groupsTotal: null, truncated: false,
+  });
 });
 
 // ─── service against a stubbed fetcher ────────────────────────────────────────
@@ -177,7 +183,9 @@ test("fleetRollups sums a clean fan-out and reports zero failures", async () => 
   const res = await new AggregatorService(http).fleetRollups();
   assert.equal(res.fleet.totalCanvases, 15);
   assert.equal(res.fleet.offline30d, 5);
-  assert.deepEqual(res.meta, { groupsRead: 2, groupsFailed: 0 });
+  assert.deepEqual(res.meta, {
+    groupsRead: 2, groupsFailed: 0, groupsTotal: 2, truncated: false,
+  });
 });
 
 test("fleetRollups counts a failed group in groupsFailed, not silently dropped", async () => {
@@ -191,28 +199,35 @@ test("fleetRollups counts a failed group in groupsFailed, not silently dropped",
   });
   const res = await new AggregatorService(http).fleetRollups();
   assert.equal(res.fleet.totalCanvases, 7);
-  assert.deepEqual(res.meta, { groupsRead: 1, groupsFailed: 1 });
-});
-
-test("listGroups re-asks with count=total when the first page under-reads", async () => {
-  const all: RawGroup[] = Array.from({ length: 12 }, (_, i) => ({ uuid: `g${i}`, displayName: `G${i}` }));
-  const { http, calls } = fakeHttp(all, () => ({ current: { totalCanvasesCount: 1 } }), {
-    total: 12,
-    firstPage: all.slice(0, 10),
+  assert.deepEqual(res.meta, {
+    groupsRead: 1, groupsFailed: 1, groupsTotal: 2, truncated: false,
   });
-  const res = await new AggregatorService(http).fleetRollups();
-  // Widened re-ask happened, so all 12 groups were read.
-  assert.equal(res.meta.groupsRead, 12);
-  assert.equal(calls.filter((p) => p === "/v1/groups").length, 2);
 });
 
-// ─── the `count=`-only pagination trap ────────────────────────────────────────
+test("a tenant that fits in one page costs exactly one call", async () => {
+  const all: RawGroup[] = Array.from({ length: 12 }, (_, i) => ({ uuid: `g${i}`, displayName: `G${i}` }));
+  const { http, calls } = fakeHttp(all, () => ({ current: { totalCanvasesCount: 1 } }), { total: 12 });
+  const res = await new AggregatorService(http).fleetRollups();
+  assert.equal(res.meta.groupsRead, 12);
+  assert.equal(res.meta.groupsTotal, 12);
+  assert.equal(res.meta.truncated, false);
+  assert.equal(calls.filter((p) => p === "/v1/groups").length, 1);
+});
+
+// ─── the group pagination trap ─────────────────────────────────────────────
 //
-// `rpm /v1/groups` silently IGNORES `page`, `size` and `offset` and defaults to
-// ~10 groups. That is the single most dangerous behaviour on this route: a
-// paginator written the conventional way returns 10 of 94 groups and the fleet
-// total comes out ~90% short with no error anywhere. The tests above only counted
-// calls; these pin the actual query parameters.
+// Two dangerous behaviours on `rpm /v1/groups`, both measured live 2026-08-31:
+//
+//   1. `count` is capped at 100. count=101 and above return 400 BadRequestError
+//      "Invalid queries" — so the old "re-ask with count=meta.total" strategy was
+//      one group-creation spree away from hard-failing the whole rollup.
+//   2. `page`, `pageNumber`, `size`, `limit`, `offset`, `skip`, `from`, `cursor`,
+//      `after` and `index` are ALL silently ignored — the window never moves and
+//      `meta.start` stays 0. A paginator written the conventional way reads the
+//      first page forever. **`startIndex` is the one that works**, and it comes
+//      back echoed in `meta.start`.
+//
+// These tests pin both: the ceiling, and that we page by startIndex.
 
 /** Records the query object handed to every `/v1/groups` request. */
 function recordingHttp(opts: { pages: RawGroup[][]; total?: number }) {
@@ -235,33 +250,96 @@ function recordingHttp(opts: { pages: RawGroup[][]; total?: number }) {
   return { http, queries, groupCalls: () => queries.length };
 }
 
-test("listGroups asks for a wide first page by count, and never by page/size/offset", async () => {
+test("listGroups pages by startIndex, capped at 100, and never sends an ignored param", async () => {
   const first = Array.from({ length: 40 }, (_, i) => ({ uuid: `g${i}` }));
   const { http, queries } = recordingHttp({ pages: [first], total: 40 });
   const groups = await new AggregatorService(http).listGroups();
 
   assert.equal(groups.length, 40);
-  assert.equal(queries.length, 1, "one wide page was enough");
-  assert.deepEqual(queries[0], { count: 100 }, "the first ask is a wide count, nothing else");
+  assert.equal(queries.length, 1, "one page was enough");
+  assert.deepEqual(
+    queries[0],
+    { count: 100, startIndex: 0 },
+    "count is the 100 ceiling and the offset is startIndex — nothing else",
+  );
   for (const q of queries) {
-    for (const ignored of ["page", "size", "offset", "limit"]) {
+    for (const ignored of ["page", "pageNumber", "size", "offset", "limit", "skip", "cursor"]) {
       assert.equal(ignored in (q ?? {}), false, `${ignored} is silently ignored by rpm — never send it`);
     }
   }
 });
 
-test("the widened re-ask uses count=meta.total exactly, and stops at two calls", async () => {
-  // A tenant larger than the 100-wide first page: the second ask must request the
-  // reported total, and there must be no third call (no unbounded paginate loop).
-  const firstPage = Array.from({ length: 100 }, (_, i) => ({ uuid: `g${i}` }));
-  const everything = Array.from({ length: 137 }, (_, i) => ({ uuid: `g${i}` }));
-  const { http, queries } = recordingHttp({ pages: [firstPage, everything], total: 137 });
-  const groups = await new AggregatorService(http).listGroups();
+test("count NEVER exceeds 100 — above that the route 400s and the rollup dies", async () => {
+  // The regression this guards: a 137-group tenant asked for count=137 and got a
+  // 400 BadRequestError, taking the entire fleet rollup with it.
+  const full = Array.from({ length: 100 }, (_, i) => ({ uuid: `g${i}` }));
+  const tail = Array.from({ length: 37 }, (_, i) => ({ uuid: `g${100 + i}` }));
+  const { http, queries } = recordingHttp({ pages: [full, tail], total: 137 });
+  await new AggregatorService(http).listGroups();
+  for (const q of queries) {
+    assert.ok(Number(q?.["count"]) <= 100, `count ${String(q?.["count"])} exceeds the 100 ceiling`);
+  }
+});
 
-  assert.equal(groups.length, 137, "the whole tenant was read, not just the first page");
-  assert.equal(queries.length, 2, "at most two calls — never a paginate loop");
-  assert.deepEqual(queries[0], { count: 100 });
-  assert.deepEqual(queries[1], { count: 137 }, "re-ask must be count=meta.total");
+test("a tenant larger than one page is walked by startIndex until complete", async () => {
+  const full = Array.from({ length: 100 }, (_, i) => ({ uuid: `g${i}` }));
+  const tail = Array.from({ length: 37 }, (_, i) => ({ uuid: `g${100 + i}` }));
+  const { http, queries } = recordingHttp({ pages: [full, tail], total: 137 });
+  const listing = await new AggregatorService(http).listGroupsPaged();
+
+  assert.equal(listing.groups.length, 137, "the whole tenant was read, not just the first page");
+  assert.equal(listing.groupsTotal, 137);
+  assert.equal(listing.truncated, false, "a complete read is not truncated");
+  assert.deepEqual(queries[0], { count: 100, startIndex: 0 });
+  assert.deepEqual(queries[1], { count: 100, startIndex: 100 }, "offset advances by what came back");
+  assert.equal(queries.length, 2, "and it stops as soon as the total is covered");
+});
+
+test("a short page is the last page — no pointless extra round-trip", async () => {
+  // The route fills a page it can fill, so fewer than `count` back means the end.
+  const page = Array.from({ length: 60 }, (_, i) => ({ uuid: `g${i}` }));
+  const { http, queries } = recordingHttp({ pages: [page], total: 60 });
+  const listing = await new AggregatorService(http).listGroupsPaged();
+  assert.equal(listing.groups.length, 60);
+  assert.equal(queries.length, 1);
+  assert.equal(listing.truncated, false);
+});
+
+test("a uuid repeated across pages is deduped, never double-counted", async () => {
+  // The route does not promise a stable sort (paging at count=40 returned the 94
+  // groups in a different ORDER than count=100 did), so overlapping windows are
+  // possible. A duplicated group would inflate every fleet total built from it.
+  const full = Array.from({ length: 100 }, (_, i) => ({ uuid: `g${i}` }));
+  const overlapping = [{ uuid: "g99" }, { uuid: "g100" }];
+  const { http } = recordingHttp({ pages: [full, overlapping], total: 101 });
+  const listing = await new AggregatorService(http).listGroupsPaged();
+  assert.equal(listing.groups.length, 101, "100 + 1 new, not 102");
+  assert.equal(new Set(listing.groups.map((g) => g.uuid)).size, 101);
+});
+
+test("hitting the page-call cap reports honest truncation, never a silent short list", async () => {
+  // The platform claims 100,000 groups and every page comes back full. The walk
+  // must stop on OUR bound and say the list is a floor — an under-read presented
+  // as complete is exactly the failure this flag exists to prevent.
+  const full = Array.from({ length: 100 }, (_, i) => ({ uuid: `g${i}` }));
+  const { http, queries } = recordingHttp({ pages: [full], total: 100_000 });
+  const listing = await new AggregatorService(http).listGroupsPaged();
+
+  assert.equal(listing.truncated, true, "truncation must be reported");
+  assert.equal(listing.groupsTotal, 100_000, "the platform's claim rides along");
+  assert.ok(listing.groups.length < 100_000, "and our count is the honest floor");
+  assert.ok(queries.length <= 25, `the walk must be bounded, made ${queries.length} calls`);
+});
+
+test("a truncated group list travels into the rollup meta", async () => {
+  const full = Array.from({ length: 100 }, (_, i) => ({ uuid: `g${i}` }));
+  const { http } = recordingHttp({ pages: [full], total: 100_000 });
+  const res = await new AggregatorService(http).fleetRollups(8);
+  // A fleet total summed from a knowingly-partial group list is a floor, and the
+  // meta is the only place the UI can learn that.
+  assert.equal(res.meta.truncated, true);
+  assert.equal(res.meta.groupsTotal, 100_000);
+  assert.equal(res.meta.groupsRead, 100);
 });
 
 test("a first page that already holds everything is not re-asked for", async () => {
@@ -290,7 +368,9 @@ test("an empty tenant is an honest empty rollup, not a failure", async () => {
   const { http } = fakeHttp([], () => ({ current: { totalCanvasesCount: 1 } }));
   const res = await new AggregatorService(http).fleetRollups();
   assert.deepEqual(res.groups, []);
-  assert.deepEqual(res.meta, { groupsRead: 0, groupsFailed: 0 });
+  assert.deepEqual(res.meta, {
+    groupsRead: 0, groupsFailed: 0, groupsTotal: 0, truncated: false,
+  });
   // Zero groups genuinely sums to zero — and `groupsRead: 0` is what tells the
   // caller this is an empty tenant rather than 94 groups that all failed.
   assert.equal(res.fleet.totalCanvases, 0);
@@ -331,7 +411,9 @@ test("every group is read even when the whole fan-out fails, and all are counted
     throw new Error("aggregator 500");
   });
   const res = await new AggregatorService(http).fleetRollups(3);
-  assert.deepEqual(res.meta, { groupsRead: 0, groupsFailed: 6 });
+  assert.deepEqual(res.meta, {
+    groupsRead: 0, groupsFailed: 6, groupsTotal: 6, truncated: false,
+  });
   assert.equal(res.fleet.totalCanvases, 0);
   assert.deepEqual(res.groups, []);
 });

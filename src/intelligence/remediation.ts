@@ -29,6 +29,21 @@ export interface DeviceView {
   status: string;
   lastOnlineTime: string | null;
   city: string | null;
+  /**
+   * The device's group uuid — the join key into the `rpm /v1/groups` tree. NEVER
+   * join on group_name: at least one device (1000015) carries a populated
+   * group_id with an EMPTY display name, and a name is not an identity in a tree
+   * where siblings may share one. group_id covers 234 devices, group_name 233.
+   */
+  groupId: string | null;
+  /**
+   * Depth-1 ancestor of that group — the site the device sits at, resolved from
+   * the group hierarchy (videri/services/group-hierarchy.ts). `null` when the
+   * device has no group, its group is unknown to us, or the tree could not be
+   * read. Null means "we do not know which site", never "no site", so nothing
+   * clusters on it.
+   */
+  site: { uuid: string; name: string | null } | null;
   firmwareCurrent: string | null;
   firmwareBehind: boolean;
   /** Latest screen-state reading. Any field null = unread, not "fine". */

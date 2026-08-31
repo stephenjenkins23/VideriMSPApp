@@ -27,6 +27,8 @@ function device(over: Partial<DeviceView>): DeviceView {
     status: "online",
     lastOnlineTime: null,
     city: null,
+    groupId: null,
+    site: null,
     firmwareCurrent: null,
     firmwareBehind: false,
     screen: { isBlackScreen: null, showingLogo: null, nowPlayingId: null },

@@ -103,6 +103,9 @@ export class FleetContext {
               ORDER BY hs.observed_at DESC
               LIMIT 1
            ) s ON TRUE
+          -- Retired devices no longer exist upstream; counting them would have
+          -- the brief describing a fleet bigger than the one that is there.
+          WHERE d.retired_at IS NULL
           GROUP BY 1, 2`,
       ),
       this.pool.query<{ severity: string; count: string }>(
@@ -115,7 +118,7 @@ export class FleetContext {
       // 100% while every hardware metric was null, which is the most misleading
       // number this system could produce.
       this.pool.query<{ total: string; with_telemetry: string; with_status: string }>(
-        `SELECT (SELECT COUNT(*)::text FROM devices) AS total,
+        `SELECT (SELECT COUNT(*)::text FROM devices WHERE retired_at IS NULL) AS total,
                 (SELECT COUNT(DISTINCT device_id)::text
                    FROM health_samples
                   WHERE source = 'metrics'
@@ -190,6 +193,7 @@ export class FleetContext {
               MAX(firmware_latest) AS latest,
               COUNT(*)::text AS count
          FROM devices
+        WHERE retired_at IS NULL
         GROUP BY firmware_current
         ORDER BY COUNT(*) DESC`,
     );
@@ -232,6 +236,7 @@ export class FleetContext {
            SELECT presence FROM health_samples
             WHERE device_id = d.id ORDER BY observed_at DESC LIMIT 1
          ) hs ON TRUE
+        WHERE d.retired_at IS NULL
         GROUP BY d.id, hs.presence
        HAVING COUNT(a.id) > 0 OR hs.presence = 'offline'
         ORDER BY COUNT(a.id) DESC, d.last_online_time ASC NULLS FIRST

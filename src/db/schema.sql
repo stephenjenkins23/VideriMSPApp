@@ -79,10 +79,19 @@ CREATE TABLE IF NOT EXISTS devices (
   city                text,
 
   first_seen_at       timestamptz NOT NULL DEFAULT now(),
-  last_synced_at      timestamptz NOT NULL DEFAULT now()
+  last_synced_at      timestamptz NOT NULL DEFAULT now(),
+  /* Set when a SUCCESSFUL full discovery sweep (both assigned_to_group=true AND
+     =false — neither value means "all") did not return this device, i.e. it no
+     longer exists upstream. NULL = active. Soft, never a hard DELETE: the history
+     behind a decommissioned device is the only record it was ever there, and a
+     device missing from one sweep may just be a sweep that failed. Cleared again
+     the moment the device reappears. Every fleet count filters
+     `retired_at IS NULL`. See migrations/007-device-retirement.sql. */
+  retired_at          timestamptz
 );
 
 CREATE INDEX IF NOT EXISTS devices_group_idx        ON devices (group_id);
+CREATE INDEX IF NOT EXISTS devices_active_idx       ON devices (id) WHERE retired_at IS NULL;
 CREATE INDEX IF NOT EXISTS devices_class_idx        ON devices (device_class);
 CREATE INDEX IF NOT EXISTS devices_firmware_idx     ON devices (firmware_current);
 CREATE INDEX IF NOT EXISTS devices_last_online_idx  ON devices (last_online_time DESC);
@@ -341,6 +350,12 @@ CREATE INDEX IF NOT EXISTS device_settings_latest_idx
 -- responses — NOT the device id. Cached here after the first successful command
 -- so later calls address the device correctly.
 ALTER TABLE devices ADD COLUMN IF NOT EXISTS player_id text;
+
+-- Soft-delete marker, mirrored here because setup-db.sh applies only this file:
+-- `CREATE TABLE IF NOT EXISTS` will not add a column to a database that already
+-- exists, so the column has to be declared twice to cover both paths.
+-- See migrations/007-device-retirement.sql for the reasoning.
+ALTER TABLE devices ADD COLUMN IF NOT EXISTS retired_at timestamptz;
 
 -- ── Compliance ────────────────────────────────────────────────────────────────
 -- Templates define expected configuration per device class. Seeded from

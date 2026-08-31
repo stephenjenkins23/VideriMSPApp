@@ -5,6 +5,10 @@
  * direct-to-API client: the platform has no aggregation endpoint above device
  * level, so a client without a store must fan out N calls per page view. We do
  * it once per tick and serve from a table.
+ *
+ * Every count here filters `retired_at IS NULL`. This is the snapshot the Overview
+ * reads, so it is where a ghost row does the most damage: before retirement
+ * existed it reported 250 devices against a fleet of 249.
  */
 
 import type { Pool } from "pg";
@@ -20,14 +24,17 @@ export async function computeFleetSnapshot(pool: Pool, repo: Repository): Promis
            SELECT presence FROM health_samples
             WHERE device_id = d.id ORDER BY observed_at DESC LIMIT 1
          ) hs ON TRUE
+        WHERE d.retired_at IS NULL
         GROUP BY 1`,
     ),
     pool.query<{ device_class: string; count: string }>(
-      `SELECT device_class, COUNT(*)::text AS count FROM devices GROUP BY 1`,
+      `SELECT device_class, COUNT(*)::text AS count FROM devices d
+        WHERE d.retired_at IS NULL GROUP BY 1`,
     ),
     pool.query<{ version: string | null; latest: string | null; count: string }>(
       `SELECT firmware_current AS version, MAX(firmware_latest) AS latest, COUNT(*)::text AS count
-         FROM devices GROUP BY firmware_current ORDER BY COUNT(*) DESC`,
+         FROM devices d WHERE d.retired_at IS NULL
+        GROUP BY firmware_current ORDER BY COUNT(*) DESC`,
     ),
     pool.query<{ severity: string; count: string }>(
       `SELECT severity, COUNT(*)::text AS count
@@ -43,7 +50,10 @@ export async function computeFleetSnapshot(pool: Pool, repo: Repository): Promis
       // poller writes the real per-device telemetry into device_telemetry, so a
       // device counts as covered if EITHER source has a recent non-null field.
       // As the slow lane sweeps, coverage climbs from 0 — honestly, per device.
-      `SELECT (SELECT COUNT(*)::text FROM devices) AS total,
+      // Both sides of the ratio are restricted to ACTIVE devices. A retired device
+      // can still have recent rows in either table, and counting it in the
+      // numerator against an active-only denominator could push coverage over 100%.
+      `SELECT (SELECT COUNT(*)::text FROM devices WHERE retired_at IS NULL) AS total,
               (SELECT COUNT(*)::text FROM (
                  SELECT device_id FROM health_samples
                   WHERE source = 'metrics'
@@ -57,7 +67,9 @@ export async function computeFleetSnapshot(pool: Pool, repo: Repository): Promis
                     AND (cpu_percent IS NOT NULL OR ram_used_percent IS NOT NULL
                          OR storage_used_percent IS NOT NULL OR rssi_dbm IS NOT NULL
                          OR ntp_offset_ms IS NOT NULL)
-               ) AS covered_devices) AS covered`,
+               ) AS covered_devices
+               WHERE device_id IN (SELECT id FROM devices WHERE retired_at IS NULL)
+              ) AS covered`,
     ),
   ]);
 

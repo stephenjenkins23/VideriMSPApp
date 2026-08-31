@@ -10,6 +10,13 @@
  * 2. **Idempotency.** Every write is an upsert or an ON CONFLICT DO NOTHING, so
  *    a retried batch or an overlapping tick cannot corrupt anything or double
  *    count. The poller assumes it will be restarted mid-run.
+ *
+ * 3. **Retired devices are excluded from every fleet-wide read.** A row with
+ *    `retired_at` set is a device the platform no longer has (soft-deleted by the
+ *    discovery reconcile, see pipeline/pollers/retirement.ts). It stays for its
+ *    history, but it must never inflate a count, be polled, be alerted on, or be
+ *    measured for SLA. Lookups BY ID deliberately still resolve — a deep link to a
+ *    retired device should show its last known state, not a 404.
  */
 
 import type { Pool, PoolClient } from "pg";
@@ -194,6 +201,55 @@ export class Repository {
   }
 
   /**
+   * The registry split by retirement state, for the discovery reconcile.
+   *
+   * Both halves are needed: `active` is the set a sweep's absence could retire,
+   * `retired` is the set a sweep's presence must bring back. Returning ids only
+   * (not rows) keeps this a few KB at fleet scale.
+   */
+  async deviceRetirementState(): Promise<{ active: string[]; retired: string[] }> {
+    const { rows } = await this.pool.query<{ id: string; retired: boolean }>(
+      `SELECT id, retired_at IS NOT NULL AS retired FROM devices ORDER BY id`,
+    );
+    const active: string[] = [];
+    const retired: string[] = [];
+    for (const row of rows) (row.retired ? retired : active).push(row.id);
+    return { active, retired };
+  }
+
+  /**
+   * Apply a retirement plan. Soft only — there is no DELETE path here by design.
+   *
+   * Both statements are idempotent and guarded on the current state, so re-running
+   * a tick cannot double-count and a concurrent poll cannot flip a row twice. The
+   * returned counts are rows actually CHANGED, not rows asked about.
+   */
+  async applyRetirement(
+    retire: readonly string[],
+    unretire: readonly string[],
+  ): Promise<{ retired: number; unretired: number }> {
+    let retired = 0;
+    let unretired = 0;
+    if (retire.length > 0) {
+      const { rowCount } = await this.pool.query(
+        `UPDATE devices SET retired_at = now()
+          WHERE id = ANY($1::text[]) AND retired_at IS NULL`,
+        [retire],
+      );
+      retired = rowCount ?? 0;
+    }
+    if (unretire.length > 0) {
+      const { rowCount } = await this.pool.query(
+        `UPDATE devices SET retired_at = NULL
+          WHERE id = ANY($1::text[]) AND retired_at IS NOT NULL`,
+        [unretire],
+      );
+      unretired = rowCount ?? 0;
+    }
+    return { retired, unretired };
+  }
+
+  /**
    * Everything sync_command needs to address one device.
    *
    * `player_id` is a THIRD identifier, distinct from both our row id and
@@ -249,7 +305,7 @@ export class Repository {
              FROM health_samples h WHERE h.device_id = d.id
             ORDER BY observed_at DESC LIMIT 1
          ) latest ON true
-        WHERE d.serial_no IS NOT NULL
+        WHERE d.serial_no IS NOT NULL AND d.retired_at IS NULL
         ORDER BY online DESC, d.last_online_time DESC NULLS LAST
         LIMIT $1`,
       [limit * (onlineOnly ? 3 : 1)],
@@ -281,6 +337,7 @@ export class Repository {
       `SELECT d.id, d.device_id, d.device_jid, d.player_id
          FROM devices d
         WHERE d.device_jid IS NOT NULL
+          AND d.retired_at IS NULL
           AND EXISTS (SELECT 1 FROM health_samples h
                        WHERE h.device_id = d.id AND h.presence = 'online'
                          AND h.observed_at > now() - interval '30 minutes')
@@ -356,6 +413,7 @@ export class Repository {
             ORDER BY observed_at DESC LIMIT 1
          ) latest ON true
         WHERE d.device_jid IS NOT NULL
+          AND d.retired_at IS NULL
           AND EXISTS (SELECT 1 FROM health_samples h
                        WHERE h.device_id = d.id AND h.presence = 'online'
                          AND h.observed_at > now() - interval '30 minutes')
@@ -415,6 +473,7 @@ export class Repository {
             WHERE s.device_id = d.id
             ORDER BY observed_at DESC LIMIT 1
          ) latest ON true
+        WHERE d.retired_at IS NULL
         ORDER BY latest.observed_at ASC NULLS FIRST, d.id
         LIMIT $1`,
       [batchSize],
@@ -486,6 +545,7 @@ export class Repository {
       `SELECT id, device_id, device_jid
          FROM devices
         WHERE device_id IS NOT NULL
+          AND retired_at IS NULL
         ORDER BY id`,
     );
     return rows.map((r) => ({ id: r.id, deviceId: r.device_id, deviceJid: r.device_jid }));
@@ -733,7 +793,8 @@ export class Repository {
               AND observed_at > now() - ($1::text || ' seconds')::interval
             ORDER BY observed_at DESC
             LIMIT $2
-         ) s ON TRUE`,
+         ) s ON TRUE
+        WHERE d.retired_at IS NULL`,
       [String(Math.round(windowSeconds)), maxSamplesPerDevice],
     );
 
@@ -919,6 +980,7 @@ export class Repository {
             WHERE device_id = d.id ORDER BY observed_at DESC LIMIT 1
          ) hs ON hs.presence = 'online'` : ""}
         WHERE d.device_id IS NOT NULL AND d.device_jid IS NOT NULL
+          AND d.retired_at IS NULL
         ORDER BY d.id`,
     );
     return rows;
@@ -978,7 +1040,8 @@ export class Repository {
          LEFT JOIN LATERAL (
            SELECT settings, observed_at FROM device_settings
             WHERE device_id = d.id ORDER BY observed_at DESC LIMIT 1
-         ) s ON TRUE`,
+         ) s ON TRUE
+        WHERE d.retired_at IS NULL`,
     );
     return rows.map((r) => ({
       id: r.id,
@@ -1105,6 +1168,7 @@ export class Repository {
          LEFT JOIN LATERAL (
            SELECT MAX(observed_at) AS newest FROM health_samples WHERE device_id = d.id
          ) lat ON TRUE
+        WHERE d.retired_at IS NULL
         ORDER BY d.id`,
       [String(windowHours), String(bucketSeconds)],
     );

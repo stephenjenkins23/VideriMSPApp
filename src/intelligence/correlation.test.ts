@@ -23,6 +23,10 @@ const dev = (over: Partial<DeviceView> = {}): DeviceView => ({
   status: "online",
   lastOnlineTime: "2026-08-31T11:59:00Z",
   city: "New York",
+  // Site defaults to unresolved: the city-dimension cases below exercise the
+  // fallback path, and the site cases set it explicitly.
+  groupId: null,
+  site: null,
   firmwareCurrent: "7.0",
   firmwareBehind: false,
   screen: { isBlackScreen: false, showingLogo: false, nowPlayingId: "c1" },
@@ -46,6 +50,8 @@ const allNull = (over: Partial<DeviceView> = {}): DeviceView => ({
   status: "online",
   lastOnlineTime: null,
   city: null,
+  groupId: null,
+  site: null,
   firmwareCurrent: null,
   firmwareBehind: false,
   screen: { isBlackScreen: null, showingLogo: null, nowPlayingId: null },
@@ -133,6 +139,174 @@ test("venue needs >= 3 co-located failing devices (boundary)", () => {
   ];
   const r = correlate(fleet, NOW);
   assert.equal(findingOf(r.findings, "venue"), undefined);
+});
+
+// ── US-2.1 venue on the SITE dimension (group hierarchy) ─────────────────────
+//
+// The rewire: venue clustering now keys on `site` — the depth-1 ancestor of the
+// device's group in the rpm group tree — because that is the only dimension on
+// this tenant that discriminates (10 real buckets over 234 devices, against a
+// city field that is 99.6% "LONDON"). City survives strictly as the fallback when
+// no site resolved. These cases pin: site wins when present, real clusters come
+// out of it, the degenerate guard still applies to it, and the fallback is
+// announced rather than silent.
+
+/** A device placed at a site, with the city left degenerate on purpose. */
+const sited = (id: string, site: string, over: Partial<DeviceView> = {}): DeviceView =>
+  dev({
+    id,
+    groupId: `${site}-child`,
+    site: { uuid: site, name: site.toUpperCase() },
+    city: "LONDON",
+    ...over,
+  });
+
+test("several devices failing at one SITE produce a real venue finding", () => {
+  // The headline outcome of the rewire: before it, this fleet produced nothing but
+  // the degenerate-city note, because every device is "LONDON".
+  const fleet = [
+    ...[0, 1, 2, 3].map((i) => sited(`sales-${i}`, "sales", { status: "offline" })),
+    sited("tech-0", "techops"),
+    sited("tech-1", "techops"),
+    sited("mtl-0", "montreal"),
+  ];
+  const r = correlate(fleet, NOW);
+  const venue = findingOf(r.findings, "venue");
+  assert.ok(venue, "venue finding expected from the site dimension");
+  assert.equal(venue!.id, "venue::site::sales", "keyed by group uuid, not display name");
+  assert.equal(venue!.affectedDeviceIds.length, 4);
+  assert.match(venue!.summary, /4 of 4 devices at SALES/);
+  assert.match(venue!.rationale, /joined on group_id/);
+  // And the city note is NOT emitted — the city path never ran.
+  assert.equal(noteOf(r.notes, "location-degenerate"), undefined);
+  assert.equal(noteOf(r.notes, "site-absent"), undefined);
+});
+
+test("a site cluster carries severity and confidence scaled by how much is dark", () => {
+  const fleet = [
+    ...Array.from({ length: 10 }, (_, i) => sited(`s-${i}`, "sales", { status: "offline" })),
+    ...[0, 1, 2].map((i) => sited(`t-${i}`, "techops")),
+    sited("m-0", "montreal"),
+  ];
+  const venue = findingOf(correlate(fleet, NOW).findings, "venue");
+  assert.equal(venue!.severity, "critical", "10+ devices dark at one site");
+  assert.equal(venue!.confidence, 0.85);
+});
+
+test("devices failing at DIFFERENT sites are separate findings, not one blob", () => {
+  const fleet = [
+    ...[0, 1, 2].map((i) => sited(`a-${i}`, "sales", { status: "offline" })),
+    ...[0, 1, 2].map((i) => sited(`b-${i}`, "techops", { status: "offline" })),
+    ...[0, 1, 2].map((i) => sited(`c-${i}`, "montreal")),
+  ];
+  const venues = correlate(fleet, NOW).findings.filter((f) => f.kind === "venue");
+  assert.equal(venues.length, 2);
+  assert.deepEqual(
+    new Set(venues.map((v) => v.id)),
+    new Set(["venue::site::sales", "venue::site::techops"]),
+  );
+});
+
+test("two failing devices at a site is a device problem, not a site problem", () => {
+  const fleet = [
+    ...[0, 1].map((i) => sited(`a-${i}`, "sales", { status: "offline" })),
+    ...[0, 1, 2].map((i) => sited(`b-${i}`, "techops")),
+    sited("c-0", "montreal"),
+  ];
+  assert.equal(findingOf(correlate(fleet, NOW).findings, "venue"), undefined);
+});
+
+test("a device with a group_id we could not resolve is not clustered anywhere", () => {
+  // Honest null: `site: null` means "we do not know where this is", so it must not
+  // be counted into any bucket — not even a bucket of its own.
+  const fleet = [
+    ...[0, 1, 2].map((i) => sited(`a-${i}`, "sales", { status: "offline" })),
+    ...[0, 1, 2].map((i) => sited(`b-${i}`, "techops")),
+    sited("c-0", "montreal"),
+    dev({ id: "orphan-1", groupId: "ghost", site: null, status: "offline", city: "LONDON" }),
+    dev({ id: "orphan-2", groupId: "ghost", site: null, status: "offline", city: "LONDON" }),
+    dev({ id: "orphan-3", groupId: null, site: null, status: "offline", city: "LONDON" }),
+  ];
+  const venues = correlate(fleet, NOW).findings.filter((f) => f.kind === "venue");
+  assert.equal(venues.length, 1);
+  assert.deepEqual(new Set(venues[0]!.affectedDeviceIds), new Set(["a-0", "a-1", "a-2"]));
+});
+
+test("a single-site tenant is degenerate on site too, and says so instead of clustering", () => {
+  // The same guard the city field trips: one bucket covering everything is not a
+  // venue, whichever dimension produced it.
+  const fleet = Array.from({ length: 12 }, (_, i) =>
+    sited(`s-${i}`, "sales", { status: "offline" }),
+  );
+  const r = correlate(fleet, NOW);
+  assert.ok(noteOf(r.notes, "site-degenerate"), "degenerate-site note expected");
+  assert.match(noteOf(r.notes, "site-degenerate")!.message, /1 distinct site/);
+  assert.equal(findingOf(r.findings, "venue"), undefined);
+});
+
+test("one site covering >90% of the placed fleet is degenerate too", () => {
+  const fleet = [
+    ...Array.from({ length: 19 }, (_, i) => sited(`s-${i}`, "sales", { status: "offline" })),
+    sited("t-0", "techops", { status: "offline" }),
+    sited("m-0", "montreal", { status: "offline" }),
+  ];
+  const r = correlate(fleet, NOW);
+  assert.ok(noteOf(r.notes, "site-degenerate"));
+  assert.equal(findingOf(r.findings, "venue"), undefined);
+});
+
+test("a site whose display name is empty falls back to its uuid as a label", () => {
+  // Device 1000015's group has a populated id and an EMPTY name; a cluster there
+  // must still be reportable rather than reading as "devices at ''".
+  const fleet = [
+    ...[0, 1, 2].map((i) =>
+      dev({ id: `n-${i}`, groupId: "g", site: { uuid: "abc-123", name: null }, status: "offline" }),
+    ),
+    ...[0, 1, 2].map((i) => sited(`b-${i}`, "techops")),
+    sited("c-0", "montreal"),
+  ];
+  const venue = findingOf(correlate(fleet, NOW).findings, "venue");
+  assert.ok(venue);
+  assert.match(venue!.summary, /at abc-123/);
+});
+
+test("no site on any device falls back to the CITY dimension and announces it", () => {
+  // The fallback path: the group tree was unreadable (or the tenant has no
+  // groups), so the engine says so AND still tries the city field.
+  const fleet = [
+    ...many(3, (i) => ({ id: `bos-${i}`, city: "Boston", status: "offline" })),
+    dev({ id: "ny-1", city: "New York" }),
+    dev({ id: "ch-1", city: "Chicago" }),
+    dev({ id: "sf-1", city: "San Francisco" }),
+  ];
+  const r = correlate(fleet, NOW);
+  assert.ok(noteOf(r.notes, "site-absent"), "the fallback must be announced, not silent");
+  const venue = findingOf(r.findings, "venue");
+  assert.ok(venue, "the city dimension still produced its cluster");
+  assert.equal(venue!.id, "venue::city::Boston", "and it is namespaced by dimension");
+});
+
+test("the real tenant shape — all-LONDON with sites — yields a site finding, not the city note", () => {
+  // 234 of 250 devices resolve to 10 sites; the other 16 carry no group. This is
+  // the end-to-end shape the rewire exists for.
+  const fleet = [
+    ...Array.from({ length: 78 }, (_, i) =>
+      sited(`sales-${i}`, "sales", { status: i < 5 ? "offline" : "online" }),
+    ),
+    ...Array.from({ length: 56 }, (_, i) => sited(`tech-${i}`, "techops")),
+    ...Array.from({ length: 31 }, (_, i) => sited(`mtl-${i}`, "montreal")),
+    ...Array.from({ length: 31 }, (_, i) => sited(`nyc-${i}`, "nyc")),
+    ...Array.from({ length: 16 }, (_, i) =>
+      dev({ id: `nogroup-${i}`, groupId: null, site: null, city: "LONDON" }),
+    ),
+  ];
+  const r = correlate(fleet, NOW);
+  const venue = findingOf(r.findings, "venue");
+  assert.ok(venue, "a real venue finding, which the city dimension could never give");
+  assert.equal(venue!.affectedDeviceIds.length, 5);
+  assert.equal(venue!.severity, "high");
+  assert.equal(noteOf(r.notes, "location-degenerate"), undefined, "city path must not run");
+  assert.equal(noteOf(r.notes, "site-degenerate"), undefined);
 });
 
 // ── US-2.2 firmware cohort ───────────────────────────────────────────────────

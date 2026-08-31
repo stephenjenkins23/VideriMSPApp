@@ -28,6 +28,8 @@ import {
 import { VideriAuth } from "../videri/auth.js";
 import { VideriHttp } from "../videri/http.js";
 import { AggregatorService } from "../videri/services/aggregator.js";
+import { GroupSiteCache, withSites } from "../videri/services/group-hierarchy.js";
+import type { DeviceView } from "../intelligence/remediation.js";
 
 const pool = new Pool({ connectionString: config.DATABASE_URL });
 const args = process.argv.slice(2);
@@ -68,6 +70,25 @@ async function readRollups(): Promise<PlanRollups> {
   }
 }
 
+/**
+ * Resolve each device's site (depth-1 group ancestor) so the plan's venue
+ * correlation says the same thing `GET /api/correlation` does.
+ *
+ * One read-only `rpm /v1/groups` walk. Degrades the same way the rollups do: no
+ * credentials or a failed read leaves every `site` null, and the correlation
+ * engine then emits its honest "no site resolved" note instead of a fabricated
+ * cluster.
+ */
+async function withResolvedSites(devices: DeviceView[]): Promise<DeviceView[]> {
+  if (!config.VIDERI_PASSWORD) return devices;
+  try {
+    const hierarchy = await new GroupSiteCache(new VideriHttp(new VideriAuth())).get();
+    return hierarchy.index ? withSites(devices, hierarchy.index).devices : devices;
+  } catch {
+    return devices;
+  }
+}
+
 try {
   const queries = new ReadQueries(pool);
   const fleet = new FleetContext(pool);
@@ -83,7 +104,7 @@ try {
   // about what the engines said. Its own POP block is the batch-brief caveat
   // ("not measured"); the plan replaces it with the persisted fleet-wide gap
   // summary, which is one query and therefore cheap enough to carry here.
-  const { remediation, correlation } = summarizeIntelligence(devices);
+  const { remediation, correlation } = summarizeIntelligence(await withResolvedSites(devices));
 
   const input: PlanInput = {
     windowHours,

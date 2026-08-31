@@ -1357,7 +1357,9 @@ test("fleet rollups sum aggregator counts with an honest partial-failure count",
     noEvents: 0,
     singleContent: 4,
   });
-  assert.deepEqual(body.data.meta, { groupsRead: 2, groupsFailed: 1 });
+  assert.deepEqual(body.data.meta, {
+    groupsRead: 2, groupsFailed: 1, groupsTotal: 3, truncated: false,
+  });
   // Worst-offline-first drill-down, and the rollup carries its own freshness.
   assert.equal(body.data.groups[0].uuid, "g1");
   assert.equal(body.data.cached, false);

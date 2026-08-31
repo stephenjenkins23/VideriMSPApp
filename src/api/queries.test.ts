@@ -156,7 +156,7 @@ test("a null device name falls back to no name, never to an empty string", async
   assert.equal(devices[0]!.name, null);
 });
 
-test("fleetDevices is the honest denominator: counted over ALL devices, not the join", async () => {
+test("fleetDevices is the honest denominator: the active fleet, not the join", async () => {
   // The invariant that makes proof-of-play coverage meaningful. If this count were
   // taken over the persisted-schedule join, coverage would read 100% forever.
   const { pool, captured } = persistedPool([scheduleRow({ id: "a" }), scheduleRow({ id: "b" })], "94");
@@ -173,7 +173,14 @@ test("fleetDevices is the honest denominator: counted over ALL devices, not the 
     false,
     "the denominator must not be filtered by the schedule join",
   );
-  assert.equal(/WHERE/i.test(countStmt!.sql), false, "the denominator must be unfiltered");
+  // …but it IS filtered on retirement: a retired row is a device the platform no
+  // longer has, and counting it would hold coverage permanently below 100% against
+  // a device that can never get a schedule again.
+  assert.match(
+    countStmt!.sql,
+    /retired_at IS NULL/,
+    "the denominator must exclude retired devices",
+  );
 });
 
 test("fleetDevices is 0 rather than NaN when the count row is missing", async () => {

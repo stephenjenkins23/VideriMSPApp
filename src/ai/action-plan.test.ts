@@ -45,6 +45,8 @@ function device(over: Partial<DeviceView>): DeviceView {
     status: "online",
     lastOnlineTime: null,
     city: null,
+    groupId: null,
+    site: null,
     firmwareCurrent: null,
     firmwareBehind: false,
     screen: { isBlackScreen: null, showingLogo: null, nowPlayingId: null },
@@ -154,7 +156,7 @@ test("summarizeRollupsForPlan compacts the fan-out and keeps its partial-read ca
     groups: Array.from({ length: 9 }, (_, i) =>
       group({ uuid: `g-${i}`, name: `Group ${i}`, offline30d: 9 - i }),
     ),
-    meta: { groupsRead: 92, groupsFailed: 2 },
+    meta: { groupsRead: 92, groupsFailed: 2, groupsTotal: 94, truncated: false },
   };
 
   const rollups = summarizeRollupsForPlan(result, "2026-08-31T08:00:00.000Z", 4);
@@ -192,7 +194,7 @@ function planInput(): PlanInput {
       {
         fleet: { totalCanvases: 242, offline30d: 110, offline6mo: 64, noEvents: 31, singleContent: 12 },
         groups: [group({ name: "JFK T4", offline30d: 17 })],
-        meta: { groupsRead: 94, groupsFailed: 0 },
+        meta: { groupsRead: 94, groupsFailed: 0, groupsTotal: 94, truncated: false },
       },
       "2026-08-31T08:00:00.000Z",
     ),

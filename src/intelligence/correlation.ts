@@ -22,6 +22,15 @@
  *     and emit an honest note instead of a bogus cluster (mirrors the way the
  *     Insights cityModule flags NO DATA SOURCE).
  *
+ * VENUE DIMENSION (rewired 2026-08-31). Venue correlation clusters on `site` —
+ * the depth-1 ancestor of the device's group in the `rpm /v1/groups` tree, which
+ * gives ten real buckets (Videri Sales 78, Techops 56, Montreal Office 31, NYC
+ * Office 31, …) over 234 of 250 devices. `city` remains only as the fallback
+ * dimension when the group tree could not be read at all, because on this tenant
+ * it is 99.6% "LONDON" and can never produce anything but the degenerate note.
+ * Sites are resolved upstream (videri/services/group-hierarchy.ts) and arrive on
+ * the DeviceView, so this engine stays pure.
+ *
  * The whole engine is `correlate(devices)` — a pure `DeviceView[] → report`, so
  * every rule is unit-testable without a database or a clock. `now` is an
  * injectable parameter (defaulting to the wall clock) purely so the temporal
@@ -50,7 +59,12 @@ export interface Finding {
  * distinct from a Finding so the UI never renders absence-of-data as a signal.
  */
 export interface Note {
-  kind: "location-degenerate" | "location-absent" | "symptom-telemetry-absent";
+  kind:
+    | "location-degenerate"
+    | "location-absent"
+    | "site-degenerate"
+    | "site-absent"
+    | "symptom-telemetry-absent";
   message: string;
 }
 
@@ -68,11 +82,13 @@ export interface CorrelationReport {
 // surface earns trust by NOT crying wolf.
 
 /**
- * Location degeneracy (US-2.1 guard). This tenant's `city` is placeholder data,
- * so grouping by it finds one useless mega-venue. We refuse to cluster when the
- * location field is not discriminating enough to mean anything:
+ * Dimension degeneracy (US-2.1 guard) — applied to whichever venue dimension we
+ * use, site or city. This tenant's `city` is placeholder data, so grouping by it
+ * finds one useless mega-venue; a tenant with a single top-level group would have
+ * the same problem on `site`. We refuse to cluster when the dimension is not
+ * discriminating enough to mean anything:
  *   - fewer than 3 distinct non-null values, OR
- *   - a single value covers more than 90% of the located devices.
+ *   - a single value covers more than 90% of the placed devices.
  * Either way we emit a note, never a cluster.
  */
 const MIN_DISTINCT_LOCATIONS = 3;
@@ -173,7 +189,102 @@ export function correlate(devices: DeviceView[], now: Date = new Date()): Correl
 
 // ── US-2.1 venue ─────────────────────────────────────────────────────────────
 
+/**
+ * Venue correlation, on the group-hierarchy SITE dimension.
+ *
+ * Site (the depth-1 group ancestor) is the primary dimension because it is the
+ * only one on this tenant that actually discriminates. `city` is kept strictly as
+ * a fallback for when the group tree is unavailable — no site on any device means
+ * either the tenant genuinely has no groups or (far more likely) we could not read
+ * `rpm /v1/groups`, and in both cases saying so beats silently emitting nothing.
+ */
 function correlateVenue(devices: DeviceView[], findings: Finding[], notes: Note[]): void {
+  const sited = devices.filter((d) => d.site !== null);
+  if (sited.length === 0) {
+    notes.push({
+      kind: "site-absent",
+      message:
+        "No device resolved to a site in the group hierarchy, so venue correlation " +
+        "fell back to the city field. Either the group tree could not be read or no " +
+        "device carries a group_id — this is an unknown, not a fleet without sites.",
+    });
+    correlateVenueByCity(devices, findings, notes);
+    return;
+  }
+
+  // Degeneracy is a property of the whole dataset, not just the failing subset.
+  const counts = new Map<string, { label: string; total: number }>();
+  for (const d of sited) {
+    const site = d.site!;
+    const entry = counts.get(site.uuid) ?? { label: site.name ?? site.uuid, total: 0 };
+    entry.total += 1;
+    counts.set(site.uuid, entry);
+  }
+
+  const placed = [...counts.values()].reduce((a, b) => a + b.total, 0);
+  const distinct = counts.size;
+  const topShare = Math.max(...[...counts.values()].map((c) => c.total)) / placed;
+  if (distinct < MIN_DISTINCT_LOCATIONS || topShare > LOCATION_TOP_SHARE_MAX) {
+    // Same honest guard as the city path: a collapsed dimension yields a note.
+    notes.push({
+      kind: "site-degenerate",
+      message:
+        `The group hierarchy is too degenerate to correlate on: ${distinct} distinct ` +
+        `site(s) across ${placed} placed device(s), the largest covering ` +
+        `${Math.round(topShare * 100)}%. Clustering by it would invent one meaningless ` +
+        `"venue", so no venue clusters are emitted.`,
+    });
+    return;
+  }
+
+  // Non-degenerate: group the FAILING devices by site and emit a cluster wherever
+  // enough co-sited devices are failing at once.
+  const failingBySite = new Map<string, DeviceView[]>();
+  for (const d of sited) {
+    if (!isFailing(d)) continue;
+    const bucket = failingBySite.get(d.site!.uuid) ?? [];
+    bucket.push(d);
+    failingBySite.set(d.site!.uuid, bucket);
+  }
+
+  for (const [uuid, group] of failingBySite) {
+    if (group.length < MIN_VENUE_CLUSTER) continue;
+    const n = group.length;
+    const label = counts.get(uuid)?.label ?? uuid;
+    const siteTotal = counts.get(uuid)?.total ?? n;
+    // A whole site failing at once is more urgent the more of it is dark.
+    const severity: Severity = n >= 10 ? "critical" : n >= 5 ? "high" : "medium";
+    findings.push({
+      // Keyed by uuid, not name: the display name can be renamed or empty, the
+      // uuid is the identity the hierarchy joins on.
+      id: `venue::site::${uuid}`,
+      kind: "venue",
+      severity,
+      // Co-location plus simultaneous failure is a strong site-cause signal, but
+      // not certain (a coincidence of independent device faults is possible), so
+      // confidence rises with the count rather than sitting at 1.
+      confidence: n >= 10 ? 0.85 : n >= 5 ? 0.75 : 0.65,
+      affectedDeviceIds: group.map((d) => d.id),
+      summary: `${n} of ${siteTotal} devices at ${label} are offline or failing together.`,
+      rationale:
+        `${n} devices in the ${label} group tree (${group.map(labelOf).slice(0, 5).join(", ")}` +
+        `${n > 5 ? ", …" : ""}) are failing at the same site, out of ${siteTotal} there. ` +
+        `A site-level cause — power, network, or the local AP — explains a co-located ` +
+        `cluster far better than that many independent device faults. Site is the ` +
+        `depth-1 group ancestor, joined on group_id.`,
+    });
+  }
+}
+
+/**
+ * The pre-rewire city path, kept ONLY as the fallback when no site resolved.
+ *
+ * On VIDERISALES this can only ever produce the degenerate note (CITY is 99.6%
+ * "LONDON"), which is precisely why it is no longer the primary dimension. It
+ * stays because a tenant that sets real cities and no groups would still get a
+ * venue signal out of it.
+ */
+function correlateVenueByCity(devices: DeviceView[], findings: Finding[], notes: Note[]): void {
   // Degeneracy is a property of the whole dataset, not just the failing subset —
   // judge it over every device's location.
   const counts = new Map<string, number>();
@@ -225,7 +336,9 @@ function correlateVenue(devices: DeviceView[], findings: Finding[], notes: Note[
     // A whole site failing at once is more urgent the more of it is dark.
     const severity: Severity = n >= 10 ? "critical" : n >= 5 ? "high" : "medium";
     findings.push({
-      id: `venue::${city}`,
+      // Namespaced by dimension so a city cluster and a site cluster can never
+      // collide on one id in the UI's dedupe.
+      id: `venue::city::${city}`,
       kind: "venue",
       severity,
       // Co-location plus simultaneous failure is a strong site-cause signal, but
