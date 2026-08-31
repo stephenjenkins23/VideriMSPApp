@@ -1,6 +1,7 @@
 import { Pool } from "pg";
 import { config } from "../config.js";
 import { FleetContext } from "./context.js";
+import { ReadQueries } from "../api/queries.js";
 import { assembleBundle } from "./bundle.js";
 import { generateFleetBrief, renderBrief } from "./brief.js";
 
@@ -17,7 +18,7 @@ const pool = new Pool({ connectionString: config.DATABASE_URL });
 const windowHours = Number(process.argv[2] ?? 24);
 
 try {
-  const bundle = await assembleBundle(new FleetContext(pool), windowHours);
+  const bundle = await assembleBundle(new FleetContext(pool), new ReadQueries(pool), windowHours);
   const { brief, usage } = await generateFleetBrief(bundle, { windowHours });
 
   await pool.query(
