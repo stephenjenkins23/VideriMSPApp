@@ -18,6 +18,7 @@
 
 import type { Pool } from "pg";
 import type { DeviceView } from "../intelligence/remediation.js";
+import type { ScheduledEvent } from "../intelligence/proof-of-play.js";
 
 export interface DeviceListFilters {
   page: number;
@@ -665,6 +666,79 @@ export class ReadQueries {
         isBlackScreen: (r["is_black_screen"] as boolean | null) ?? null,
         showingLogo: (r["showing_logo"] as boolean | null) ?? null,
         screenObservedAt: (r["observed_at"] as Date | null)?.toISOString() ?? null,
+      })),
+    };
+  }
+
+  /**
+   * Fleet-wide persisted schedules joined with the latest screen-state, for the
+   * scheduled proof-of-play gap detector (Epic 4, US-4.5).
+   *
+   * The slow-lane schedule poller (`schedule-slowlane`) stores a per-canvas
+   * "scheduled now" snapshot in `device_schedule`; this reads the LATEST snapshot
+   * per device and joins the latest screen-state we hold. Unlike `popScreenState`
+   * — which live-samples a bounded batch and fans out one publisher call each —
+   * this touches only our own tables, so it can cover EVERY device that has a
+   * persisted schedule with no outbound calls and no cap.
+   *
+   * `INNER JOIN` on `device_schedule`: a device with no persisted schedule is not
+   * returned (there is nothing to judge). Screen-state is a `LEFT JOIN` — a
+   * scheduled device we cannot see is reported as unknown by the engine, never a
+   * fabricated gap. `fetchedAt` rides along so the caller can report how stale the
+   * snapshot is rather than presenting it as live. `fleetDevices` is the honest
+   * denominator for coverage (how many of the fleet have a schedule yet).
+   */
+  async popPersistedSchedules(): Promise<{
+    devices: Array<{
+      id: string;
+      name: string | null;
+      scheduledItems: ScheduledEvent[];
+      scheduledCount: number;
+      scheduleObservedAt: string;
+      fetchedAt: string;
+      isScreenOn: boolean | null;
+      isBlackScreen: boolean | null;
+      showingLogo: boolean | null;
+      screenObservedAt: string | null;
+    }>;
+    fleetDevices: number;
+  }> {
+    const [rowsResult, countResult] = await Promise.all([
+      this.pool.query(
+        `SELECT d.id, d.name,
+                sch.scheduled_items, sch.scheduled_count,
+                sch.observed_at AS schedule_observed_at, sch.fetched_at,
+                hs.is_screen_on, hs.is_black_screen, hs.showing_logo,
+                hs.observed_at AS screen_observed_at
+           FROM devices d
+           JOIN LATERAL (
+             SELECT scheduled_items, scheduled_count, observed_at, fetched_at
+               FROM device_schedule s
+              WHERE s.device_id = d.id
+              ORDER BY observed_at DESC LIMIT 1
+           ) sch ON TRUE
+           ${LATEST_SAMPLE_LATERAL}
+          ORDER BY sch.observed_at ASC`,
+      ),
+      this.pool.query<{ count: string }>(`SELECT COUNT(*)::text AS count FROM devices`),
+    ]);
+
+    return {
+      fleetDevices: Number(countResult.rows[0]?.count ?? 0),
+      devices: rowsResult.rows.map((r) => ({
+        id: r["id"] as string,
+        name: (r["name"] as string | null) ?? null,
+        // jsonb comes back already parsed; guard the odd null/non-array row.
+        scheduledItems: Array.isArray(r["scheduled_items"])
+          ? (r["scheduled_items"] as ScheduledEvent[])
+          : [],
+        scheduledCount: Number(r["scheduled_count"] ?? 0),
+        scheduleObservedAt: (r["schedule_observed_at"] as Date).toISOString(),
+        fetchedAt: (r["fetched_at"] as Date).toISOString(),
+        isScreenOn: (r["is_screen_on"] as boolean | null) ?? null,
+        isBlackScreen: (r["is_black_screen"] as boolean | null) ?? null,
+        showingLogo: (r["showing_logo"] as boolean | null) ?? null,
+        screenObservedAt: (r["screen_observed_at"] as Date | null)?.toISOString() ?? null,
       })),
     };
   }

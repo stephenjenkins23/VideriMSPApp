@@ -406,3 +406,20 @@ CREATE TABLE IF NOT EXISTS device_telemetry (
 );
 CREATE INDEX IF NOT EXISTS device_telemetry_latest_idx
   ON device_telemetry (device_id, observed_at DESC);
+
+-- Fleet-wide scheduled proof-of-play (slow lane). Latest-per-device semantics.
+-- Persisted "scheduled now" snapshot per canvas from publisher v1 events, so gap
+-- detection runs over the whole fleet from stored rows. `fetched_at` carries how
+-- old the snapshot is; it is never presented as live.
+CREATE TABLE IF NOT EXISTS device_schedule (
+  device_id           text        NOT NULL REFERENCES devices (id) ON DELETE CASCADE,
+  observed_at         timestamptz NOT NULL DEFAULT now(),
+  schedule_date       date        NOT NULL,
+  scheduled_count     integer     NOT NULL DEFAULT 0,
+  has_active_schedule boolean      NOT NULL DEFAULT false,
+  scheduled_items     jsonb       NOT NULL DEFAULT '[]'::jsonb,
+  fetched_at          timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (device_id, observed_at)
+);
+CREATE INDEX IF NOT EXISTS device_schedule_latest_idx
+  ON device_schedule (device_id, observed_at DESC);

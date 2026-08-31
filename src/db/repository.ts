@@ -391,6 +391,60 @@ export class Repository {
     );
   }
 
+  /**
+   * The next batch of devices to read a schedule for, stalest-persisted first.
+   *
+   * The schedule slow-lane sibling of `telemetrySlowLaneTargets`: same round-robin
+   * idea (order by the newest `device_schedule.observed_at` we already hold, NULLS
+   * FIRST, so a device we have never fetched a schedule for goes to the front),
+   * but NOT online-only. A canvas has a platform schedule whether or not it is
+   * currently reachable — the publisher's per-canvas events endpoint is a control-
+   * plane read, not a device command — so every device is a candidate and gap
+   * detection can cover the whole fleet, not just the estate that happens to be
+   * online right now. Fetching a device inserts a fresh row, moving it to the back
+   * of the queue, so repeated ticks sweep the fleet in (total / batch) ticks.
+   */
+  async scheduleSlowLaneTargets(
+    batchSize: number,
+  ): Promise<Array<{ id: string; name: string | null }>> {
+    const { rows } = await this.pool.query<{ id: string; name: string | null }>(
+      `SELECT d.id, d.name
+         FROM devices d
+         LEFT JOIN LATERAL (
+           SELECT observed_at FROM device_schedule s
+            WHERE s.device_id = d.id
+            ORDER BY observed_at DESC LIMIT 1
+         ) latest ON true
+        ORDER BY latest.observed_at ASC NULLS FIRST, d.id
+        LIMIT $1`,
+      [batchSize],
+    );
+    return rows.map((r) => ({ id: r.id, name: r.name }));
+  }
+
+  /** Persist a "scheduled now" snapshot read from the publisher (schedule slow lane). */
+  async saveSchedule(
+    deviceId: string,
+    s: {
+      date: string;
+      scheduledCount: number;
+      hasActiveSchedule: boolean;
+      scheduledItems: unknown[];
+      fetchedAt: Date;
+    },
+  ): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO device_schedule
+         (device_id, schedule_date, scheduled_count, has_active_schedule,
+          scheduled_items, fetched_at)
+       VALUES ($1,$2,$3,$4,$5::jsonb,$6)`,
+      [
+        deviceId, s.date, s.scheduledCount, s.hasActiveSchedule,
+        JSON.stringify(s.scheduledItems), s.fetchedAt,
+      ],
+    );
+  }
+
   /** Latest cached telemetry for one device, if any. */
   async latestTelemetry(deviceId: string): Promise<Record<string, unknown> | null> {
     const { rows } = await this.pool.query(

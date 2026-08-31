@@ -206,6 +206,48 @@ export function scheduledNow(events: ScheduledEvent[], at: Date): ScheduledEvent
 }
 
 /**
+ * Normalise the publisher's per-canvas events payload to honest `ScheduledEvent`s.
+ *
+ * The publisher's `/publisher/api/v1/canvases/{id}/events/{date}` envelope is not
+ * pinned by a published spec, so we accept the three shapes the platform's
+ * services use (bare array / NestJS `data` / Spring `content`) and normalise each
+ * field to a value-or-null. An unrecognised shape yields `[]`, which the engine
+ * reads as "no schedule", never a gap.
+ *
+ * Pure so both the live-sample API route and the fleet-wide schedule slow lane
+ * parse identically — there is exactly one place that knows the publisher shape.
+ */
+export function normalizeEvents(raw: unknown): ScheduledEvent[] {
+  const arr: unknown[] = Array.isArray(raw)
+    ? raw
+    : Array.isArray((raw as { data?: unknown })?.data)
+      ? ((raw as { data: unknown[] }).data)
+      : Array.isArray((raw as { content?: unknown })?.content)
+        ? ((raw as { content: unknown[] }).content)
+        : [];
+
+  return arr.map((e): ScheduledEvent => {
+    const o = (e ?? {}) as Record<string, unknown>;
+    const str = (v: unknown): string | null =>
+      typeof v === "string" && v.trim() !== "" ? v : null;
+    const numOrNull = (v: unknown): number | null => {
+      if (v === null || v === undefined) return null;
+      const n = typeof v === "number" ? v : Number(v);
+      return Number.isFinite(n) ? n : null;
+    };
+    return {
+      assetUuid: str(o["assetUuid"]),
+      assetType: str(o["assetType"]),
+      durationMs: numOrNull(o["durationMs"]),
+      startTime: str(o["startTime"]),
+      endTime: str(o["endTime"]),
+      priority: numOrNull(o["priority"]),
+      frequency: str(o["frequency"]),
+    };
+  });
+}
+
+/**
  * Join per-device schedule against screen-state and flag the gaps.
  *
  * A device is "with schedule" iff it has at least one event scheduled now. Of
