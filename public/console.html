@@ -524,6 +524,7 @@ table.dt td.n{font-variant-numeric:tabular-nums}
 <nav class="navbar"><div class="navbar-in" id="nav">
   <button aria-selected="true"  data-v="overview">&#128202; Overview</button>
   <button aria-selected="false" data-v="alerts">&#128680; Alerts <span class="nb hot" id="nb-alerts">0</span></button>
+  <button aria-selected="false" data-v="actions">&#128736;&#65039; Actions <span class="nb" id="nb-actions">0</span></button>
   <button aria-selected="false" data-v="devices">&#128421; Devices <span class="nb" id="nb-devices">0</span></button>
   <button aria-selected="false" data-v="compliance">&#128737; Compliance <span class="nb" id="nb-comp">0</span></button>
   <button aria-selected="false" data-v="brief">&#10024; AI Brief</button>
@@ -640,6 +641,11 @@ table.dt td.n{font-variant-numeric:tabular-nums}
       <div class="chd"><h2>&#9201; SLA measurement confidence</h2></div>
       <div class="wbody" id="slabody"></div>
     </div>
+  </section>
+
+  <!-- ============ ACTIONS (self-heal recommendations) ============ -->
+  <section id="v-actions" class="hide">
+    <div id="actionsbody"></div>
   </section>
 
   <!-- ============ INSIGHTS ============ -->
@@ -762,6 +768,7 @@ const S = { summary: null, alerts: [], devices: [], compliance: [], pipeline: nu
 const PAGES = {
   overview:   ["Fleet Overview", "Everything measurable, and everything that is not"],
   alerts:     ["Active Alerts", "Grouped by severity, newest evidence first"],
+  actions:    ["Recommended Actions", "Self-heal: what to do, ranked — one-click where we hold a verified fix, advice everywhere else"],
   devices:    ["Devices", "Sortable, searchable; click any row for full detail"],
   compliance: ["Configuration Compliance", "Calibrated drift scored apart from policy adoption"],
   brief:      ["AI Fleet Brief", "Generated from the live fleet, with its own coverage gaps declared"],
@@ -2643,6 +2650,78 @@ function switchTab(v) {
   if (b) b.click();
 }
 
+/**
+ * Self-heal recommendations (Epic 1). The engine ranks symptom → action; we
+ * surface it, split into ONE-CLICK fixes (we hold a verified write) and ADVISORY
+ * (we can only recommend). A one-click never fires blind from here — it opens the
+ * device so the operator applies it through the same confirm/verify/rollback the
+ * brightness control already uses. Honest by construction: we never claim to have
+ * fixed what we can only advise.
+ */
+const SEV_COLOR = { critical: "var(--red)", high: "var(--amber)", medium: "var(--amber)", low: "var(--na)" };
+
+function renderActions() {
+  const el = $("#actionsbody");
+  const R = S.remediation;
+  const badge = $("#nb-actions");
+  if (!R || !Array.isArray(R.recommendations)) {
+    if (badge) { badge.textContent = "0"; badge.classList.remove("hot"); }
+    el.innerHTML = `<div class="card"><div class="wbody"><div class="empty">
+      Recommendations are unavailable — the remediation service did not respond.</div></div></div>`;
+    return;
+  }
+  const recs = R.recommendations;
+  const sum = R.summary || { byKind: {}, bySeverity: {} };
+  const oneClick = recs.filter((r) => r.kind === "auto-safe");
+  const advisory = recs.filter((r) => r.kind !== "auto-safe");
+  if (badge) {
+    badge.textContent = String(oneClick.length);
+    badge.classList.toggle("hot", (sum.bySeverity?.critical || 0) + (sum.bySeverity?.high || 0) > 0);
+  }
+
+  const sevPill = (k) => (sum.bySeverity?.[k])
+    ? `<span class="fp" style="cursor:default"><span class="d" style="background:${SEV_COLOR[k]}"></span><b>${sum.bySeverity[k]}</b> ${k}</span>` : "";
+  const header = `<div class="card" style="margin-bottom:16px"><div class="wbody">
+    <div style="display:flex;gap:22px;flex-wrap:wrap;align-items:baseline">
+      <div><div style="font-size:30px;font-weight:800;letter-spacing:-.02em;color:var(--green)">${oneClick.length}</div>
+        <div class="na" style="font-size:12px">one-click fixes</div></div>
+      <div><div style="font-size:30px;font-weight:800;letter-spacing:-.02em">${advisory.length}</div>
+        <div class="na" style="font-size:12px">advisory</div></div>
+      <div style="flex:1"></div>
+      <div class="pills">${["critical","high","medium","low"].map(sevPill).join("")}</div>
+    </div>
+    <div class="na" style="font-size:12px;margin-top:10px">
+      Ranked from ${R.devicesConsidered ?? "—"} devices. A one-click fix opens the device so you apply it through the
+      verified write (preflight → verify → rollback) — nothing is changed from this screen.</div>
+  </div></div>`;
+
+  const row = (r, withBtn) => `<div class="arow" style="cursor:default;align-items:flex-start">
+    <span class="thumb" style="background:${SEV_COLOR[r.severity]}22;display:flex;align-items:center;justify-content:center;color:${SEV_COLOR[r.severity]};font-weight:700;font-size:11px">${r.severity[0].toUpperCase()}</span>
+    <span><span class="ti">${esc(r.action)}</span>
+      <span class="ds">${esc(r.deviceLabel || (r.deviceIds && r.deviceIds[0]) || "")} &#183; ${esc(r.symptom)}</span>
+      <span class="mt">${esc(r.rationale || "")}</span></span>
+    ${withBtn
+      ? `<button class="btn sm pri" data-act-open="${esc((r.deviceIds && r.deviceIds[0]) || "")}">Apply on device &#8594;</button>`
+      : `<span class="fp" style="cursor:default;align-self:center"><span class="d" style="background:${SEV_COLOR[r.severity]}"></span>${Math.round((r.confidence||0)*100)}%</span>`}</div>`;
+
+  const CAP = 60;
+  const advShown = advisory.slice(0, CAP);
+  el.innerHTML = header +
+    (oneClick.length
+      ? `<div class="card" style="margin-bottom:16px"><div class="chd"><h2>&#9889; One-click fixes</h2>
+           <span class="na" style="font-size:12px">${oneClick.length} device${oneClick.length===1?"":"s"} with a verified fix available</span></div>
+         <div class="wbody">${oneClick.map((r) => row(r, true)).join("")}</div></div>`
+      : "") +
+    `<div class="card"><div class="chd"><h2>&#128203; Advisory</h2>
+        <span class="na" style="font-size:12px">${advisory.length} recommendation${advisory.length===1?"":"s"} we can only advise on${advisory.length>CAP?` · showing top ${CAP}`:""}</span></div>
+      <div class="wbody">${advShown.length ? advShown.map((r) => row(r, false)).join("")
+        : `<div class="empty">No advisory items — everything actionable is a one-click fix.</div>`}
+        ${advisory.length>CAP?`<div class="na" style="font-size:12px;padding:10px 4px 0">+ ${advisory.length-CAP} more, ranked below the cut.</div>`:""}</div></div>`;
+
+  el.querySelectorAll("[data-act-open]").forEach((b) =>
+    b.addEventListener("click", () => { const id = b.dataset.actOpen; if (id) openDevice(id); }));
+}
+
 function palIndex() {
   const fixed = [
     { kind: "view", name: "Brief", act: () => switchTab("brief") },
@@ -2760,7 +2839,7 @@ addEventListener("keydown", (e) => { if (e.key === "Escape") closeDevice(); });
 $("#q").addEventListener("input", (e) => { S.q = e.target.value; renderDevices(); });
 $("#reload").addEventListener("click", () => load());
 
-const VIEWS_ALL = ["overview", "alerts", "devices", "compliance", "brief", "insights", "sla"];
+const VIEWS_ALL = ["overview", "alerts", "actions", "devices", "compliance", "brief", "insights", "sla"];
 document.querySelectorAll("#nav button").forEach((b) => b.addEventListener("click", () => {
   document.querySelectorAll("#nav button").forEach((x) =>
     x.setAttribute("aria-selected", String(x === b)));
@@ -2812,7 +2891,7 @@ async function load() {
   if (S.loading) return;
   S.loading = true;
   try {
-    const [summary, alerts, devices, compliance, pipeline, sla, brief, shots] = await Promise.all([
+    const [summary, alerts, devices, compliance, pipeline, sla, brief, shots, remediation] = await Promise.all([
       api("/api/fleet/summary"),
       apiAll("/api/alerts"),
       apiAll("/api/devices"),
@@ -2824,6 +2903,8 @@ async function load() {
       // A wall of HEAD requests upstream, so it is allowed to fail without
       // taking the dashboard with it.
       api("/api/screenshots?limit=12&maxAgeMinutes=10").catch(() => null),
+      // Self-heal recommendations — allowed to fail without sinking the page.
+      api("/api/remediation").catch(() => null),
     ]);
     S.summary = summary.data;
     S.alerts = alerts.data;
@@ -2833,6 +2914,7 @@ async function load() {
     S.sla = sla && sla.data;
     S.brief = brief && brief.data;
     S.shots = shots && shots.data;
+    S.remediation = remediation && remediation.data;
     S.fresh = (summary.meta && summary.meta.freshness) || null;
 
     // ageSeconds is only true at fetch time; recompute from the timestamp so
@@ -2850,6 +2932,7 @@ async function load() {
     renderAlertFilters(); renderAlerts(); renderInert();
     renderDeviceFilters(); renderDevices();
     renderCompliance(); renderSla();
+    renderActions();
     drawModules();
   } catch (e) {
     $("#staleness").innerHTML =
