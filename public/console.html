@@ -2171,9 +2171,16 @@ function tabDisplay(d) {
 
 function tabCompliance(d) {
   const c = d.compliance;
+  // Fleet-level provenance, derived live from S — never hardcoded (the numbers
+  // drift out of sync with the fleet otherwise, and used to contradict the
+  // Compliance tab's own dynamic sub-header).
+  const scoredCount = (S.compliance || []).length;
+  const totalCount = (S.devices || []).length;
+  const notScoredCount = Math.max(0, totalCount - scoredCount);
+  const flaggedCombined = (S.compliance || []).filter((x) => (x.drift || []).length > 0).length;
   if (!c) {
     return `<div class="note na"><b>Not scored.</b> Compliance needs a configuration
-      snapshot, and this device has not returned one. 140 of 250 devices are in this
+      snapshot, and this device has not returned one. ${notScoredCount} of ${totalCount} devices are in this
       state &#8212; they are excluded from the fleet average rather than counted as failures.</div>`;
   }
   const drift = c.drift || [];
@@ -2202,7 +2209,7 @@ function tabCompliance(d) {
         ${kv("Evaluated", ago(c.evaluatedAt))}
       </div>
       <div class="note">Drift and policy are scored <b>separately</b> on purpose.
-        Combined they produced 61% and flagged 109 of 110 devices &#8212; a number
+        Combined, they flag ${flaggedCombined} of ${scoredCount} scored devices &#8212; a number
         nobody reads twice. Drift is "this device moved from its calibrated norm";
         policy is "we never adopted this setting fleet-wide".</div>
       <div class="note na">Checks for hardware a device does not have are
@@ -2584,7 +2591,7 @@ function renderCompliance() {
         <td class="n">${policy || "&#8212;"}</td>
         <td class="n">${dur(c.settingsAgeSeconds)}</td></tr>`;
     }).join("") + `</tbody></table></div>` +
-    `<div class="pg">Drift and policy are scored separately &#8212; combined they flagged 109 of 110 devices.</div>`;
+    `<div class="pg">Drift and policy are scored separately &#8212; combined they flag ${rows.filter((c) => (c.drift || []).length > 0).length} of ${scored} scored devices.</div>`;
   el.querySelectorAll("tr.r").forEach((r) =>
     r.addEventListener("click", () => openDevice(r.dataset.id)));
 }
