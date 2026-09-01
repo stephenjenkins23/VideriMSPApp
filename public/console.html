@@ -1562,6 +1562,22 @@ function runtimeTile(label, state, valueText, valueNum, naReason, sub) {
  * the result is cached on S.dev so tab switches don't re-command. A device that
  * closes before the read returns is simply ignored.
  */
+/**
+ * Read the device's own view of its network: address, connected SSID, and what
+ * else it can see. Three more device commands (~4 s), so this is LAZIER than
+ * telemetry — fired only when someone actually opens the Network subtab, not on
+ * every drawer open, and once per open.
+ */
+async function loadNetwork(id) {
+  if (!S.dev || S.dev.id !== id) return;
+  S.dev._netLoading = true;
+  const res = await api("/api/devices/" + encodeURIComponent(id) + "/network").catch(() => null);
+  if (!S.dev || S.dev.id !== id) return;
+  S.dev._net = (res && res.data) || {};
+  S.dev._netLoading = false;
+  if (S.dtab === "network") paintDevice();
+}
+
 async function loadTelemetry(id) {
   if (!S.dev || S.dev.id !== id) return;
   S.dev._telLoading = true;                       // suppress re-trigger during the read
@@ -1572,6 +1588,20 @@ async function loadTelemetry(id) {
   S.dev._telemetry = (res && res.data) || {};
   S.dev._telLoading = false;
   if (S.dtab === "overview" || S.dtab === "network") paintDevice();
+}
+
+/**
+ * Can we actually ask this screen anything?
+ *
+ * REACHABILITY, not the derived status. The derived status of a reachable screen
+ * that is dark or showing the logo is "warning"/"alert", so gating on status
+ * refused to ask perfectly answerable devices for telemetry, a fresh capture, or
+ * their network. Presence is the right signal; status is only a fallback for when
+ * presence was never read.
+ */
+function isReachable(d) {
+  const presence = (d && d.latest && d.latest.presence) || null;
+  return presence ? presence === "online" : (d ? d.status === "online" : false);
 }
 
 function paintDevice() {
@@ -1622,7 +1652,7 @@ function paintDevice() {
   // and start in a "reading…" state; loadTelemetry() fills them in. Temperature
   // is the one that is genuinely unavailable — no verb returns it — so it stays
   // a plain "not reported" rather than a live tile.
-  const isOnline = d.status === "online";
+  const isOnline = isReachable(d);
   // Resolve the offline case BEFORE the tiles are built. An offline screen answers
   // nothing, so there is no read to wait for — leaving it undefined would paint
   // "reading from device…" forever on a device we are never going to ask.
@@ -1658,6 +1688,13 @@ function paintDevice() {
   // case was already resolved above, so asking would burn ~10 s of per-field
   // timeouts to learn what presence already told us).
   if (isOnline && S.dev._telemetry === undefined && !S.dev._telLoading) loadTelemetry(d.id);
+
+  // Network detail is read LAZILY — only when the Network subtab is actually being
+  // viewed. It costs three more device commands, so paying that on every drawer
+  // open (when most people never leave Overview) would be waste.
+  if (S.dtab === "network" && isOnline && S.dev._net === undefined && !S.dev._netLoading) {
+    loadNetwork(d.id);
+  }
 
   // Auto-refresh the screen capture, once per drawer open. Someone looking at a
   // device expects the picture to be of NOW — waiting for them to notice a
@@ -2115,14 +2152,54 @@ function tabNetwork(d) {
           ? kv("HDMI-CEC", st.cec_enabled ? "Enabled" : "Disabled", st.cec_enabled ? "wn" : "ok")
           : na("HDMI-CEC", "Only TCL panels report this")}
       </div>
-      <div class="grp"><p class="glb">&#128225; The device can report these &#8212; we haven't built the screens yet</p>
-        ${[["IP address", "which address this screen is using on the venue network"],
-           ["Nearby Wi-Fi networks", "what the screen can see, for diagnosing a weak signal"],
-           ["Static IP / DNS settings", "changeable, but we keep this off by design &#8212; a wrong address strands the screen"]]
-          .map(([n, why]) => `<div class="gaprow"><span class="gd" style="background:var(--blue)"></span>
-            <span><span class="gn">${n}</span><span class="gw">${why}</span></span></div>`).join("")}
-        <div class="prov">Nothing is missing from the platform here &#8212; the screen answers
-          these when asked. They are on our build list, not a limitation.</div>
+      <div class="grp"><p class="glb">&#128225; Network, as the screen sees it
+        <span style="font-weight:400;text-transform:none;letter-spacing:0;color:var(--tx-3)">&#8212; read from the device</span></p>
+        ${(() => {
+          const nt = S.dev._net;
+          if (!isReachable(d))
+            return `<div class="kv"><span class="v na">The screen is offline, so it cannot be asked</span></div>`;
+          if (nt === undefined)
+            return `<div class="kv"><span class="v na">Reading from the device&#8230;</span></div>`;
+          // The device reports Android's literal placeholder when nothing is
+          // joined; showing it raw ("<unknown ssid>") reads like a bug.
+          const joined = nt.ssid && !/^<.*>$/.test(nt.ssid) ? nt.ssid : null;
+          const linked = nt.signalDbm != null && nt.signalDbm > -110;
+          const sigCls = nt.signalDbm == null ? "na"
+            : nt.signalDbm >= -60 ? "ok" : nt.signalDbm >= -75 ? "wn" : "bd";
+          const rows =
+            (nt.ip ? kv("IP address", esc(nt.ip)) : na("IP address", "not reported"))
+            + (joined ? kv("Connected to", esc(joined), "ok")
+                      : na("Connected to", nt.status === "DISCONNECTED"
+                            ? "no wireless network joined" : "not reported"))
+            + (nt.status ? kv("Wi-Fi state", esc(String(nt.status).toLowerCase()),
+                              nt.status === "CONNECTED" ? "ok" : "wn") : "")
+            + (linked ? kv("Signal", `${nt.signalDbm} dBm`, sigCls)
+                      : na("Signal", "no wireless link (Ethernet, or radio off)"))
+            + (nt.pingMs != null ? kv("Latency (device-measured)", `${nt.pingMs} ms`)
+                                 : na("Latency (device-measured)", "not reported"));
+          const near = Array.isArray(nt.nearby) ? nt.nearby : [];
+          // Strongest first — the useful order when diagnosing a weak join.
+          const sorted = near.slice().sort((a, b) => (b.signalDbm ?? -999) - (a.signalDbm ?? -999));
+          const nearBlock = sorted.length
+            ? `<div class="prov" style="margin-top:8px">Nearby networks the screen can see
+                 (${sorted.length}${nt.nearbyIsLastScan ? ", from its last scan" : ""}):</div>`
+              + sorted.slice(0, 8).map((x) => `<div class="kv">
+                  <span class="k">${esc(x.ssid || "(hidden)")}${joined && x.ssid === joined
+                    ? ' <span class="v ok" style="font-size:10px">joined</span>' : ""}</span>
+                  <span class="v ${x.signalDbm == null ? "na" : x.signalDbm >= -60 ? "ok" : x.signalDbm >= -75 ? "wn" : "bd"}">${
+                    x.signalDbm == null ? "&#8212;" : x.signalDbm + " dBm"}${
+                    x.security ? ` &#183; ${esc(x.security)}` : ""}</span></div>`).join("")
+              + (sorted.length > 8 ? `<div class="prov">+ ${sorted.length - 8} more</div>` : "")
+            : `<div class="prov" style="margin-top:8px">No scan results returned.</div>`;
+          const diag = (!linked && sorted.length)
+            ? `<div class="note"><b>Not joined, but it can see networks.</b> The strongest
+                 nearby is ${esc(sorted[0].ssid || "(hidden)")} at ${sorted[0].signalDbm} dBm &#8212;
+                 so this is a join/credential problem at this screen, not an absence of coverage.</div>`
+            : "";
+          return rows + nearBlock + diag;
+        })()}
+        <div class="prov">Static IP / DNS can also be set on these screens, but we
+          deliberately do not expose that here &#8212; a wrong address strands the screen.</div>
       </div>
       <div class="grp"><p class="glb">&#128683; Nothing reports these &#8212; anywhere</p>
         ${[["Packet loss / jitter", "so venue congestion can't be fully separated from a screen fault"],
