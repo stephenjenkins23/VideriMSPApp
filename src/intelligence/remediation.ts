@@ -19,7 +19,18 @@
  * the whole engine is `recommendationsFor(devices)` — trivially unit-testable.
  * Correlation across co-located devices (many symptoms → one root cause) is a
  * separate concern (Epic 2); here each recommendation targets one device.
+ *
+ * The display rules read LIVE panel state and the device's own schedule via
+ * intelligence/screen-state.ts. They used to read the stored `brightness`
+ * setting, which is the scheduled/base value, and told operators to "restore
+ * brightness" on 21 demonstrably lit screens. See that module's header.
  */
+
+import {
+  darknessVerdict,
+  describeDarkEvidence,
+  describeOnWindow,
+} from "./screen-state.js";
 
 /** The assembled per-device facts the engine reasons over. Honest nulls throughout. */
 export interface DeviceView {
@@ -68,10 +79,37 @@ export interface DeviceView {
   /** Latest compliance drift, heaviest first. `field` is the dotted settings path. */
   drift: Array<{ kind: string; label: string; field: string }>;
   /**
-   * Latest known set-brightness on the 0–255 wire scale. 0 is display-OFF (see
-   * videri/brightness.ts). `null` = we have no reading, so no recommendation.
+   * The SCHEDULED / base brightness the platform holds for this device
+   * (`settings->>'brightness'`), on the 0–255 wire scale — NOT what the panel is
+   * currently emitting, and NOT a display-on/off flag. 0 here routinely coexists
+   * with a fully lit screen (21 devices on this fleet read 0 while
+   * `current_brightness` was 179–255). Live panel state is `currentBrightnessRaw`
+   * + `displayOn`; read those, never this, to decide whether a screen is dark.
    */
   brightnessRaw: number | null;
+  /**
+   * What the panel is ACTUALLY emitting (`settings->>'current_brightness'`,
+   * 0–255). This, with `displayOn`, is the live truth about darkness.
+   */
+  currentBrightnessRaw: number | null;
+  /** `settings->>'display_on'` — is the backlight on. Null = never read. */
+  displayOn: boolean | null;
+  /**
+   * Is a scheduled on/off window in force (`brightness_schedule_enabled`)? When
+   * true, a dark panel outside the window is expected behaviour, not a fault.
+   */
+  brightnessScheduleEnabled: boolean | null;
+  /**
+   * Is the device managing its own brightness from ambient light
+   * (`auto_brightness_enabled`)? When it is, the stored base value drifting from
+   * a template is not evidence of a broken screen.
+   */
+  autoBrightnessEnabled: boolean | null;
+  /** Schedule bounds, "HHmm" in DEVICE-local time (e.g. "0900" / "0500"). */
+  turnOnTime: string | null;
+  turnOffTime: string | null;
+  /** IANA zone from `devices.timezone` — the schedule is evaluated in it, not UTC. */
+  timezone: string | null;
 }
 
 export type Severity = "critical" | "high" | "medium" | "low";
@@ -137,7 +175,7 @@ const labelOf = (d: DeviceView): string => d.name ?? d.id;
 /** A brightness compliance check we could actually fix with our one verified write. */
 const isBrightnessValueDrift = (field: string): boolean => field === "brightness";
 
-export function recommendationsFor(devices: DeviceView[]): Recommendation[] {
+export function recommendationsFor(devices: DeviceView[], now: Date = new Date()): Recommendation[] {
   const out: Recommendation[] = [];
 
   for (const d of devices) {
@@ -146,34 +184,74 @@ export function recommendationsFor(devices: DeviceView[]): Recommendation[] {
     if (!isOnline(d.status)) continue;
 
     const label = labelOf(d);
-    // Brightness at raw 0 is the panel being dark at the backlight, which fully
-    // explains a black capture. When it fires, it OWNS the darkness — we suppress
-    // the content-fault and the brightness-value drift recs so we do not tell an
-    // operator to re-push content or "apply expected brightness" when the real,
-    // one-click fix is simply to turn the backlight up.
-    const displayOff = d.brightnessRaw === 0;
+    // Live panel state, judged against the device's own on/off schedule in its
+    // own timezone. Four outcomes, and only ONE of them is a fault.
+    const verdict = darknessVerdict(d, now);
+    // A dark panel explains a black capture, and a scheduled-off panel explains
+    // it just as well as a faulty one. Either way the darkness is accounted for,
+    // so the content-fault and brightness-drift rules stand down rather than
+    // telling an operator to re-push content at an off screen.
+    const darknessExplained = verdict === "dark-unexpected" || verdict === "dark-expected";
 
-    // US-1.2 — Display-off / brightness-0 while online → one-click restore.
-    if (displayOff) {
+    // US-1.2 — Dark panel while online, and NOT explained by its schedule →
+    // one-click restore. `lit` and `unknown` produce nothing at all: the whole
+    // point of the verdict is that we no longer fire on the stored brightness
+    // value, which is the scheduled base and is 0 on plenty of lit screens.
+    if (verdict === "dark-unexpected") {
+      const evidence = describeDarkEvidence(d) ?? "the panel reports no light output";
+      const window = describeOnWindow(d);
+      const scheduled = d.brightnessScheduleEnabled === true;
       out.push({
         id: `${d.id}::display-off`,
         deviceIds: [d.id],
         deviceLabel: label,
         category: "display",
-        symptom: "Display is off — brightness reads 0 while the device is online.",
+        symptom: scheduled
+          ? `Display is dark inside its scheduled ON window — ${evidence}.`
+          : `Display is dark with no schedule to explain it — ${evidence}.`,
         action: "Restore brightness",
         rationale:
-          "Brightness 0 is an effectively dark panel. We hold the verified brightness " +
-          "write (preflight → verify → rollback), so this is a safe one-click restore.",
+          (scheduled && window
+            ? `Scheduled on ${window}, and we are inside that window, but ${evidence}. `
+            : scheduled
+              ? `A brightness schedule is enabled but its window is unreadable; ${evidence}. `
+              : `No brightness schedule is enabled, so nothing should be holding the panel dark; ${evidence}. `) +
+          "We hold the verified brightness write (preflight → verify → rollback), so " +
+          "this is a safe one-click restore.",
         severity: "high",
         confidence: 0.9,
         kind: "auto-safe",
       });
     }
 
+    // Dark BECAUSE its schedule says so. Informational only — never auto-safe,
+    // never above `low`, and worded so it cannot be read as a fault: an operator
+    // staring at a black screen still needs to be told why it is black, and the
+    // answer here is "because you asked it to be".
+    if (verdict === "dark-expected") {
+      const window = describeOnWindow(d);
+      out.push({
+        id: `${d.id}::display-off-scheduled`,
+        deviceIds: [d.id],
+        deviceLabel: label,
+        category: "display",
+        symptom: window
+          ? `Display is off per its own schedule (on ${window}) — working as configured.`
+          : "Display is off per its own brightness schedule — working as configured.",
+        action: "No action needed. Change the schedule only if this screen should be lit now.",
+        rationale:
+          "The panel is dark and the device's brightness schedule puts it outside its ON " +
+          "window, which accounts for it. Not a fault, and NOT a one-click: forcing " +
+          "brightness here would override a working schedule.",
+        severity: "low",
+        confidence: 0.85,
+        kind: "manual",
+      });
+    }
+
     // US-1.3 — Black screen while ONLINE → content/player fault. Suppressed when
-    // the darkness is already explained by brightness 0.
-    if (d.screen.isBlackScreen === true && !displayOff) {
+    // the darkness is already explained (dark panel, faulty or scheduled).
+    if (d.screen.isBlackScreen === true && !darknessExplained) {
       out.push({
         id: `${d.id}::black-screen`,
         deviceIds: [d.id],
@@ -300,9 +378,18 @@ export function recommendationsFor(devices: DeviceView[]): Recommendation[] {
     // US-1.6 — config drift → apply expected value. auto-safe ONLY for the
     // brightness VALUE (the single write we hold); everything else is advice.
     for (const drift of d.drift) {
-      // Brightness-value drift while brightness is 0 is the same fault the
-      // display-off rule already owns as a one-click — don't say it twice.
-      if (displayOff && isBrightnessValueDrift(drift.field)) continue;
+      // Brightness-value drift is only worth acting on when the live panel
+      // agrees something is wrong:
+      //   - dark-unexpected: the display-off rule already owns it as a one-click.
+      //   - dark-expected:   the 0 IS the schedule doing its job; "apply expected
+      //                      brightness" would fight it and light a screen that
+      //                      is meant to be off.
+      //   - lit:             the stored base value differs from the template but
+      //                      the panel is demonstrably producing light, so this
+      //                      is a config note, not a repair — pushing brightness
+      //                      would change a working device. Compliance still
+      //                      reports the drift; remediation just won't act on it.
+      if (isBrightnessValueDrift(drift.field) && (darknessExplained || verdict === "lit")) continue;
 
       const brightnessFix = isBrightnessValueDrift(drift.field);
       out.push({

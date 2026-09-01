@@ -38,9 +38,29 @@ const healthy = (over: Partial<DeviceView> = {}): DeviceView => ({
     ntpOffsetMs: 2,
   },
   drift: [],
+  // `brightnessRaw` is the SCHEDULED base value; the live panel is
+  // `currentBrightnessRaw` + `displayOn`. A lit screen by default.
   brightnessRaw: 128,
+  currentBrightnessRaw: 200,
+  displayOn: true,
+  brightnessScheduleEnabled: true,
+  autoBrightnessEnabled: false,
+  turnOnTime: "0900",
+  turnOffTime: "0500",
+  timezone: "America/New_York",
   ...over,
 });
+
+/** Live evidence of a dark panel: what the display rule is actually allowed to fire on. */
+const DARK = { currentBrightnessRaw: 0, displayOn: false } as const;
+
+/**
+ * Fixed evaluation instants for the default 0900-0500 America/New_York window.
+ * IN_WINDOW is 12:00 EDT (inside), OFF_WINDOW is 07:00 EDT (inside the 05:00-09:00
+ * dark gap). Hard-coded so these tests never depend on when they run.
+ */
+const IN_WINDOW = new Date("2026-08-31T16:00:00Z");
+const OFF_WINDOW = new Date("2026-08-31T11:00:00Z");
 
 /** A device with every reading unknown — the honest-null stress case. */
 const allNull = (over: Partial<DeviceView> = {}): DeviceView => ({
@@ -57,6 +77,13 @@ const allNull = (over: Partial<DeviceView> = {}): DeviceView => ({
   telemetry: null,
   drift: [],
   brightnessRaw: null,
+  currentBrightnessRaw: null,
+  displayOn: null,
+  brightnessScheduleEnabled: null,
+  autoBrightnessEnabled: null,
+  turnOnTime: null,
+  turnOffTime: null,
+  timezone: null,
   ...over,
 });
 
@@ -74,26 +101,103 @@ test("a fully healthy device yields NO recommendations", () => {
   assert.deepEqual(recommendationsFor([healthy()]), []);
 });
 
-// ── US-1.2 display-off / brightness 0 ────────────────────────────────────────
+// ── US-1.2 dark panel — live evidence only, schedule-aware ───────────────────
+//
+// The regression these tests exist for: the rule used to fire on the stored
+// `brightness` setting, which is the scheduled base value and reads 0 on 21 fully
+// lit screens. Firing on it recommended a WRITE to working devices.
 
-test("brightness 0 while online → auto-safe Restore brightness", () => {
-  const recs = recommendationsFor([healthy({ brightnessRaw: 0 })]);
+test("REGRESSION: brightness 0 but the panel is lit → NO display recommendation", () => {
+  const recs = recommendationsFor(
+    [healthy({ brightnessRaw: 0, currentBrightnessRaw: 255, displayOn: true })],
+    IN_WINDOW,
+  );
+  assert.equal(find(recs, "::display-off"), undefined, "must not fire on the scheduled base value");
+  assert.equal(find(recs, "::display-off-scheduled"), undefined);
+  assert.deepEqual(recs, [], "a lit screen is not a finding at all");
+});
+
+test("dark panel INSIDE its ON window → auto-safe Restore brightness", () => {
+  const recs = recommendationsFor([healthy({ brightnessRaw: 0, ...DARK })], IN_WINDOW);
   const r = find(recs, "::display-off");
   assert.ok(r, "display-off recommendation expected");
   assert.equal(r!.kind, "auto-safe");
   assert.equal(r!.severity, "high");
   assert.equal(r!.action, "Restore brightness");
   assert.ok(r!.confidence >= 0.8);
+  // The rationale must say WHY this darkness is unexpected, in local terms.
+  assert.match(r!.rationale, /09:00/);
+  assert.match(r!.rationale, /America\/New_York/);
 });
 
-test("null brightness never fires display-off", () => {
-  const recs = recommendationsFor([healthy({ brightnessRaw: null })]);
-  assert.equal(find(recs, "::display-off"), undefined);
+test("display_on false alone is enough, even with a non-zero current brightness", () => {
+  const recs = recommendationsFor(
+    [healthy({ currentBrightnessRaw: 200, displayOn: false })],
+    IN_WINDOW,
+  );
+  assert.ok(find(recs, "::display-off"), "backlight off is dark, whatever value is retained");
 });
 
-test("a normal brightness value never fires display-off", () => {
-  const recs = recommendationsFor([healthy({ brightnessRaw: 5 })]);
+test("current brightness 0 alone is enough, even with display_on true", () => {
+  const recs = recommendationsFor(
+    [healthy({ currentBrightnessRaw: 0, displayOn: true })],
+    IN_WINDOW,
+  );
+  assert.ok(find(recs, "::display-off"));
+});
+
+test("dark panel with NO schedule enabled → auto-safe, and says nothing explains it", () => {
+  const recs = recommendationsFor(
+    [healthy({ ...DARK, brightnessScheduleEnabled: false })],
+    IN_WINDOW,
+  );
+  const r = find(recs, "::display-off");
+  assert.ok(r);
+  assert.equal(r!.kind, "auto-safe");
+  assert.match(r!.rationale, /No brightness schedule/i);
+});
+
+test("dark panel OUTSIDE its ON window → low, manual, informational only", () => {
+  const recs = recommendationsFor([healthy({ brightnessRaw: 0, ...DARK })], OFF_WINDOW);
+  assert.equal(find(recs, "::display-off"), undefined, "scheduled-off is NOT a fault");
+  const r = find(recs, "::display-off-scheduled");
+  assert.ok(r, "an informational item is expected");
+  assert.equal(r!.severity, "low");
+  assert.equal(r!.kind, "manual");
+  assert.match(r!.symptom, /schedule/i);
+  assert.match(r!.symptom, /09:00–05:00/);
+  assert.doesNotMatch(r!.action, /Restore brightness/);
+});
+
+test("dark with a schedule we cannot evaluate → unknown → NO recommendation", () => {
+  for (const over of [
+    { turnOnTime: "nonsense", turnOffTime: "0500" },
+    { turnOnTime: "0900", turnOffTime: null },
+    { turnOnTime: "0900", turnOffTime: "0500", timezone: null },
+    { turnOnTime: "0900", turnOffTime: "0500", timezone: "Not/AZone" },
+    { turnOnTime: "9999", turnOffTime: "0500" },
+  ]) {
+    const recs = recommendationsFor([healthy({ ...DARK, ...over })], IN_WINDOW);
+    assert.equal(find(recs, "::display-off"), undefined, JSON.stringify(over));
+    assert.equal(find(recs, "::display-off-scheduled"), undefined, JSON.stringify(over));
+  }
+});
+
+test("no live panel reading at all → NO display recommendation (honest null)", () => {
+  const recs = recommendationsFor(
+    [healthy({ brightnessRaw: 0, currentBrightnessRaw: null, displayOn: null })],
+    IN_WINDOW,
+  );
   assert.equal(find(recs, "::display-off"), undefined);
+  assert.equal(find(recs, "::display-off-scheduled"), undefined);
+});
+
+test("a lit panel never fires either display rule, whatever the base value", () => {
+  for (const brightnessRaw of [0, 5, 128, null]) {
+    const recs = recommendationsFor([healthy({ brightnessRaw })], IN_WINDOW);
+    assert.equal(find(recs, "::display-off"), undefined, `brightnessRaw=${brightnessRaw}`);
+    assert.equal(find(recs, "::display-off-scheduled"), undefined, `brightnessRaw=${brightnessRaw}`);
+  }
 });
 
 // ── US-1.3 black screen while online ─────────────────────────────────────────
@@ -123,16 +227,52 @@ test("null black-screen flag never fires", () => {
   assert.equal(find(recs, "::black-screen"), undefined);
 });
 
-test("brightness 0 suppresses the black-screen content-fault (darkness already explained)", () => {
-  const recs = recommendationsFor([
-    healthy({
-      brightnessRaw: 0,
-      status: "alert",
-      screen: { isBlackScreen: true, showingLogo: false, nowPlayingId: null },
-    }),
-  ]);
+test("a dark panel suppresses the black-screen content-fault (darkness already explained)", () => {
+  const recs = recommendationsFor(
+    [
+      healthy({
+        ...DARK,
+        status: "alert",
+        screen: { isBlackScreen: true, showingLogo: false, nowPlayingId: null },
+      }),
+    ],
+    IN_WINDOW,
+  );
   assert.ok(find(recs, "::display-off"), "display-off should own the darkness");
   assert.equal(find(recs, "::black-screen"), undefined, "content fault must be suppressed");
+});
+
+test("a SCHEDULED-off panel also suppresses the black-screen content-fault", () => {
+  const recs = recommendationsFor(
+    [
+      healthy({
+        ...DARK,
+        status: "alert",
+        screen: { isBlackScreen: true, showingLogo: false, nowPlayingId: null },
+      }),
+    ],
+    OFF_WINDOW,
+  );
+  assert.ok(find(recs, "::display-off-scheduled"));
+  assert.equal(
+    find(recs, "::black-screen"),
+    undefined,
+    "an off-by-schedule screen is not a content fault",
+  );
+});
+
+test("a LIT panel does not suppress the black-screen content-fault", () => {
+  const recs = recommendationsFor(
+    [
+      healthy({
+        brightnessRaw: 0, // the old trigger — must not explain anything now
+        status: "alert",
+        screen: { isBlackScreen: true, showingLogo: false, nowPlayingId: null },
+      }),
+    ],
+    IN_WINDOW,
+  );
+  assert.ok(find(recs, "::black-screen"), "black capture on a lit panel is still a content fault");
 });
 
 // ── US-1.4 logo fallback ─────────────────────────────────────────────────────
@@ -222,8 +362,14 @@ test("null telemetry object yields no telemetry recommendations", () => {
 // ── US-1.6 compliance drift ──────────────────────────────────────────────────
 
 test("brightness-value drift → auto-safe Apply expected", () => {
+  // Live panel state unread, so nothing contradicts the drift: the stored value
+  // differs from the template and brightness is the one write we hold.
   const recs = recommendationsFor([
-    healthy({ drift: [{ kind: "calibrated", label: "Brightness above minimum", field: "brightness" }] }),
+    healthy({
+      currentBrightnessRaw: null,
+      displayOn: null,
+      drift: [{ kind: "calibrated", label: "Brightness above minimum", field: "brightness" }],
+    }),
   ]);
   const r = find(recs, "::compliance::brightness");
   assert.ok(r);
@@ -249,34 +395,61 @@ test("auto_brightness_enabled drift is manual, not auto-safe (no verified write 
   assert.equal(r!.kind, "manual");
 });
 
-test("brightness 0 suppresses the duplicate brightness-value drift rec", () => {
-  const recs = recommendationsFor([
-    healthy({
-      brightnessRaw: 0,
-      drift: [{ kind: "calibrated", label: "Brightness above minimum", field: "brightness" }],
-    }),
-  ]);
+const brightnessDrift = [
+  { kind: "calibrated", label: "Brightness above minimum", field: "brightness" },
+];
+
+test("a dark-unexpected panel suppresses the duplicate brightness-value drift rec", () => {
+  const recs = recommendationsFor([healthy({ ...DARK, drift: brightnessDrift })], IN_WINDOW);
   assert.ok(find(recs, "::display-off"));
   assert.equal(find(recs, "::compliance::brightness"), undefined);
+});
+
+test("a scheduled-off panel suppresses brightness-value drift (do not fight the schedule)", () => {
+  const recs = recommendationsFor([healthy({ ...DARK, drift: brightnessDrift })], OFF_WINDOW);
+  assert.equal(find(recs, "::compliance::brightness"), undefined);
+});
+
+test("REGRESSION: a LIT panel suppresses brightness-value drift (no write to a working screen)", () => {
+  const recs = recommendationsFor(
+    [healthy({ brightnessRaw: 0, drift: brightnessDrift })],
+    IN_WINDOW,
+  );
+  assert.equal(
+    find(recs, "::compliance::brightness"),
+    undefined,
+    "the stored base value drifting must not become a one-click on a lit panel",
+  );
+  assert.deepEqual(recs, []);
+});
+
+test("with no live panel reading, brightness drift is still surfaced as the one write we hold", () => {
+  const recs = recommendationsFor(
+    [healthy({ currentBrightnessRaw: null, displayOn: null, drift: brightnessDrift })],
+    IN_WINDOW,
+  );
+  const r = find(recs, "::compliance::brightness");
+  assert.ok(r, "drift is a real config finding even when live state is unknown");
+  assert.equal(r!.kind, "auto-safe");
 });
 
 // ── US-1.1 ranking + summary ─────────────────────────────────────────────────
 
 test("recommendations are ranked by severity then confidence", () => {
   const recs = recommendationsFor([
-    healthy({ id: "a", brightnessRaw: 0 }), // high / 0.9
+    healthy({ id: "a", ...DARK }), // high / 0.9
     healthy({ id: "b", telemetry: { ...healthy().telemetry!, ntpOffsetMs: 5000 } }), // low / 0.4
     healthy({ id: "c", telemetry: { ...healthy().telemetry!, storageUsedPercent: 95 } }), // medium / 0.8
-  ]);
+  ], IN_WINDOW);
   const severities = recs.map((r) => r.severity);
   assert.deepEqual(severities, ["high", "medium", "low"]);
 });
 
 test("summary counts by kind and severity", () => {
   const recs = recommendationsFor([
-    healthy({ id: "a", brightnessRaw: 0 }), // auto-safe / high
+    healthy({ id: "a", ...DARK }), // auto-safe / high
     healthy({ id: "c", telemetry: { ...healthy().telemetry!, storageUsedPercent: 95 } }), // manual / medium
-  ]);
+  ], IN_WINDOW);
   const s = summarize(recs);
   assert.equal(s.total, 2);
   assert.equal(s.byKind["auto-safe"], 1);
@@ -299,12 +472,12 @@ test("ids are stable and unique per device+rule", () => {
 });
 
 test("offline / unknown devices produce nothing", () => {
-  assert.deepEqual(recommendationsFor([healthy({ status: "offline", brightnessRaw: 0 })]), []);
-  assert.deepEqual(recommendationsFor([healthy({ status: "unknown", brightnessRaw: 0 })]), []);
+  assert.deepEqual(recommendationsFor([healthy({ status: "offline", ...DARK })], IN_WINDOW), []);
+  assert.deepEqual(recommendationsFor([healthy({ status: "unknown", ...DARK })], IN_WINDOW), []);
 });
 
 test("deviceLabel falls back to id when name is null", () => {
-  const recs = recommendationsFor([allNull({ brightnessRaw: 0 })]);
+  const recs = recommendationsFor([allNull({ ...DARK })], IN_WINDOW);
   const r = find(recs, "::display-off");
   assert.ok(r);
   assert.equal(r!.deviceLabel, "dev-null");

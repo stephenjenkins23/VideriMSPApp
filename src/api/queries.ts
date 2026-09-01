@@ -78,6 +78,27 @@ const num = (v: string | number | null): number | null => {
 };
 
 /**
+ * `settings->>'…'` always hands back text, so booleans arrive as "true"/"false"
+ * (and occasionally "1"/"0"). Anything else — empty string, "unknown", a typo —
+ * is `null`, not `false`: an unreadable flag must not become a confident "no".
+ */
+const bool = (v: unknown): boolean | null => {
+  if (typeof v === "boolean") return v;
+  if (typeof v !== "string") return null;
+  const s = v.trim().toLowerCase();
+  if (s === "true" || s === "1") return true;
+  if (s === "false" || s === "0") return false;
+  return null;
+};
+
+/** Text passthrough that treats blank as absent — an empty setting is not a value. */
+const text = (v: unknown): string | null => {
+  if (typeof v !== "string") return null;
+  const s = v.trim();
+  return s === "" ? null : s;
+};
+
+/**
  * Derived status. The platform gives presence only; the warning and alert tiers
  * are our product decision (docs/02 §2), so the definition lives here in one
  * place rather than being re-derived per endpoint.
@@ -555,8 +576,9 @@ export class ReadQueries {
    * Assemble the per-device facts the remediation engine reasons over (Epic 1).
    *
    * One query, four laterals — the latest screen-state, the latest slow-lane
-   * telemetry, the latest settings snapshot (for the current brightness), and the
-   * latest compliance verdict (for drift). Unbounded like `compliance()` above:
+   * telemetry, the latest settings snapshot (live panel state and the device's
+   * on/off schedule), and the latest compliance verdict (for drift). Unbounded
+   * like `compliance()` above:
    * the engine must see the whole fleet to rank across it, and every join is a
    * cheap latest-row lookup. Honest nulls throughout — a metric we never read
    * arrives as null and the engine produces no recommendation from it.
@@ -566,17 +588,29 @@ export class ReadQueries {
    * resolving it needs the group tree, which is control-plane IO and belongs to
    * the route, not to a SQL read. NEVER select group_name for this purpose: one
    * device has a group_id with an empty group_name.
+   *
+   * `settings->>'brightness'` is projected as the SCHEDULED/base value only. The
+   * engine decides darkness from `current_brightness` + `display_on`, and decides
+   * whether darkness is expected from `brightness_schedule_enabled`,
+   * `turn_on_time`/`turn_off_time` and `devices.timezone` — so all of those must
+   * ride along together or the display rules go blind (and, historically, wrong).
    */
   async remediationDevices(): Promise<DeviceView[]> {
     const { rows } = await this.pool.query(
       `SELECT d.id, d.name, d.city, d.group_id, d.firmware_current, d.firmware_latest,
               ${STATUS_SQL} AS status,
-              d.last_online_time,
+              d.last_online_time, d.timezone,
               hs.is_black_screen, hs.showing_logo,
               tel.observed_at AS telemetry_observed_at, tel.cpu_percent,
               tel.ram_used_percent, tel.storage_used_percent, tel.rssi_dbm,
               tel.ntp_offset_ms,
               (st.settings ->> 'brightness') AS brightness_raw,
+              (st.settings ->> 'current_brightness') AS current_brightness_raw,
+              (st.settings ->> 'display_on') AS display_on,
+              (st.settings ->> 'brightness_schedule_enabled') AS brightness_schedule_enabled,
+              (st.settings ->> 'auto_brightness_enabled') AS auto_brightness_enabled,
+              (st.settings ->> 'turn_on_time') AS turn_on_time,
+              (st.settings ->> 'turn_off_time') AS turn_off_time,
               cr.drift
          FROM devices d
          ${LATEST_SAMPLE_LATERAL}
@@ -643,7 +677,19 @@ export class ReadQueries {
           label: String(c["label"] ?? ""),
           field: String(c["field"] ?? ""),
         })),
+        // The scheduled/base value the platform holds — NOT live panel output.
         brightnessRaw: num(r["brightness_raw"] as string | number | null),
+        // Live panel state + the device's own schedule, which together decide
+        // whether a dark screen is a fault (intelligence/screen-state.ts).
+        currentBrightnessRaw: num(r["current_brightness_raw"] as string | number | null),
+        displayOn: bool(r["display_on"]),
+        brightnessScheduleEnabled: bool(r["brightness_schedule_enabled"]),
+        autoBrightnessEnabled: bool(r["auto_brightness_enabled"]),
+        turnOnTime: text(r["turn_on_time"]),
+        turnOffTime: text(r["turn_off_time"]),
+        // The device's OWN zone: "0900"–"0500" means nothing without it, and
+        // assuming UTC would misjudge every schedule by its offset.
+        timezone: text(r["timezone"]),
       };
     });
   }

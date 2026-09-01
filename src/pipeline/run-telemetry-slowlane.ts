@@ -40,6 +40,7 @@ const makeRunner = (t: TelemetrySlowLaneTarget): TelemetryRunner => async (arg) 
     response_code?: string;
     message?: string;
     responses?: Array<{ params?: { response_code?: string } }>;
+        others?: unknown;
   }>("messaging", "/messaging/sync_command", {
     method: "POST",
     body: {
@@ -52,7 +53,7 @@ const makeRunner = (t: TelemetrySlowLaneTarget): TelemetryRunner => async (arg) 
     },
   });
   const code = r.response_code ?? r.responses?.[0]?.params?.response_code ?? "UNKNOWN";
-  return { code, message: r.message ?? "" };
+  return { code, message: r.message ?? "", others: r.others };
 };
 
 const log = (message: string) => console.log(message);

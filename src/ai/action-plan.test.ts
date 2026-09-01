@@ -53,6 +53,15 @@ function device(over: Partial<DeviceView>): DeviceView {
     telemetry: null,
     drift: [],
     brightnessRaw: null,
+    // Live panel state + schedule (screen-state.ts). Null = unread, so no
+    // display verdict fires unless a case sets it.
+    currentBrightnessRaw: null,
+    displayOn: null,
+    brightnessScheduleEnabled: null,
+    autoBrightnessEnabled: null,
+    turnOnTime: null,
+    turnOffTime: null,
+    timezone: null,
     ...over,
   };
 }
@@ -60,7 +69,7 @@ function device(over: Partial<DeviceView>): DeviceView {
 /**
  * A fleet shaped to fire both engines: five devices on a bad firmware build all
  * offline (a firmware cohort), ten healthy devices on the current build (the
- * baseline), and one online device with brightness 0 (a one-click auto-safe fix).
+ * baseline), and one online device whose panel is genuinely dark (a one-click auto-safe fix).
  */
 function intelligentFleet(): DeviceView[] {
   const bad = Array.from({ length: 5 }, (_, i) =>
@@ -69,7 +78,17 @@ function intelligentFleet(): DeviceView[] {
   const good = Array.from({ length: 10 }, (_, i) =>
     device({ id: `good-${i}`, status: "online", firmwareCurrent: "3.4.1" }),
   );
-  const dark = device({ id: "dark-1", status: "online", firmwareCurrent: "3.4.1", brightnessRaw: 0 });
+  // Dark on LIVE evidence (current_brightness 0 + display_on false) with no
+  // schedule to explain it — the only shape that still earns a one-click.
+  const dark = device({
+    id: "dark-1",
+    status: "online",
+    firmwareCurrent: "3.4.1",
+    brightnessRaw: 0,
+    currentBrightnessRaw: 0,
+    displayOn: false,
+    brightnessScheduleEnabled: false,
+  });
   return [...bad, ...good, dark];
 }
 

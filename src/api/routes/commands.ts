@@ -29,7 +29,9 @@ import type { FastifyInstance } from "fastify";
 import type { ApiContext } from "../server.js";
 import { envelope } from "../freshness.js";
 import { applyBrightness, applyBrightnessLive, type CommandRunner } from "../../videri/brightness.js";
-import { readDeviceTelemetry, type TelemetryRunner } from "../../videri/telemetry.js";
+import {
+  readDeviceTelemetry, readDeviceNetwork, commandMessage, type TelemetryRunner,
+} from "../../videri/telemetry.js";
 
 type Risk = "read" | "disruptive" | "unverified";
 
@@ -316,6 +318,7 @@ export async function registerCommandRoutes(app: FastifyInstance, ctx: ApiContex
       const r = await ctx.videri!.request<{
         response_code?: string; message?: string;
         responses?: Array<{ params?: { response_code?: string } }>;
+        others?: unknown;
       }>("messaging", "/messaging/sync_command", {
         method: "POST",
         body: {
@@ -326,7 +329,7 @@ export async function registerCommandRoutes(app: FastifyInstance, ctx: ApiContex
         },
       });
       const code = r.response_code ?? r.responses?.[0]?.params?.response_code ?? "UNKNOWN";
-      return { code, message: r.message ?? "" };
+      return { code, message: r.message ?? "", others: r.others };
     };
 
     const startedAt = Date.now();
@@ -392,6 +395,7 @@ export async function registerCommandRoutes(app: FastifyInstance, ctx: ApiContex
       const r = await ctx.videri!.request<{
         response_code?: string; message?: string;
         responses?: Array<{ params?: { response_code?: string } }>;
+        others?: unknown;
       }>("messaging", "/messaging/sync_command", {
         method: "POST",
         body: {
@@ -402,7 +406,7 @@ export async function registerCommandRoutes(app: FastifyInstance, ctx: ApiContex
         },
       });
       const code = r.response_code ?? r.responses?.[0]?.params?.response_code ?? "UNKNOWN";
-      return { code, message: r.message ?? "" };
+      return { code, message: r.message ?? "", others: r.others };
     };
 
     const startedAt = Date.now();
@@ -412,6 +416,74 @@ export async function registerCommandRoutes(app: FastifyInstance, ctx: ApiContex
     const freshness = await ctx.freshness();
     return envelope(
       { ...telemetry, live: true, observedAt: new Date().toISOString(), durationMs: Date.now() - startedAt },
+      freshness,
+    );
+  });
+
+  /**
+   * Network detail for one device — IP address, connected SSID, the latency the
+   * device measures itself, and the nearby-Wi-Fi scan (see videri/telemetry.ts).
+   *
+   * Separate from `/telemetry` on purpose: that endpoint runs on every drawer
+   * open and already waits on six device commands, so three more reads for
+   * diagnostic detail would tax every operator to serve the few who want it.
+   * This one is opt-in.
+   *
+   * Reads only. The write counterpart on this surface
+   * (`set_ethernet_settings`) is not implemented and not reachable from here.
+   *
+   * Unlike telemetry there is no cached fallback: we do not persist network
+   * readings, so with no Videri client the honest answer is 503 rather than a
+   * stale IP presented as the current one.
+   */
+  app.get<{ Params: { id: string } }>("/api/devices/:id/network", async (request, reply) => {
+    if (!ctx.videri) {
+      return reply.code(503).send({
+        error: "network_unavailable",
+        message:
+          "This server has no Videri credentials, and network readings are read " +
+          "live from the device rather than cached.",
+      });
+    }
+    const device = await ctx.queries.device(request.params.id);
+    if (!device) return reply.code(404).send({ error: "not_found", message: "No such device." });
+    const target = await ctx.repo.commandTarget(request.params.id);
+    if (!target || !target.deviceJid) {
+      return reply.code(409).send({
+        error: "not_addressable",
+        message: "This device has no XMPP JID recorded, so it cannot be commanded.",
+      });
+    }
+
+    // Same construction as the telemetry runner above, with one difference that
+    // matters: the payload is taken via `commandMessage`, because the JSON verbs
+    // (wm_network, ssid_scan_json) answer in `others.message_json` and leave
+    // `message` empty. Reading only `message` reports every one of them as a
+    // device that answered SUCCESS with nothing.
+    const run: TelemetryRunner = async (arg) => {
+      const r = await ctx.videri!.request<{
+        response_code?: string; message?: string; others?: Record<string, unknown>;
+        responses?: Array<{ params?: { response_code?: string } }>;
+      }>("messaging", "/messaging/sync_command", {
+        method: "POST",
+        body: {
+          device_id: target.deviceId, device_jid: target.deviceJid,
+          player_id: target.playerId ?? target.deviceId,
+          command_name: "demo_command", command_params: { arg },
+          message_id: crypto.randomUUID(),
+        },
+      });
+      const code = r.response_code ?? r.responses?.[0]?.params?.response_code ?? "UNKNOWN";
+      return { code, message: commandMessage(r) };
+    };
+
+    const startedAt = Date.now();
+    const network = await readDeviceNetwork(run);
+    const freshness = await ctx.freshness();
+    // 200 even when nothing answered: `read: []` with all-null fields is the
+    // honest report, and it is not an error on our side.
+    return envelope(
+      { ...network, live: true, observedAt: new Date().toISOString(), durationMs: Date.now() - startedAt },
       freshness,
     );
   });

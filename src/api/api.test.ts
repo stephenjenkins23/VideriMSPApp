@@ -1023,14 +1023,30 @@ const remediationRow = (over: Record<string, unknown> = {}) => ({
   is_black_screen: false, showing_logo: false, now_playing_id: "c1",
   telemetry_observed_at: null, cpu_percent: null, ram_used_percent: null,
   storage_used_percent: null, rssi_dbm: null, ntp_offset_ms: null,
-  brightness_raw: null, drift: [],
+  // brightness_raw is the SCHEDULED base value; live panel state is
+  // current_brightness_raw + display_on, and the schedule fields say whether a
+  // dark panel is expected (intelligence/screen-state.ts). Null = unread.
+  brightness_raw: null, current_brightness_raw: null, display_on: null,
+  brightness_schedule_enabled: null, auto_brightness_enabled: null,
+  turn_on_time: null, turn_off_time: null, timezone: null,
+  drift: [],
   ...over,
 });
+
+/**
+ * A panel that is dark on LIVE evidence with no schedule to excuse it — the only
+ * shape that still earns the auto-safe restore. Stated without a schedule so the
+ * assertion never depends on the wall clock the suite runs at.
+ */
+const DARK_ROW = {
+  brightness_raw: "0", current_brightness_raw: "0",
+  display_on: "false", brightness_schedule_enabled: "false",
+};
 
 test("remediation endpoint returns a ranked list, a summary, and freshness", async () => {
   const app = await build({
     remediationRows: [
-      remediationRow({ id: "d-off", brightness_raw: "0" }), // auto-safe / high
+      remediationRow({ id: "d-off", ...DARK_ROW }), // auto-safe / high
       remediationRow({
         id: "d-stor", telemetry_observed_at: new Date("2026-08-31T12:00:00Z"),
         storage_used_percent: "95",
@@ -1057,10 +1073,10 @@ test("remediation endpoint returns a ranked list, a summary, and freshness", asy
 
 test("remediation coerces pg numeric strings and honours honest nulls", async () => {
   const app = await build({
-    // brightness_raw arrives from pg as the text "0"; it must be read as 0, not
-    // dropped as a truthy string. A device with all-null telemetry yields nothing.
+    // current_brightness_raw arrives from pg as the text "0"; it must be read as
+    // 0, not dropped as a truthy string. An all-null device yields nothing.
     remediationRows: [
-      remediationRow({ id: "d-off", brightness_raw: "0" }),
+      remediationRow({ id: "d-off", ...DARK_ROW }),
       remediationRow({ id: "d-null" }), // all null → no recommendations
     ],
   });
@@ -1071,7 +1087,7 @@ test("remediation coerces pg numeric strings and honours honest nulls", async ()
   assert.equal(forNull.length, 0, "an all-null device must yield nothing");
   assert.ok(
     body.data.recommendations.some((r: { id: string }) => r.id === "d-off::display-off"),
-    "the string \"0\" brightness must be read as display-off",
+    "the string \"0\" current brightness must be read as a dark panel",
   );
   await app.close();
 });

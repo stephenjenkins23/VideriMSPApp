@@ -58,6 +58,15 @@ const dev = (over: Partial<DeviceView> = {}): DeviceView => ({
   telemetry: null,
   drift: [],
   brightnessRaw: null,
+  // Live panel state + schedule (screen-state.ts). Null = unread, so no display
+  // verdict fires from this fixture unless a case sets it.
+  currentBrightnessRaw: null,
+  displayOn: null,
+  brightnessScheduleEnabled: null,
+  autoBrightnessEnabled: null,
+  turnOnTime: null,
+  turnOffTime: null,
+  timezone: null,
   ...over,
 });
 

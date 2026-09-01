@@ -56,6 +56,7 @@ const makeTelemetryRunner = (t: TelemetrySlowLaneTarget): TelemetryRunner => asy
     response_code?: string;
     message?: string;
     responses?: Array<{ params?: { response_code?: string } }>;
+        others?: unknown;
   }>("messaging", "/messaging/sync_command", {
     method: "POST",
     body: {
@@ -68,7 +69,7 @@ const makeTelemetryRunner = (t: TelemetrySlowLaneTarget): TelemetryRunner => asy
     },
   });
   const code = r.response_code ?? r.responses?.[0]?.params?.response_code ?? "UNKNOWN";
-  return { code, message: r.message ?? "" };
+  return { code, message: r.message ?? "", others: r.others };
 };
 
 /** Read + normalise one canvas's publisher events — the same shape the
