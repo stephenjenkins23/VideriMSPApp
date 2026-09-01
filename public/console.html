@@ -1949,13 +1949,33 @@ function tabOverview(d) {
               c.behind ? `${esc(c.current)} &#8594; ${esc(c.latest)}` : `${esc(c.current)} &#10003;`,
               c.behind ? "wn" : "ok")).join("")}
       </div>
-      <div class="grp"><p class="glb">Open alerts (${alerts.filter((a) => !a.resolvedAt).length})</p>
-        ${alerts.length === 0
-          ? `<div class="kv"><span class="v ok">None</span></div>`
-          : alerts.slice(0, 6).map((a) => kv(esc(a.title),
-              `${esc(a.severity)} &#183; ${ago(a.lastFiredAt || a.openedAt)}`,
-              a.severity === "critical" ? "wn" : "")).join("")}
-      </div>
+      ${(() => {
+        // The header used to count only OPEN alerts while the list rendered ALL of
+        // them, resolved included and unmarked, each showing its lastFired time —
+        // so a cleared alert read as a live critical. That is how "Open alerts (1)"
+        // ended up sitting above six "Screen is black · critical" rows. Open and
+        // resolved are now separated, and resolved ones say when they cleared.
+        const open = alerts.filter((a) => !a.resolvedAt);
+        const closed = alerts.filter((a) => a.resolvedAt);
+        const row = (a) => kv(esc(a.title),
+          `${esc(a.severity)} &#183; ${ago(a.lastFiredAt || a.openedAt)}`,
+          a.severity === "critical" ? "wn" : "");
+        const closedRow = (a) => kv(esc(a.title),
+          `resolved ${ago(a.resolvedAt)}`, "ok");
+        return `<div class="grp"><p class="glb">Open alerts (${open.length})</p>
+            ${open.length === 0
+              ? `<div class="kv"><span class="v ok">None open</span></div>`
+              : open.slice(0, 6).map(row).join("")
+                + (open.length > 6 ? `<div class="prov">+ ${open.length - 6} more open</div>` : "")}
+          </div>`
+          + (closed.length
+            ? `<div class="grp"><p class="glb">Recently resolved (${closed.length})
+                 <span style="font-weight:400;text-transform:none;letter-spacing:0;color:var(--tx-3)">&#8212; history, not current</span></p>
+                 ${closed.slice(0, 4).map(closedRow).join("")}
+                 ${closed.length > 4 ? `<div class="prov">+ ${closed.length - 4} more</div>` : ""}
+               </div>`
+            : "");
+      })()}
       <div class="grp"><p class="glb">Tenant metafields
         <span style="font-weight:400;text-transform:none;letter-spacing:0;color:var(--tx-3)">&#8212; set by the tenant, not the platform</span></p>
         ${kv("Last read from the tenant", ago(d.lastSyncedAt),
