@@ -30,6 +30,7 @@ import { registerCorrelationRoutes } from "./routes/correlation.js";
 import { registerProofOfPlayRoutes } from "./routes/proof-of-play.js";
 import { registerRollupRoutes } from "./routes/rollups.js";
 import { registerActionPlanRoutes } from "./routes/action-plan.js";
+import { registerTrendRoutes } from "./routes/trends.js";
 
 export interface BuildServerOptions {
   pool: Pool;
@@ -152,6 +153,7 @@ export async function buildServer(options: BuildServerOptions): Promise<FastifyI
   await registerProofOfPlayRoutes(app, ctx);
   await registerRollupRoutes(app, ctx);
   await registerActionPlanRoutes(app, ctx);
+  await registerTrendRoutes(app, ctx);
 
   return app;
 }

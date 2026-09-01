@@ -54,7 +54,33 @@ interface RuleBase {
    * alert, not two alerts for one dark screen.
    */
   supersedes?: string[];
+  /**
+   * Which list this rule's alerts belong in. Default `incident`.
+   *
+   * `dormant` is the same idea as `supersedes` taken one step further. Supersedes
+   * dedupes *within* a device: one cause, one alert. Dormancy dedupes the device
+   * itself out of today's work queue: an asset nobody has been able to reach for
+   * a month is one fact about the estate, not a stream of incidents.
+   *
+   * It is a CLASSIFICATION, not a filter, and the distinction matters:
+   *   - the alert still opens, still counts, still carries its evidence;
+   *   - it is counted in its own chip so the number stays on screen;
+   *   - it is queryable in full by rule id.
+   * Nothing is dropped. It is moved, once, with the reason attached — see
+   * hygiene.ts, which is the only place that acts on this field.
+   */
+  alertClass?: AlertClass;
 }
+
+/**
+ * Whether an alert is something to work today or a fact about the estate.
+ *
+ * Deliberately NOT a severity. Severity answers "how bad", class answers "is
+ * this mine this morning". Conflating them is what produced 110 medium-severity
+ * rows for screens that have been dark since last year: individually correctly
+ * ranked, collectively a wall the real critical hides behind.
+ */
+export type AlertClass = "incident" | "dormant";
 
 /** Threshold on a numeric metric, sustained over a window. */
 export interface MetricRule extends RuleBase {
@@ -141,7 +167,7 @@ export const DEFAULT_RULES: AlertRule[] = [
     // Content-state alerts are outranked too: once a device is offline, any
     // screen-state reading is stale and the outage is the real finding.
     supersedes: ["offline-30m", "showing-logo", "black-screen", "screen-off-during-schedule"],
-    // Outranked by offline-30d, which is declared below and supersedes this.
+    // Outranked by offline-30d and offline-6mo, both declared below.
   },
   {
     kind: "offline",
@@ -157,6 +183,33 @@ export const DEFAULT_RULES: AlertRule[] = [
     forSeconds: 30 * 24 * 60 * 60,
     clearForSeconds: 3600,
     supersedes: ["offline-30m", "offline-4h", "showing-logo", "black-screen", "screen-off-during-schedule"],
+    // The de-escalation above was only half the fix. Medium severity still put
+    // 104 rows in the list an operator reads every morning, and a list nobody
+    // finishes reading is a list where the one real critical is invisible. The
+    // class moves the cohort into its own counted band; severity keeps ranking
+    // inside it.
+    alertClass: "dormant",
+  },
+  {
+    kind: "offline",
+    id: "offline-6mo",
+    name: "Device dark for over 6 months",
+    enabled: true,
+    // Lower again, on purpose. 78 of this fleet's 249 canvases have not been
+    // reachable for over half a year; several since 2023. Nothing about that is
+    // an incident — no engineer will fix it, and no severity above `info` is
+    // honest about the chance that it will change today. It is an asset register
+    // question, and the rollup in hygiene.ts is where it gets asked loudly.
+    severity: "info",
+    forSeconds: 180 * 24 * 60 * 60,
+    clearForSeconds: 3600,
+    // Extends the existing escalation chain by one link at the far end, so a
+    // device dark for years still produces exactly ONE offline alert.
+    supersedes: [
+      "offline-30m", "offline-4h", "offline-30d",
+      "showing-logo", "black-screen", "screen-off-during-schedule",
+    ],
+    alertClass: "dormant",
   },
   {
     kind: "state",
@@ -317,6 +370,37 @@ export const TIER_B_FIELDS: ReadonlySet<MetricField> = new Set<MetricField>([
 export const isTierB = (rule: AlertRule): boolean =>
   rule.kind === "metric" && TIER_B_FIELDS.has(rule.field);
 
+/** A rule with no explicit class is an incident — the safe default. */
+export const alertClassOf = (rule: AlertRule): AlertClass => rule.alertClass ?? "incident";
+
+/**
+ * The rule ids whose alerts are dormant-class.
+ *
+ * Read from the rule set rather than hardcoded anywhere downstream, so an
+ * operator who disables `offline-6mo` or edits its threshold through the API
+ * changes what "dormant" means in the same move. A second hardcoded list would
+ * be a second definition of dormancy, and the two would disagree the first time
+ * someone tuned a rule.
+ */
+export function dormantRuleIds(rules: readonly AlertRule[]): Set<string> {
+  return new Set(rules.filter((r) => alertClassOf(r) === "dormant").map((r) => r.id));
+}
+
+/**
+ * The shortest outage any dormant-class rule requires, in seconds — i.e. how
+ * long a device must be dark before we stop calling it an incident.
+ *
+ * `null` when no rule is dormant-classed, which is the honest answer: with no
+ * such rule there is no dormancy boundary, and hygiene must classify everything
+ * as an incident rather than invent a threshold.
+ */
+export function dormantAfterSeconds(rules: readonly AlertRule[]): number | null {
+  const windows = rules
+    .filter((r) => alertClassOf(r) === "dormant" && r.kind === "offline")
+    .map((r) => (r as OfflineRule).forSeconds);
+  return windows.length === 0 ? null : Math.min(...windows);
+}
+
 /** How far back the engine must read samples to satisfy every rule. */
 export function requiredWindowSeconds(rules: AlertRule[]): number {
   const windows = rules.map((r) => {
@@ -343,6 +427,13 @@ export function validateRule(rule: AlertRule): string[] {
   }
   if (rule.kind === "metric" && !Number.isFinite(rule.threshold)) {
     problems.push("threshold must be a finite number");
+  }
+  // Dormancy is a statement about sustained ABSENCE, so only an offline rule can
+  // make it. A metric or state rule marked dormant would quietly move a live
+  // device's real fault out of the incident list, which is the one failure mode
+  // this whole mechanism exists to avoid.
+  if (rule.alertClass === "dormant" && rule.kind !== "offline") {
+    problems.push('alertClass "dormant" is only valid on an offline rule');
   }
   return problems;
 }

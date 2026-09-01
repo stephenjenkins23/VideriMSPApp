@@ -27,6 +27,7 @@
 import type { Pool } from "pg";
 import type { DeviceView } from "../intelligence/remediation.js";
 import type { ScheduledEvent } from "../intelligence/proof-of-play.js";
+import type { DeviceBucketCounts, UsageDay } from "../intelligence/trends.js";
 
 export interface DeviceListFilters {
   page: number;
@@ -907,6 +908,184 @@ export class ReadQueries {
       out[key] = { readable: Number(value ?? 0), total };
     }
     return out;
+  }
+
+  // ── trend intelligence reads (Epic 7) ──────────────────────────────────────
+  //
+  // Deliberately their OWN queries rather than extra columns bolted onto
+  // LATEST_SAMPLE_LATERAL. That lateral serves "latest state per device" and a
+  // trend needs "every bucket in a window" — a different shape entirely. The last
+  // time a new endpoint borrowed a shared join it got a payload missing the one
+  // column it needed and shipped a 500 to production, so these stand alone.
+  //
+  // All three are dumb reads: they aggregate, they do not judge. Every gate,
+  // slope and verdict lives in the pure engine (src/intelligence/trends.ts) where
+  // it can be tested without a database.
+
+  /**
+   * Presence bucketed into fixed windows, for ONE availability window.
+   *
+   * `source = 'status'` is load-bearing: the 300s metrics poller writes rows with
+   * a NULL presence (it carries no presence at all on this platform — 0 of
+   * ~160k metrics rows have one), so including it would add "observed" buckets in
+   * which we in fact learned nothing about whether the device was up.
+   *
+   * Buckets, not raw rows, because when the status poller stalls and then catches
+   * up it can write a dozen rows for one device inside one minute, and a dozen
+   * rows from one minute is not a dozen observations of a week.
+   *
+   * The `fleet` row is the count of DISTINCT buckets in which any device reported
+   * — the collector's own uptime for the window. It is returned from the same CTE
+   * as the per-device rows so the two can never disagree about which buckets
+   * existed, and it is the denominator that stops this feature reporting our
+   * downtime as the fleet's.
+   */
+  async availabilityBuckets(
+    fromIso: string,
+    toIso: string,
+    bucketSeconds: number,
+  ): Promise<{ devices: DeviceBucketCounts[]; fleetObservedBuckets: number }> {
+    const { rows } = await this.pool.query<{
+      scope: string;
+      device_id: string | null;
+      buckets: string;
+      online_buckets: string | null;
+    }>(
+      `WITH bucketed AS (
+         SELECT hs.device_id,
+                time_bucket(make_interval(secs => $3::int), hs.observed_at) AS bucket,
+                BOOL_OR(hs.presence = 'online') AS online
+           FROM health_samples hs
+           JOIN devices d ON d.id = hs.device_id AND ${ACTIVE_DEVICES}
+          WHERE hs.source = 'status'
+            AND hs.presence IS NOT NULL
+            AND hs.observed_at >= $1::timestamptz
+            AND hs.observed_at <  $2::timestamptz
+          GROUP BY hs.device_id, bucket
+       )
+       SELECT 'device'                                    AS scope,
+              device_id,
+              COUNT(*)::text                              AS buckets,
+              COUNT(*) FILTER (WHERE online)::text        AS online_buckets
+         FROM bucketed
+        GROUP BY device_id
+       UNION ALL
+       SELECT 'fleet'                                     AS scope,
+              NULL::text                                  AS device_id,
+              COUNT(DISTINCT bucket)::text                AS buckets,
+              NULL::text                                  AS online_buckets
+         FROM bucketed`,
+      [fromIso, toIso, bucketSeconds],
+    );
+
+    const devices: DeviceBucketCounts[] = [];
+    let fleetObservedBuckets = 0;
+    for (const row of rows) {
+      if (row.scope === "fleet") {
+        fleetObservedBuckets = Number(row.buckets);
+        continue;
+      }
+      if (!row.device_id) continue;
+      devices.push({
+        deviceId: row.device_id,
+        observedBuckets: Number(row.buckets),
+        onlineBuckets: Number(row.online_buckets ?? 0),
+      });
+    }
+    return { devices, fleetObservedBuckets };
+  }
+
+  /**
+   * Raw storage readings per device over a window, oldest first.
+   *
+   * Returns the POINTS, not a slope: gap detection, span gates and the least
+   * squares fit are pure logic and belong in the engine. At the current volume
+   * (~2.7k telemetry rows in total) returning raw points is cheaper than the
+   * round trips a SQL-side regression would need, and it keeps the honesty rules
+   * in one testable place.
+   *
+   * `storage_used_percent IS NOT NULL` filters at the source: an unreadable
+   * metric is absent, never a zero, and a zero would flatten a real fill rate.
+   */
+  async storageSeries(
+    fromIso: string,
+    toIso: string,
+  ): Promise<Array<{ deviceId: string; points: Array<{ observedAt: string; percent: number }> }>> {
+    const { rows } = await this.pool.query<{
+      device_id: string;
+      observed_at: Date;
+      storage_used_percent: number;
+    }>(
+      `SELECT t.device_id, t.observed_at, t.storage_used_percent
+         FROM device_telemetry t
+         JOIN devices d ON d.id = t.device_id AND ${ACTIVE_DEVICES}
+        WHERE t.storage_used_percent IS NOT NULL
+          AND t.observed_at >= $1::timestamptz
+          AND t.observed_at <  $2::timestamptz
+        ORDER BY t.device_id, t.observed_at`,
+      [fromIso, toIso],
+    );
+
+    const byDevice = new Map<string, Array<{ observedAt: string; percent: number }>>();
+    for (const row of rows) {
+      const points = byDevice.get(row.device_id) ?? [];
+      points.push({
+        observedAt: row.observed_at.toISOString(),
+        percent: Number(row.storage_used_percent),
+      });
+      byDevice.set(row.device_id, points);
+    }
+    return [...byDevice].map(([deviceId, points]) => ({ deviceId, points }));
+  }
+
+  /**
+   * Daily rx+tx per device for the last `days` days of the FEED, not of the clock.
+   *
+   * The bound is `MAX(date) - days`, deliberately: this poller runs daily and has
+   * been observed running three days behind, so anchoring on `now()` would return
+   * an empty recent window and the engine would read the poller's lag as fleet
+   * silence. `date` is platform-supplied and still untrusted here — the engine
+   * sanitises it (`sanitizeUsageDates`) before deriving anything from it.
+   *
+   * Not filtered to active devices: a retired device's traffic history is part of
+   * the feed's daily quorum, and dropping it would make the feed look thinner
+   * than it is on exactly the days that matter.
+   */
+  async usageDays(days: number): Promise<UsageDay[]> {
+    const { rows } = await this.pool.query<{ device_id: string; date: string; bytes: string }>(
+      `SELECT u.device_id,
+              to_char(u.date, 'YYYY-MM-DD')          AS date,
+              (u.rx_bytes + u.tx_bytes)::text        AS bytes
+         FROM data_usage_days u
+        WHERE u.date > (SELECT MAX(date) FROM data_usage_days) - ($1::int - 1)
+        ORDER BY u.device_id, u.date`,
+      [days],
+    );
+    return rows.map((row) => ({
+      deviceId: row.device_id,
+      date: row.date,
+      bytes: Number(row.bytes),
+    }));
+  }
+
+  /**
+   * The active fleet's identity columns, for labelling trends and resolving sites.
+   *
+   * `group_id` and never `group_name`: the hierarchy joins on the id, and device
+   * 1000015 has a populated group_id with an empty group_name.
+   */
+  async trendDevices(): Promise<Array<{ id: string; name: string | null; groupId: string | null }>> {
+    const { rows } = await this.pool.query<{
+      id: string;
+      name: string | null;
+      group_id: string | null;
+    }>(
+      `SELECT d.id, d.name, d.group_id
+         FROM devices d
+        WHERE ${ACTIVE_DEVICES}
+        ORDER BY d.id`,
+    );
+    return rows.map((row) => ({ id: row.id, name: row.name, groupId: row.group_id }));
   }
 
   #toListItem(r: Record<string, unknown>): DeviceListItem {

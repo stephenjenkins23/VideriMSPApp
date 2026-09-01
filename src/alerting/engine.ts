@@ -14,7 +14,14 @@
  */
 
 import type { Repository, OpenAlertRow } from "../db/repository.js";
-import { DEFAULT_RULES, requiredWindowSeconds, validateRule, isTierB, type AlertRule } from "./rules.js";
+import {
+  DEFAULT_RULES,
+  requiredWindowSeconds,
+  validateRule,
+  isTierB,
+  dormantRuleIds,
+  type AlertRule,
+} from "./rules.js";
 import {
   evaluateDevice,
   type Verdict,
@@ -43,6 +50,16 @@ export interface AlertingResult {
    * verdicts are already in hand.
    */
   refutedClaims: number;
+  /**
+   * Devices whose only finding this cycle was DORMANCY — dark long enough that a
+   * dormant-classed rule fired (see rules.ts `alertClass`).
+   *
+   * Counted for the same reason `refutedClaims` is: hygiene moves these out of
+   * the incident list, and a de-escalation that leaves no per-cycle trace is
+   * indistinguishable from a suppression. This is the number that must be
+   * explainable if someone asks "where did the other 200 alerts go".
+   */
+  dormantDevices: number;
   /** Rules that could not be judged for any device, and why. */
   inertRules: Array<{ ruleId: string; reason: string; tierB: boolean }>;
   /**
@@ -80,9 +97,24 @@ export async function loadRules(repo: Repository): Promise<AlertRule[]> {
   if (stored.length === 0) return DEFAULT_RULES;
 
   // A rule added in code but not yet seeded should still run, so union by id
-  // with the database winning on conflict.
+  // with the database winning on conflict — but FIELD BY FIELD, not row by row.
+  //
+  // A wholesale replace loses any field added to a rule in code after the row
+  // was seeded, because the stored JSON simply has no such key. That is not
+  // hypothetical: `alertClass` (the dormancy classification) was invisible on
+  // the live fleet for exactly this reason — 200 alerts stayed in the incident
+  // list while the code said they were dormant, and nothing errored. Spreading
+  // the stored definition OVER the compiled default keeps every value an
+  // operator actually set while letting a genuinely new field arrive from code.
   const byId = new Map<string, AlertRule>(DEFAULT_RULES.map((r) => [r.id, r]));
-  for (const r of stored) if (r && r.id) byId.set(r.id, r);
+  for (const r of stored) {
+    if (!r || !r.id) continue;
+    const base = byId.get(r.id);
+    // Different `kind` means these are not the same rule in any meaningful
+    // sense, and merging their fields would produce a shape that satisfies
+    // neither branch of the union. The stored row wins whole.
+    byId.set(r.id, base && base.kind === r.kind ? { ...base, ...r } : r);
+  }
   return [...byId.values()];
 }
 
@@ -107,6 +139,7 @@ export async function runAlerting(
     resolved: 0,
     supersededResolved: 0,
     refutedClaims: 0,
+    dormantDevices: 0,
     inertRules: [],
     collectionStale: null,
     errors: [],
@@ -191,6 +224,7 @@ export async function runAlerting(
   const judgeable = new Map<string, boolean>();
   const skipReasons = new Map<string, string>();
   const rulesById = new Map(active.map((r) => [r.id, r]));
+  const dormantRules = dormantRuleIds(active);
 
   for (const [deviceId, entry] of input) {
     const device: DeviceRow = entry.device;
@@ -203,6 +237,9 @@ export async function runAlerting(
     });
 
     const firingIds = new Set(verdicts.filter((v) => v.firing).map((v) => v.ruleId));
+    // Dormancy is per-device, not per-alert: one dark asset, one entry in the
+    // count, however many rules it happens to trip.
+    if ([...firingIds].some((id) => dormantRules.has(id))) result.dormantDevices += 1;
 
     for (const verdict of verdicts) {
       const rule = rulesById.get(verdict.ruleId);
@@ -305,7 +342,10 @@ export async function runAlerting(
     `  alerting: ${result.devicesEvaluated} device(s) × ${result.rulesEvaluated} rule(s) — ` +
       `opened ${result.opened}, refreshed ${result.refreshed}, resolved ${result.resolved}` +
       (result.supersededResolved > 0 ? ` (+${result.supersededResolved} superseded)` : "") +
-      (result.refutedClaims > 0 ? ` (+${result.refutedClaims} claim(s) refuted by the device)` : ""),
+      (result.refutedClaims > 0 ? ` (+${result.refutedClaims} claim(s) refuted by the device)` : "") +
+      (result.dormantDevices > 0
+        ? ` · ${result.dormantDevices} device(s) dormant (dark 30d+; rolled up, not in the incident list)`
+        : ""),
   );
 
   const inertTierB = result.inertRules.filter((r) => r.tierB);
@@ -341,6 +381,13 @@ export function toPollerRun(result: AlertingResult) {
       // Not an error, but poller_runs is the only per-cycle record we keep and a
       // refuted claim must be findable after the fact — an alert that was never
       // raised leaves no other trace.
+      ...(result.dormantDevices > 0
+        ? [
+            `${result.dormantDevices} device(s) classified dormant (dark 30d+) — their ` +
+              `alerts are open and counted in the dormant band, not the incident list; ` +
+              `see alerting/hygiene.ts`,
+          ]
+        : []),
       ...(result.refutedClaims > 0
         ? [
             `${result.refutedClaims} black-screen claim(s) refuted by the device itself — ` +

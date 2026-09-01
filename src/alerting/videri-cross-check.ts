@@ -34,7 +34,11 @@ export const EQUIVALENT_RULES: Record<string, string[]> = {
   // the offline-30d escalation tier without updating this map made the
   // cross-check report 0 agreements and 79 false blind spots — the mapping has
   // to move whenever the rule set does.
-  offline: ["offline-30m", "offline-4h", "offline-30d"],
+  // offline-6mo joined the chain with the dormancy classification (rules.ts
+  // `alertClass`): dormant is a presentation band, not a different condition, so
+  // the platform still sees these as plain "offline" and the cross-check must
+  // count them as agreement.
+  offline: ["offline-30m", "offline-4h", "offline-30d", "offline-6mo"],
   showingLogo: ["showing-logo"],
 };
 

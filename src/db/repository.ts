@@ -20,7 +20,7 @@
  */
 
 import type { Pool, PoolClient } from "pg";
-import type { Device, HealthSample, DataUsageDay, FleetSnapshot } from "../domain/types.js";
+import type { Device, HealthSample, DataUsageDay, FleetSnapshot, Severity } from "../domain/types.js";
 import type { DiscoveredKey } from "../videri/adapter.js";
 
 /** Postgres caps a statement at 65,535 bound parameters. */
@@ -99,6 +99,18 @@ interface EvaluationJoinRow {
   jitter_ms: string | number | null;
   ntp_sync_percent: string | number | null;
   storage_percent: string | number | null;
+}
+
+/** One `poller_runs` row as the pipeline-health check reads it. */
+export interface PollerRunHistoryRow {
+  poller: string;
+  startedAt: Date;
+  durationMs: number;
+  devicesTargeted: number;
+  rowsWritten: number;
+  batchesOk: number;
+  batchesFailed: number;
+  telemetryYield: number | null;
 }
 
 export interface OpenAlertRow {
@@ -1068,6 +1080,117 @@ export class Repository {
       resolved += rowCount ?? 0;
     }
     return resolved;
+  }
+
+  /**
+   * Every open alert, reduced to what classification needs.
+   *
+   * The FULL open set, deliberately unpaginated. Alert hygiene computes the
+   * severity chips and the dormancy rollup from this, and a chip computed from
+   * one page is a chip that lies the moment there is a second page — that is the
+   * exact bug that made the list untrustworthy before.
+   *
+   * Retired devices are excluded like everywhere else: a soft-deleted device
+   * must not inflate a count. Its alerts stay in the table for history.
+   */
+  async openAlertFacts(): Promise<
+    Array<{ id: string; deviceId: string; ruleId: string; severity: Severity; openedAt: Date }>
+  > {
+    const { rows } = await this.pool.query<{
+      id: string; device_id: string; rule_id: string; severity: string; opened_at: Date;
+    }>(
+      `SELECT a.id, a.device_id, a.rule_id, a.severity, a.opened_at
+         FROM alerts a
+         JOIN devices d ON d.id = a.device_id
+        WHERE a.resolved_at IS NULL AND d.retired_at IS NULL`,
+    );
+    return rows.map((r) => ({
+      id: r.id,
+      deviceId: r.device_id,
+      ruleId: r.rule_id,
+      severity: r.severity as Severity,
+      openedAt: r.opened_at,
+    }));
+  }
+
+  /**
+   * Open alerts sitting on RETIRED devices — the ones `openAlertFacts` excludes.
+   *
+   * Counted rather than ignored so the discrepancy can never be silent. Any
+   * surface that shows a hygiene total next to a raw `/api/alerts` total needs
+   * this number to reconcile the two, and "the sums do not add up and nobody
+   * knows why" is precisely how trust in the alert list was lost before.
+   */
+  async openAlertsOnRetiredDevices(): Promise<number> {
+    const { rows } = await this.pool.query<{ count: string }>(
+      `SELECT COUNT(*)::text AS count
+         FROM alerts a JOIN devices d ON d.id = a.device_id
+        WHERE a.resolved_at IS NULL AND d.retired_at IS NOT NULL`,
+    );
+    return Number(rows[0]?.count ?? 0);
+  }
+
+  /**
+   * How long each active device has been dark, from the registry.
+   *
+   * `last_online_time` is Videri's own timestamp, maintained independently of our
+   * polling, so it dates an outage that started long before we existed — which is
+   * the only way to bucket a device that has been dark since 2023. NULL is kept
+   * as NULL and counted separately: "never recorded online" is a fact about the
+   * platform's records, not a zero-length outage.
+   */
+  async estateDarkness(): Promise<{
+    activeDevices: number;
+    neverSeenDevices: number;
+    devices: Array<{ deviceId: string; lastOnlineTime: Date | null }>;
+  }> {
+    const { rows } = await this.pool.query<{ id: string; last_online_time: Date | null }>(
+      `SELECT id, last_online_time FROM devices WHERE retired_at IS NULL`,
+    );
+    return {
+      activeDevices: rows.length,
+      neverSeenDevices: rows.filter((r) => r.last_online_time === null).length,
+      devices: rows.map((r) => ({ deviceId: r.id, lastOnlineTime: r.last_online_time })),
+    };
+  }
+
+  /**
+   * Recent `poller_runs` history, newest first, capped per lane.
+   *
+   * Per-lane cap rather than a flat LIMIT: `status` runs every two minutes and
+   * would otherwise crowd every slow lane out of the window, leaving exactly the
+   * lanes most likely to stall with no history to judge them by.
+   */
+  async pollerRunHistory({
+    lookbackHours = 72,
+    runsPerLane = 40,
+  }: { lookbackHours?: number; runsPerLane?: number } = {}): Promise<PollerRunHistoryRow[]> {
+    const { rows } = await this.pool.query<{
+      poller: string; started_at: Date; duration_ms: number; devices_targeted: number;
+      rows_written: number; batches_ok: number; batches_failed: number;
+      telemetry_yield: string | number | null;
+    }>(
+      `SELECT poller, started_at, duration_ms, devices_targeted, rows_written,
+              batches_ok, batches_failed, telemetry_yield
+         FROM (
+           SELECT *, ROW_NUMBER() OVER (PARTITION BY poller ORDER BY started_at DESC) AS rn
+             FROM poller_runs
+            WHERE started_at > now() - ($1::text || ' hours')::interval
+         ) ranked
+        WHERE rn <= $2
+        ORDER BY poller, started_at DESC`,
+      [String(Math.round(lookbackHours)), runsPerLane],
+    );
+    return rows.map((r) => ({
+      poller: r.poller,
+      startedAt: r.started_at,
+      durationMs: Number(r.duration_ms),
+      devicesTargeted: Number(r.devices_targeted),
+      rowsWritten: Number(r.rows_written),
+      batchesOk: Number(r.batches_ok),
+      batchesFailed: Number(r.batches_failed),
+      telemetryYield: numeric(r.telemetry_yield),
+    }));
   }
 
   async acknowledgeAlert(id: string, by: string): Promise<boolean> {
