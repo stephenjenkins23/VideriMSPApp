@@ -1568,6 +1568,23 @@ function runtimeTile(label, state, valueText, valueNum, naReason, sub) {
  * telemetry — fired only when someone actually opens the Network subtab, not on
  * every drawer open, and once per open.
  */
+/**
+ * Ask the panel itself whether it is black, and compare that to what the platform
+ * claims. Two device commands (~0.6 s answered, ~11 s when a panel is silent), so
+ * this is fired ONLY where the answer changes something: the platform is claiming
+ * black AND the device is reachable. Everywhere else the panel's opinion is not in
+ * dispute and is not worth a command.
+ */
+async function loadScreenCheck(id) {
+  if (!S.dev || S.dev.id !== id) return;
+  S.dev._chkLoading = true;
+  const res = await api("/api/devices/" + encodeURIComponent(id) + "/screen-check").catch(() => null);
+  if (!S.dev || S.dev.id !== id) return;
+  S.dev._chk = (res && res.data) || {};
+  S.dev._chkLoading = false;
+  if (S.dtab === "overview") paintDevice();
+}
+
 async function loadNetwork(id) {
   if (!S.dev || S.dev.id !== id) return;
   S.dev._netLoading = true;
@@ -1694,6 +1711,14 @@ function paintDevice() {
   // open (when most people never leave Overview) would be waste.
   if (S.dtab === "network" && isOnline && S.dev._net === undefined && !S.dev._netLoading) {
     loadNetwork(d.id);
+  }
+
+  // Verify a black-screen CLAIM, once per drawer open. Only when the platform is
+  // actually claiming black — the alert derived from that flag is the thing worth
+  // checking, and asking an unclaimed panel would spend commands to learn nothing.
+  if (isOnline && (d.latest && d.latest.isBlackScreen === true)
+      && S.dev._chk === undefined && !S.dev._chkLoading) {
+    setTimeout(() => loadScreenCheck(d.id), 0);
   }
 
   // Auto-refresh the screen capture, once per drawer open. Someone looking at a
@@ -1922,6 +1947,44 @@ function tabOverview(d) {
       <div class="grp"><p class="glb">&#128444; Screen evidence</p>
         ${screenEvidence(d._shot)}
       </div>
+      ${(() => {
+        // Only shown when the platform is asserting black. Its whole job is to say
+        // whether that assertion survived contact with the panel — so it renders the
+        // two observations side by side with their times, and never collapses a
+        // silent panel into agreement.
+        if (!(d.latest && d.latest.isBlackScreen === true)) return "";
+        const c = S.dev._chk;
+        const head = `<p class="glb">&#128269; Black-screen claim &#8212; verified against the panel</p>`;
+        if (!isReachable(d))
+          return `<div class="grp">${head}
+            <div class="kv"><span class="v na">The panel is offline, so the claim cannot be checked.
+              A flag still asserting black on an unreachable screen is a stale value, not an observation.</span></div>
+          </div>`;
+        if (c === undefined)
+          return `<div class="grp">${head}<div class="kv"><span class="v na">Asking the panel&#8230;</span></div></div>`;
+        const v = c.verdict;
+        const badge = v === "contradicted"
+            ? { t: "REFUTED &#8212; the panel says it is NOT black", cls: "ok" }
+          : v === "confirmed"
+            ? { t: "CONFIRMED &#8212; the panel says it IS black", cls: "bd" }
+          : v === "unanswered"
+            ? { t: "UNVERIFIED &#8212; the panel did not answer", cls: "wn" }
+            : { t: "no claim to check", cls: "na" };
+        return `<div class="grp">${head}
+          <div class="kv"><span class="k">Verdict</span>
+            <span class="v ${badge.cls}">${badge.t}</span></div>
+          ${kv("Platform said", `black at ${c.platform && c.platform.observedAt ? ago(c.platform.observedAt) : "an unrecorded time"}`)}
+          ${c.device && c.device.isBlack !== null && c.device.isBlack !== undefined
+            ? kv("Panel answered", `${c.device.isBlack ? "black" : "not black"} ${ago(c.device.observedAt)}`,
+                 c.device.isBlack ? "bd" : "ok")
+            : na("Panel answered", "no answer — silence is not agreement")}
+          <div class="prov">${esc(c.detail || "")}</div>
+          ${v === "contradicted"
+            ? `<div class="note"><b>No critical was raised.</b> The panel's own answer outranks the
+                 platform flag; the disagreement is recorded as a data-quality finding instead.</div>`
+            : ""}
+        </div>`;
+      })()}
       <div class="grp"><p class="glb">Presence &#8212; last 24 h</p>
         ${presenceTimeline(d._health)}
       </div>
