@@ -495,3 +495,115 @@ test("findings rank by severity then affected-count", () => {
     assert.ok(rank[r.findings[i - 1]!.severity] <= rank[r.findings[i]!.severity]);
   }
 });
+
+// ── data quality: unverifiable black-screen claims ───────────────────────────
+// The load-bearing risk here is FRAMING, so the assertions cover it: exactly one
+// finding (never per-device), never critical/high, and wording that calls the
+// CLAIM unverifiable without ever asserting the screens are black or fine.
+
+const BLACK = { isBlackScreen: true, showingLogo: false, nowPlayingId: null };
+
+test("black-screen claims on unreachable devices produce ONE data-quality finding", () => {
+  const fleet = [
+    dev({ id: "u1", city: "C1", status: "offline", lastOnlineTime: "2026-08-30T12:00:00Z", screen: BLACK }),
+    dev({ id: "u2", city: "C2", status: "unknown", lastOnlineTime: "2026-08-31T06:00:00Z", screen: BLACK }),
+    dev({ id: "ok", city: "C3" }),
+  ];
+  const r = correlate(fleet, NOW);
+  const uv = r.findings.filter((f) => f.kind === "unverifiable-claim");
+  assert.equal(uv.length, 1, "one fleet-level finding, never one per device");
+  assert.deepEqual(uv[0]!.affectedDeviceIds, ["u1", "u2"]);
+  assert.equal(uv[0]!.id, "data-quality::unverifiable-black-screen::unreachable");
+  // 'unknown' (presence IS NULL) is unreachable too, not a third state we skip.
+  assert.match(uv[0]!.summary, /2 device\(s\) it cannot reach/);
+});
+
+test("the finding is never critical or high — it is a data defect, not a device fault", () => {
+  const fleet = many(20, (i) => ({
+    id: `u-${i}`,
+    city: `C${i}`,
+    status: "offline",
+    lastOnlineTime: "2026-08-31T11:55:00Z",
+    screen: BLACK,
+  }));
+  const r = correlate(fleet, NOW);
+  const uv = findingOf(r.findings, "unverifiable-claim");
+  assert.ok(uv);
+  // Even at 20 devices the severity must not escalate — count is not fault weight.
+  assert.ok(uv!.severity === "medium" || uv!.severity === "low", `got ${uv!.severity}`);
+});
+
+test("the wording blames the claim, not the screens, and defers to the offline alerts", () => {
+  const fleet = [
+    dev({ id: "u1", city: "C1", status: "offline", lastOnlineTime: "2026-08-01T12:00:00Z", screen: BLACK }),
+  ];
+  const uv = findingOf(correlate(fleet, NOW).findings, "unverifiable-claim");
+  assert.ok(uv);
+  assert.match(uv!.rationale, /UNVERIFIABLE/);
+  assert.match(uv!.rationale, /neither confirm nor refute/);
+  // (b) already covered elsewhere — must not be double-counted as new breakage.
+  assert.match(uv!.rationale, /already covered by its own offline alert/);
+  // Never an assertion in either direction about the panels.
+  assert.match(uv!.rationale, /nothing here says they are fine/);
+  // The window is stated plainly rather than implied.
+  assert.match(uv!.rationale, /unreached for .* to .*/);
+});
+
+test("a REACHABLE black-screen claim is excluded — that one is verifiable", () => {
+  // online and 'alert' are both reachable: screen-verify.ts asks those panels
+  // directly, so surfacing them here would double-report a checkable claim.
+  const fleet = [
+    dev({ id: "on", city: "C1", screen: BLACK }),
+    dev({ id: "al", city: "C2", status: "alert", screen: BLACK }),
+  ];
+  const r = correlate(fleet, NOW);
+  assert.equal(findingOf(r.findings, "unverifiable-claim"), undefined);
+});
+
+test("an unreachable device with no black-screen claim is excluded", () => {
+  // false = read and not black; null = never read. Neither is a claim.
+  const fleet = [
+    dev({ id: "d1", city: "C1", status: "offline", lastOnlineTime: "2026-08-31T11:50:00Z" }),
+    dev({ id: "d2", city: "C2", status: "unknown", lastOnlineTime: null,
+      screen: { isBlackScreen: null, showingLogo: null, nowPlayingId: null } }),
+  ];
+  const r = correlate(fleet, NOW);
+  assert.equal(findingOf(r.findings, "unverifiable-claim"), undefined);
+});
+
+test("an empty set emits NOTHING — no zero-count finding", () => {
+  const r = correlate([dev({ id: "ok", city: "C1" })], NOW);
+  assert.equal(r.findings.filter((f) => f.kind === "unverifiable-claim").length, 0);
+  const rEmpty = correlate([], NOW);
+  assert.deepEqual(rEmpty.findings, []);
+});
+
+test("claims with no last-seen timestamp say the staleness is unknown, not zero", () => {
+  const fleet = [
+    dev({ id: "u1", city: "C1", status: "offline", lastOnlineTime: null, screen: BLACK }),
+  ];
+  const uv = findingOf(correlate(fleet, NOW).findings, "unverifiable-claim");
+  assert.ok(uv);
+  assert.match(uv!.rationale, /unknown/);
+  assert.doesNotMatch(uv!.rationale, /unreached for 0/);
+});
+
+test("ranking still holds with the new kind in play", () => {
+  const fleet = [
+    // A critical venue cluster (12 dark at one site) plus 8 unverifiable claims.
+    ...many(12, (i) => ({ id: `bos-${i}`, city: "Boston", status: "offline", lastOnlineTime: null })),
+    ...many(4, (i) => ({ id: `ny-${i}`, city: "New York" })),
+    ...many(4, (i) => ({ id: `ch-${i}`, city: "Chicago" })),
+    ...many(8, (i) => ({ id: `uv-${i}`, city: `V${i}`, status: "offline",
+      lastOnlineTime: null, screen: BLACK })),
+  ];
+  const r = correlate(fleet, NOW);
+  assert.equal(r.findings[0]!.severity, "critical", "a real outage still leads");
+  const rank = { critical: 0, high: 1, medium: 2, low: 3 } as const;
+  for (let i = 1; i < r.findings.length; i++) {
+    assert.ok(rank[r.findings[i - 1]!.severity] <= rank[r.findings[i]!.severity]);
+  }
+  const uv = findingOf(r.findings, "unverifiable-claim");
+  assert.ok(uv, "and the data-quality finding still appears, below it");
+  assert.ok(r.findings.indexOf(uv!) > 0);
+});

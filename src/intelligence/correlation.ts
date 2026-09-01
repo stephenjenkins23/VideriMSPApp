@@ -45,7 +45,18 @@ export type Severity = "critical" | "high" | "medium" | "low";
 export interface Finding {
   /** Stable per correlation kind + key, so the UI can key and dedupe across polls. */
   id: string;
-  kind: "venue" | "firmware-cohort" | "symptom-cooccurrence" | "temporal-cluster";
+  /**
+   * `unverifiable-claim` is the odd one out: it is not a device pattern at all
+   * but an observation about the PLATFORM'S DATA (see correlateUnverifiableClaims).
+   * It is named for what is wrong — the claim cannot be checked — rather than for
+   * our guess at why, because "latched" is our reading and "unverifiable" is a fact.
+   */
+  kind:
+    | "venue"
+    | "firmware-cohort"
+    | "symptom-cooccurrence"
+    | "temporal-cluster"
+    | "unverifiable-claim";
   severity: Severity;
   /** 0..1 — how sure we are these devices share one cause. */
   confidence: number;
@@ -171,6 +182,7 @@ export function correlate(devices: DeviceView[], now: Date = new Date()): Correl
   correlateFirmwareCohort(devices, findings);
   correlateSymptomCooccurrence(devices, findings, notes);
   correlateTemporal(devices, now.getTime(), findings);
+  correlateUnverifiableClaims(devices, now.getTime(), findings);
 
   // Ranked: severity first, then how many devices are implicated (a bigger blast
   // radius outranks a smaller one at equal severity), then a stable id tiebreak
@@ -540,4 +552,124 @@ function correlateTemporal(devices: DeviceView[], nowMs: number, findings: Findi
       i += 1;
     }
   }
+}
+
+// ── data quality: unverifiable black-screen claims ───────────────────────────
+
+/**
+ * ONE fleet-level observation about the platform's own data (added 2026-09-01).
+ *
+ * We now verify black-screen claims by asking the panel (intelligence/screen-verify.ts):
+ * the platform says `is_black_screen=true`, we ask the device, and we refute the
+ * claim if it disagrees. On this fleet that path has almost no surface — of the 9
+ * devices flagged black, 8 were OFFLINE and only 1 could be asked. An unreachable
+ * panel cannot be asked anything, so those 8 claims can be neither confirmed nor
+ * refuted, and the alerting engine's presence short-circuit (offline supersedes
+ * black-screen, alerting/rules.ts) means nobody ever sees them.
+ *
+ * The repeatable finding here is therefore NOT "the flag is wrong" — we have no
+ * standing to say that. It is that the platform keeps asserting a LIVE screen
+ * condition for panels nothing has reached in hours or days: the shape of a value
+ * that was latched once and never re-derived. That is worth one line on the
+ * Actions view, so:
+ *
+ *   - ONE finding, never N. An operator cannot act on Videri's flag; N per-device
+ *     alerts would be pure noise and would read as N new dark screens. The device
+ *     list rides along in `affectedDeviceIds` purely for drill-down.
+ *
+ *   - Never critical/high, and never phrased as breakage. These devices are ALREADY
+ *     covered by their offline alerts; double-counting them as screen faults would
+ *     inflate the fleet's fault count with devices we already page on.
+ *
+ *   - Never an assertion about the screens. We say the claim is uncheckable. We do
+ *     not say the panels are black, and we do not say they are fine.
+ *
+ * REACHABILITY MAPPING — read this before "improving" it. `DeviceView.status` is
+ * derived upstream from PRESENCE only: 'offline' when presence <> 'online' and
+ * 'unknown' when presence IS NULL. So `status === "offline" || status === "unknown"`
+ * (the shared `isOffline` predicate) faithfully means "we cannot reach this device".
+ * It is NOT the derived-status trap we hit twice — that trap is reading a *health*
+ * status ('alert'/'warning') as if it implied a specific fault; 'alert' devices are
+ * reachable and are deliberately excluded here, because a reachable claim IS
+ * verifiable and screen-verify.ts owns it.
+ *
+ * GAP (deliberate): the second unverifiable cause is the `unanswered` verdict — the
+ * panel was reachable, we asked, and it stayed silent. That verdict lives in the
+ * screen-verdict store and is NOT on `DeviceView`, and expanding this engine's
+ * input contract to carry it would couple the pure fleet reasoner to the verify
+ * pipeline for one extra sentence. Left out on purpose: this finding covers the
+ * unreachable cause only, and says so in its rationale.
+ */
+function correlateUnverifiableClaims(
+  devices: DeviceView[],
+  nowMs: number,
+  findings: Finding[],
+): void {
+  // The claim must be an explicit `true`: a null flag is unread, not a claim
+  // (honest null), and generates nothing.
+  const claims = devices.filter((d) => d.screen.isBlackScreen === true && isOffline(d));
+  if (claims.length === 0) return; // degeneracy discipline: no set, no zero-count finding
+
+  const n = claims.length;
+
+  // How stale the asserted "live" condition is, from presence alone. A device with
+  // no lastOnlineTime is counted separately rather than folded in as a zero.
+  const ages = claims
+    .map(onlineAtMs)
+    .filter((t): t is number => t !== null)
+    .map((t) => nowMs - t);
+  const undated = n - ages.length;
+  const window =
+    ages.length === 0
+      ? `none of them carries a last-seen timestamp, so how long the claim has gone unchecked is unknown`
+      : `unreached for ${describeSpan(Math.min(...ages))} to ${describeSpan(Math.max(...ages))}` +
+        `${undated > 0 ? ` (${undated} with no last-seen timestamp at all)` : ""}`;
+
+  findings.push({
+    // Single stable id: this is one standing observation about the data, so it
+    // dedupes across polls even as the affected set changes.
+    id: "data-quality::unverifiable-black-screen::unreachable",
+    kind: "unverifiable-claim",
+    // MEDIUM, deliberately — not critical, not high. It is a data-quality defect,
+    // not a device fault, so it must never outrank a real outage in the ranked
+    // list; but `low` is where things go to be ignored, and a platform flag that
+    // cannot be trusted is worth an operator's attention once. There is no `info`
+    // rung in `Severity` (and adding one would leave the UI's severity colour map
+    // undefined for it), so medium is both the honest and the safe rung.
+    severity: "medium",
+    // The unverifiability itself is directly observed from two fields, not inferred
+    // across devices — hence high. Not 1.0 because "latched rather than re-derived"
+    // is our interpretation of the cause, and we cannot see inside the platform.
+    confidence: 0.9,
+    affectedDeviceIds: claims.map((d) => d.id),
+    summary:
+      `Data quality: the platform claims a black screen on ${n} device(s) it cannot reach — ` +
+      `${n} unverifiable claim(s), not ${n} dark screens.`,
+    rationale:
+      `Videri's is_black_screen flag is true for ${n} device(s) that presence says we cannot ` +
+      `reach (${claims.map(labelOf).slice(0, 5).join(", ")}${n > 5 ? ", …" : ""}). A panel that ` +
+      `does not answer cannot be asked what it is showing, so each of these claims is ` +
+      `UNVERIFIABLE — we can neither confirm nor refute it. Nothing here says those screens ` +
+      `are black, and nothing here says they are fine; both are unknown. This is a defect in ` +
+      `the claim, not ${n} new faults: every one of these devices is already covered by its own ` +
+      `offline alert (which supersedes black-screen), so it must not be counted again as screen ` +
+      `breakage. What is worth acting on is the data itself — a live screen condition is still ` +
+      `being asserted for panels nothing has reached, which is the shape of a latched value ` +
+      `rather than one re-derived at read time. Window: the current correlation snapshot, ` +
+      `${window}. Claims on REACHABLE devices are excluded — those we do check, one by one ` +
+      `(screen-verify.ts) — as is the silent-panel ('unanswered') case, which this engine does ` +
+      `not receive.`,
+  });
+}
+
+/**
+ * A coarse, human span for the rationale. Deliberately local and tiny: the
+ * correlation engine stays a self-contained pure module rather than importing the
+ * alerting layer's formatter just to print two numbers.
+ */
+function describeSpan(ms: number): string {
+  const hours = Math.max(0, ms) / 3_600_000;
+  if (hours < 1) return `${Math.round(hours * 60)} min`;
+  if (hours < 48) return `${hours < 10 ? hours.toFixed(1) : Math.round(hours)} h`;
+  return `${Math.round(hours / 24)} days`;
 }
