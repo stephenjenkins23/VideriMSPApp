@@ -134,6 +134,33 @@ const RESOURCE_PRESSURE_PERCENT = 90;
 const MIN_SYMPTOM_COOCCURRENCE = 2;
 
 /**
+ * How old a telemetry snapshot may be and still be read as describing the
+ * PRESENT. Symptom co-occurrence is the one rule that pairs a stored telemetry
+ * reading with a live screen claim and asserts the two occurred TOGETHER, so it
+ * is the one rule that has to care how old the reading is.
+ *
+ * Reachability alone is not enough. The telemetry slow lane is online-only and
+ * rotates ~10 devices every 15 min, so a ~70-online estate sweeps in roughly 2h
+ * (pipeline/run-poller.ts); measured on this fleet the reachable-with-telemetry
+ * ages run p50 1.4h / p90 2.4h / max 2.7h. But a device that spent a week
+ * unreachable still carries its week-old row until the lane comes back round to
+ * it, and pairing that CPU number with today's black-screen claim asserts a
+ * co-occurrence that never occurred.
+ *
+ * 6h is three sweep cycles: well clear of the observed spread, so a lane that
+ * skipped a cycle or two does not silently empty this finding, yet tight enough
+ * to refuse a reading from another day. It is deliberately the SAME 6h as
+ * RECENT_OFFLINE_WINDOW_MS below — past that horizon this engine already treats
+ * a reading as history rather than as the incident in front of us, and two
+ * different meanings of "recent" in one module would just be a bug waiting.
+ *
+ * The age is trustworthy: `device_telemetry.observed_at` defaults to OUR read
+ * time (repository.saveTelemetry inserts no timestamp), so it is not a device
+ * clock and cannot be the 2085-dated future stamp the metrics path had to clamp.
+ */
+const MAX_TELEMETRY_AGE_MS = 6 * 60 * 60 * 1000;
+
+/**
  * Temporal cluster (US-2.4). We only look at devices that went offline within
  * the last 6 hours (older is history, not an incident), and we call it a
  * "correlated drop" when at least 3 of them went dark inside the same 30-minute
@@ -163,6 +190,26 @@ const isFailing = (d: DeviceView): boolean =>
   d.screen.isBlackScreen === true ||
   d.screen.showingLogo === true;
 
+/**
+ * Reachable = the exact negation of `isOffline`, spelled out so the reachability
+ * requirement reads as an intent rather than as a double negative at the call
+ * site. It is the same notion as remediation.ts's `isOnline(status)` (status is
+ * derived from PRESENCE only), deliberately not a second one.
+ */
+const isReachable = (d: DeviceView): boolean => !isOffline(d);
+
+/**
+ * Is this telemetry snapshot recent enough to speak about the present? A missing
+ * or unparseable `observedAt` is `false`: an age we cannot compute is an unknown,
+ * and an unknown age is not a fresh one (honest null, not an optimistic default).
+ */
+const hasFreshTelemetry = (d: DeviceView, nowMs: number): boolean => {
+  const at = d.telemetry?.observedAt ?? null;
+  if (at === null) return false;
+  const t = Date.parse(at);
+  return !Number.isNaN(t) && nowMs - t <= MAX_TELEMETRY_AGE_MS;
+};
+
 const labelOf = (d: DeviceView): string => d.name ?? d.id;
 
 /** A parsed lastOnlineTime in epoch ms, or null if absent/unparseable. */
@@ -180,7 +227,7 @@ export function correlate(devices: DeviceView[], now: Date = new Date()): Correl
 
   correlateVenue(devices, findings, notes);
   correlateFirmwareCohort(devices, findings);
-  correlateSymptomCooccurrence(devices, findings, notes);
+  correlateSymptomCooccurrence(devices, now.getTime(), findings, notes);
   correlateTemporal(devices, now.getTime(), findings);
   correlateUnverifiableClaims(devices, now.getTime(), findings);
 
@@ -421,8 +468,35 @@ function correlateFirmwareCohort(devices: DeviceView[], findings: Finding[]): vo
 
 // ── US-2.3 symptom co-occurrence ─────────────────────────────────────────────
 
+/**
+ * Black screens split by what their telemetry says — and ONLY for devices whose
+ * telemetry is entitled to say it.
+ *
+ * ELIGIBILITY (tightened 2026-09-01). Both buckets assert a co-occurrence in the
+ * PRESENT: "on these devices a black screen travels with resource exhaustion / with
+ * healthy hardware, right now". Two things can make that assertion false even when
+ * every field is populated:
+ *
+ *   - UNREACHABLE. An offline panel keeps its last readable telemetry snapshot, and
+ *     its `is_black_screen` flag keeps its last value too, so an unreachable device
+ *     used to land in a bucket about live resource pressure or a live content fault.
+ *     Nothing about it is live. Those claims are already covered, correctly, by
+ *     correlateUnverifiableClaims — which says the claim cannot be checked rather
+ *     than picking a cause for it — so double-counting them here was the same error
+ *     in the opposite direction: asserting a cause for a screen nobody can see.
+ *
+ *   - STALE. Reachable is not the same as recently read. The telemetry lane sweeps
+ *     the online estate roughly every 2h, and a device that has just returned from
+ *     a long outage still carries the old row. See MAX_TELEMETRY_AGE_MS.
+ *
+ * Excluded devices are excluded, not downgraded: if a bucket falls under
+ * MIN_SYMPTOM_COOCCURRENCE once they are gone, it emits nothing at all rather than
+ * a thinner finding. Each surviving finding's rationale names the population it
+ * actually describes, so it is never read as a statement about the fleet.
+ */
 function correlateSymptomCooccurrence(
   devices: DeviceView[],
+  nowMs: number,
   findings: Finding[],
   notes: Note[],
 ): void {
@@ -435,13 +509,33 @@ function correlateSymptomCooccurrence(
   const resourceLinked: DeviceView[] = [];
   const contentLinked: DeviceView[] = [];
   let withReadableTelemetry = 0;
+  let excludedUnreachable = 0;
+  let excludedStale = 0;
 
   for (const d of blackScreen) {
     const t = d.telemetry;
     const cpu = t?.cpuPercent ?? null;
     const ram = t?.ramUsedPercent ?? null;
     if (cpu === null && ram === null) continue; // no readable resource metric
+    // Counted before the eligibility gates on purpose: this drives the
+    // "no readable telemetry at all" note, which is a statement about the
+    // black-screen population as a whole, not about the bucketed subset. Keeping
+    // it on the raw set means the tightening below removes findings, never adds
+    // a note where there previously was none.
     withReadableTelemetry += 1;
+
+    // A reading only describes the present if we can reach the device AND the
+    // reading is recent. Either failure means this device says nothing about a
+    // live co-occurrence, so it joins neither bucket.
+    if (!isReachable(d)) {
+      excludedUnreachable += 1;
+      continue;
+    }
+    if (!hasFreshTelemetry(d, nowMs)) {
+      excludedStale += 1;
+      continue;
+    }
+
     const underPressure =
       (cpu !== null && cpu > RESOURCE_PRESSURE_PERCENT) ||
       (ram !== null && ram > RESOURCE_PRESSURE_PERCENT);
@@ -461,6 +555,22 @@ function correlateSymptomCooccurrence(
     return;
   }
 
+  // The population both findings below are entitled to speak about, stated in the
+  // rationale so a reader can never mistake either for a statement about the fleet.
+  // The exclusion counts are only mentioned when there were exclusions — an
+  // unconditional "excluded 0 and 0" trains readers to skip the sentence.
+  const excluded = excludedUnreachable + excludedStale;
+  const population =
+    `Population: black-screen devices presence says we can currently REACH, whose ` +
+    `telemetry was read within the last ${Math.round(MAX_TELEMETRY_AGE_MS / 3_600_000)}h` +
+    (excluded > 0
+      ? ` — ${excluded} readable-but-ineligible device(s) were excluded ` +
+        `(${excludedUnreachable} unreachable, ${excludedStale} stale reading), because ` +
+        `neither an unreached panel nor an old snapshot describes the present`
+      : "") +
+    `. This is not a statement about the fleet, nor about black-screen claims on ` +
+    `devices we cannot reach — those are unverifiable, not diagnosed.`;
+
   if (resourceLinked.length >= MIN_SYMPTOM_COOCCURRENCE) {
     const n = resourceLinked.length;
     findings.push({
@@ -471,12 +581,12 @@ function correlateSymptomCooccurrence(
       severity: "high",
       confidence: 0.7,
       affectedDeviceIds: resourceLinked.map((d) => d.id),
-      summary: `${n} black-screen devices are also over 90% CPU/RAM — resource-linked.`,
+      summary: `${n} reachable black-screen devices are also over 90% CPU/RAM — resource-linked.`,
       rationale:
-        `On ${n} devices a black screen co-occurs with CPU or RAM above ` +
-        `${RESOURCE_PRESSURE_PERCENT}%. When the black-out travels with resource ` +
-        `exhaustion the panel is likely a symptom of the device running out of ` +
-        `headroom — distinct from a content/player fault.`,
+        `On ${n} reachable devices a black screen co-occurs with a recent CPU or RAM ` +
+        `reading above ${RESOURCE_PRESSURE_PERCENT}%. When the black-out travels with ` +
+        `resource exhaustion the panel is likely a symptom of the device running out ` +
+        `of headroom — distinct from a content/player fault. ${population}`,
     });
   }
 
@@ -490,11 +600,12 @@ function correlateSymptomCooccurrence(
       severity: "medium",
       confidence: 0.6,
       affectedDeviceIds: contentLinked.map((d) => d.id),
-      summary: `${n} black-screen devices have healthy CPU/RAM — content-linked.`,
+      summary: `${n} reachable black-screen devices have healthy CPU/RAM — content-linked.`,
       rationale:
-        `On ${n} devices a black screen co-occurs with healthy, readable telemetry ` +
-        `(CPU and RAM at or below ${RESOURCE_PRESSURE_PERCENT}%). With the hardware ` +
-        `fine, the black-out points at content or the player, not resources.`,
+        `On ${n} reachable devices a black screen co-occurs with healthy, recently read ` +
+        `telemetry (CPU and RAM at or below ${RESOURCE_PRESSURE_PERCENT}%). With the ` +
+        `hardware fine, the black-out points at content or the player, not resources. ` +
+        `${population}`,
     });
   }
 }

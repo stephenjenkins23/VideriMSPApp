@@ -527,7 +527,11 @@ function applyScreenVerdict(
       : null;
     return {
       ...base,
-      severity: "info",
+      // `medium`, not `info`: a refuted claim is a platform data-quality fault and
+      // should reach triage rather than sink to the bottom of the list. It can
+      // still never outrank a real outage. (`info` IS valid on the alert scale —
+      // critical|high|medium|info — this is a deliberate choice, not a fix.)
+      severity: "medium",
       title: "Black-screen claim refuted by the device",
       firing: true,
       refuted: true,

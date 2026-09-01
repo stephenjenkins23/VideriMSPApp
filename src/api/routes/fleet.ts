@@ -75,7 +75,14 @@ export async function registerFleetRoutes(app: FastifyInstance, ctx: ApiContext)
     return envelope(trend, freshness);
   });
 
-  /** The latest generated AI brief. Never generated on request — see queries.ts. */
+  /**
+   * The latest generated AI brief. Never generated on request — see queries.ts.
+   *
+   * Carries its OWN age alongside the envelope's poller freshness, exactly as
+   * `GET /api/action-plan` does: the envelope describes how fresh the POLLED data
+   * is, which says nothing about how old this narrative over it is. A brief
+   * written before a fix still reads as current unless its age is on the wire.
+   */
   app.get("/api/fleet/brief", async (_request, reply) => {
     const [brief, freshness] = await Promise.all([
       ctx.queries.latestBrief(),
@@ -88,6 +95,15 @@ export async function registerFleetRoutes(app: FastifyInstance, ctx: ApiContext)
         meta: { freshness },
       });
     }
-    return envelope(brief, freshness);
+    const generatedAt = Date.parse(brief["generatedAt"] as string);
+    return envelope(
+      {
+        ...brief,
+        ageSeconds: Number.isFinite(generatedAt)
+          ? Math.round((Date.now() - generatedAt) / 1000)
+          : null,
+      },
+      freshness,
+    );
   });
 }

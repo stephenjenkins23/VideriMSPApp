@@ -377,9 +377,9 @@ test("null-firmware devices are excluded from cohorts and baseline", () => {
 test("black screen + high RAM/CPU on >=2 devices → resource-linked finding", () => {
   const fleet = [
     dev({ id: "r1", city: "C1", screen: { isBlackScreen: true, showingLogo: false, nowPlayingId: null },
-      telemetry: { observedAt: "t", cpuPercent: 30, ramUsedPercent: 95, storageUsedPercent: 50, rssiDbm: -50, ntpOffsetMs: 0 } }),
+      telemetry: { observedAt: "2026-08-31T11:55:00Z", cpuPercent: 30, ramUsedPercent: 95, storageUsedPercent: 50, rssiDbm: -50, ntpOffsetMs: 0 } }),
     dev({ id: "r2", city: "C2", screen: { isBlackScreen: true, showingLogo: false, nowPlayingId: null },
-      telemetry: { observedAt: "t", cpuPercent: 99, ramUsedPercent: 40, storageUsedPercent: 50, rssiDbm: -50, ntpOffsetMs: 0 } }),
+      telemetry: { observedAt: "2026-08-31T11:55:00Z", cpuPercent: 99, ramUsedPercent: 40, storageUsedPercent: 50, rssiDbm: -50, ntpOffsetMs: 0 } }),
   ];
   const r = correlate(fleet, NOW);
   const f = r.findings.find((x) => x.id === "symptom::black-screen+resource");
@@ -413,11 +413,218 @@ test("black screens with only null telemetry yield a note, not a guessed cause",
 test("a single black-screen+resource device does not make a fleet finding", () => {
   const fleet = [
     dev({ id: "r1", city: "C1", screen: { isBlackScreen: true, showingLogo: false, nowPlayingId: null },
-      telemetry: { observedAt: "t", cpuPercent: 99, ramUsedPercent: 40, storageUsedPercent: 50, rssiDbm: -50, ntpOffsetMs: 0 } }),
+      telemetry: { observedAt: "2026-08-31T11:55:00Z", cpuPercent: 99, ramUsedPercent: 40, storageUsedPercent: 50, rssiDbm: -50, ntpOffsetMs: 0 } }),
     dev({ id: "ok", city: "C2" }),
   ];
   const r = correlate(fleet, NOW);
   assert.equal(r.findings.find((x) => x.kind === "symptom-cooccurrence"), undefined);
+});
+
+// Eligibility for symptom co-occurrence: reachable, and read recently enough.
+// Both buckets assert a co-occurrence in the PRESENT, so a device we cannot reach
+// or have not read lately must not be counted into one — the same error class as
+// the unverifiable-claim finding, in the opposite direction.
+
+/** A black-screen claim with healthy, readable, fresh telemetry. */
+const blackHealthy = (id: string, city: string, over: Partial<DeviceView> = {}): DeviceView =>
+  dev({
+    id,
+    city,
+    screen: { isBlackScreen: true, showingLogo: false, nowPlayingId: null },
+    ...over,
+  });
+
+/** Telemetry stamped `ageMs` before NOW, healthy values throughout. */
+const telemetryAged = (ageMs: number): DeviceView["telemetry"] => ({
+  observedAt: new Date(NOW.getTime() - ageMs).toISOString(),
+  cpuPercent: 20,
+  ramUsedPercent: 40,
+  storageUsedPercent: 55,
+  rssiDbm: -50,
+  ntpOffsetMs: 2,
+});
+
+const HOUR = 3_600_000;
+
+test("an UNREACHABLE black-screen device is excluded from symptom co-occurrence", () => {
+  // The offline device has perfectly readable telemetry — that is exactly the trap.
+  // Its screen flag and its CPU number are both last-known, not live.
+  const fleet = [
+    blackHealthy("live-1", "C1"),
+    blackHealthy("live-2", "C2"),
+    blackHealthy("gone", "C3", { status: "offline" }),
+  ];
+  const r = correlate(fleet, NOW);
+  const f = r.findings.find((x) => x.id === "symptom::black-screen+content");
+  assert.ok(f, "the two reachable devices still make the finding");
+  assert.deepEqual(f!.affectedDeviceIds, ["live-1", "live-2"]);
+  assert.ok(!f!.affectedDeviceIds.includes("gone"));
+});
+
+test("status 'unknown' counts as unreachable for symptom co-occurrence", () => {
+  // Null presence is an unknown, never an implied "online".
+  const fleet = [
+    blackHealthy("live-1", "C1"),
+    blackHealthy("live-2", "C2"),
+    blackHealthy("nopresence", "C3", { status: "unknown" }),
+  ];
+  const r = correlate(fleet, NOW);
+  const f = r.findings.find((x) => x.id === "symptom::black-screen+content");
+  assert.deepEqual(f!.affectedDeviceIds, ["live-1", "live-2"]);
+});
+
+test("an unreachable high-CPU black screen is excluded from the RESOURCE bucket too", () => {
+  const hot = (id: string, over: Partial<DeviceView> = {}): DeviceView =>
+    dev({
+      id,
+      screen: { isBlackScreen: true, showingLogo: false, nowPlayingId: null },
+      telemetry: { ...telemetryAged(5 * 60_000)!, cpuPercent: 99 },
+      ...over,
+    });
+  const fleet = [hot("hot-1"), hot("hot-2"), hot("hot-gone", { status: "offline" })];
+  const r = correlate(fleet, NOW);
+  const f = r.findings.find((x) => x.id === "symptom::black-screen+resource");
+  assert.deepEqual(f!.affectedDeviceIds, ["hot-1", "hot-2"]);
+});
+
+test("a bucket that falls below the minimum after exclusion emits NOTHING", () => {
+  // One reachable + one unreachable = 1 eligible device, under
+  // MIN_SYMPTOM_COOCCURRENCE. No weakened finding, and no invented note either:
+  // readable telemetry DID exist, so the telemetry-absent note stays silent.
+  const fleet = [
+    blackHealthy("live-1", "C1"),
+    blackHealthy("gone", "C2", { status: "offline" }),
+  ];
+  const r = correlate(fleet, NOW);
+  assert.equal(r.findings.find((x) => x.kind === "symptom-cooccurrence"), undefined);
+  assert.equal(noteOf(r.notes, "symptom-telemetry-absent"), undefined);
+});
+
+test("telemetry exactly at the 6h freshness bound is still eligible", () => {
+  const at = telemetryAged(6 * HOUR);
+  const fleet = [
+    blackHealthy("edge-1", "C1", { telemetry: at }),
+    blackHealthy("edge-2", "C2", { telemetry: at }),
+  ];
+  const r = correlate(fleet, NOW);
+  const f = r.findings.find((x) => x.id === "symptom::black-screen+content");
+  assert.ok(f, "6h old is inside the window");
+  assert.equal(f!.affectedDeviceIds.length, 2);
+});
+
+test("telemetry a minute past the 6h bound is excluded, and takes the finding with it", () => {
+  const at = telemetryAged(6 * HOUR + 60_000);
+  const fleet = [
+    blackHealthy("stale-1", "C1", { telemetry: at }),
+    blackHealthy("stale-2", "C2", { telemetry: at }),
+  ];
+  const r = correlate(fleet, NOW);
+  assert.equal(r.findings.find((x) => x.kind === "symptom-cooccurrence"), undefined);
+  // Telemetry was readable, just old — so this is not the telemetry-absent case.
+  assert.equal(noteOf(r.notes, "symptom-telemetry-absent"), undefined);
+});
+
+test("a stale reading is dropped while its fresh peers keep the finding", () => {
+  const fleet = [
+    blackHealthy("fresh-1", "C1", { telemetry: telemetryAged(10 * 60_000) }),
+    blackHealthy("fresh-2", "C2", { telemetry: telemetryAged(2 * HOUR) }),
+    blackHealthy("old", "C3", { telemetry: telemetryAged(30 * HOUR) }),
+  ];
+  const r = correlate(fleet, NOW);
+  const f = r.findings.find((x) => x.id === "symptom::black-screen+content");
+  assert.deepEqual(f!.affectedDeviceIds, ["fresh-1", "fresh-2"]);
+});
+
+test("telemetry with an unknown observedAt is not treated as fresh", () => {
+  // An age we cannot compute is an unknown, not a zero. Values are readable, so
+  // the old code would have bucketed both of these.
+  const noStamp: DeviceView["telemetry"] = { ...telemetryAged(0)!, observedAt: null };
+  const fleet = [
+    blackHealthy("nostamp-1", "C1", { telemetry: noStamp }),
+    blackHealthy("nostamp-2", "C2", { telemetry: noStamp }),
+  ];
+  const r = correlate(fleet, NOW);
+  assert.equal(r.findings.find((x) => x.kind === "symptom-cooccurrence"), undefined);
+});
+
+test("the symptom rationale names its population, so it never reads as fleet-wide", () => {
+  const fleet = [
+    blackHealthy("live-1", "C1"),
+    blackHealthy("live-2", "C2"),
+    blackHealthy("gone", "C3", { status: "offline" }),
+    blackHealthy("old", "C4", { telemetry: telemetryAged(20 * HOUR) }),
+  ];
+  const r = correlate(fleet, NOW);
+  const f = r.findings.find((x) => x.id === "symptom::black-screen+content")!;
+  assert.match(f.rationale, /REACH/);
+  assert.match(f.rationale, /not a statement about the fleet/i);
+  // The exclusions are declared, split by reason.
+  assert.match(f.rationale, /1 unreachable/);
+  assert.match(f.rationale, /1 stale reading/);
+});
+
+test("with no exclusions the rationale does not print an empty exclusion clause", () => {
+  const fleet = [blackHealthy("live-1", "C1"), blackHealthy("live-2", "C2")];
+  const r = correlate(fleet, NOW);
+  const f = r.findings.find((x) => x.id === "symptom::black-screen+content")!;
+  assert.ok(!/excluded/.test(f.rationale), f.rationale);
+});
+
+test("black screens with no readable telemetry ANYWHERE still yield the note", () => {
+  // The note is a statement about the whole black-screen population, so the new
+  // eligibility gates must not change when it fires.
+  const fleet = [
+    dev({ id: "b1", city: "C1", status: "offline", telemetry: null,
+      screen: { isBlackScreen: true, showingLogo: false, nowPlayingId: null } }),
+    dev({ id: "b2", city: "C2", telemetry: null,
+      screen: { isBlackScreen: true, showingLogo: false, nowPlayingId: null } }),
+  ];
+  const r = correlate(fleet, NOW);
+  assert.ok(noteOf(r.notes, "symptom-telemetry-absent"));
+  assert.equal(r.findings.find((x) => x.kind === "symptom-cooccurrence"), undefined);
+});
+
+test("the symptom gate leaves venue, firmware, temporal and unverifiable untouched", () => {
+  // Five offline devices at one city, on one firmware, dropped in one 8-minute
+  // window, each claiming black WITH readable telemetry — i.e. exactly the devices
+  // symptom co-occurrence now refuses. Every OTHER rule must still count them.
+  const stuck = Array.from({ length: 5 }, (_, i) =>
+    dev({
+      id: `bos-${i}`,
+      city: "Boston",
+      status: "offline",
+      firmwareCurrent: "6.0",
+      lastOnlineTime: new Date(NOW.getTime() - (30 + i * 2) * 60_000).toISOString(),
+      screen: { isBlackScreen: true, showingLogo: false, nowPlayingId: null },
+    }),
+  );
+  const fleet = [
+    ...stuck,
+    blackHealthy("live-1", "Miami"),
+    blackHealthy("live-2", "Dallas"),
+    ...many(4, (i) => ({ id: `ny-${i}`, city: "New York" })),
+    ...many(4, (i) => ({ id: `ch-${i}`, city: "Chicago" })),
+    ...many(4, (i) => ({ id: `sf-${i}`, city: "SF" })),
+  ];
+  const r = correlate(fleet, NOW);
+  const stuckIds = stuck.map((d) => d.id);
+
+  const venue = r.findings.find((x) => x.id === "venue::city::Boston");
+  assert.deepEqual(venue?.affectedDeviceIds, stuckIds);
+
+  const firmware = r.findings.find((x) => x.id === "firmware::6.0");
+  assert.deepEqual(firmware?.affectedDeviceIds, stuckIds);
+
+  const temporal = findingOf(r.findings, "temporal-cluster");
+  assert.ok(temporal, "temporal cluster expected");
+  for (const id of stuckIds) assert.ok(temporal!.affectedDeviceIds.includes(id), id);
+
+  const unverifiable = findingOf(r.findings, "unverifiable-claim");
+  assert.deepEqual(unverifiable?.affectedDeviceIds, stuckIds);
+
+  // And the symptom finding covers ONLY the two reachable, freshly read devices.
+  const symptom = r.findings.find((x) => x.id === "symptom::black-screen+content");
+  assert.deepEqual(symptom?.affectedDeviceIds, ["live-1", "live-2"]);
 });
 
 // ── US-2.4 temporal clustering ───────────────────────────────────────────────
@@ -481,9 +688,9 @@ test("findings rank by severity then affected-count", () => {
     ...many(4, (i) => ({ id: `ch-${i}`, city: "Chicago" })),
     ...many(4, (i) => ({ id: `sf-${i}`, city: "SF" })),
     dev({ id: "r1", city: "Miami", screen: { isBlackScreen: true, showingLogo: false, nowPlayingId: null },
-      telemetry: { observedAt: "t", cpuPercent: 99, ramUsedPercent: 40, storageUsedPercent: 50, rssiDbm: -50, ntpOffsetMs: 0 } }),
+      telemetry: { observedAt: "2026-08-31T11:55:00Z", cpuPercent: 99, ramUsedPercent: 40, storageUsedPercent: 50, rssiDbm: -50, ntpOffsetMs: 0 } }),
     dev({ id: "r2", city: "Dallas", screen: { isBlackScreen: true, showingLogo: false, nowPlayingId: null },
-      telemetry: { observedAt: "t", cpuPercent: 99, ramUsedPercent: 40, storageUsedPercent: 50, rssiDbm: -50, ntpOffsetMs: 0 } }),
+      telemetry: { observedAt: "2026-08-31T11:55:00Z", cpuPercent: 99, ramUsedPercent: 40, storageUsedPercent: 50, rssiDbm: -50, ntpOffsetMs: 0 } }),
   ];
   const r = correlate(fleet, NOW);
   assert.ok(r.findings.length >= 2);

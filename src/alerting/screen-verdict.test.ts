@@ -83,7 +83,7 @@ test("a fresh contradiction does NOT raise the critical", () => {
   });
 
   assert.notEqual(v.severity, "critical", "we can disprove this claim; it must not page");
-  assert.equal(v.severity, "info");
+  assert.equal(v.severity, "medium");
 });
 
 test("a refuted claim still FIRES — suppression must never be silent", () => {
@@ -393,7 +393,7 @@ test("the engine counts refuted claims so the disagreement is measurable", async
   // All three still produce a visible alert — two informational, one critical.
   assert.equal(result.opened, 3, "nothing was silently dropped");
   const bySeverity = state.opened.map((a) => a.severity).sort();
-  assert.deepEqual(bySeverity, ["critical", "info", "info"]);
+  assert.deepEqual(bySeverity, ["critical", "medium", "medium"]);
 });
 
 test("an already-open CRITICAL de-escalates in place rather than vanishing", async () => {
@@ -416,7 +416,7 @@ test("an already-open CRITICAL de-escalates in place rather than vanishing", asy
   // resolving and reappearing under a different id.
   assert.equal(result.resolved, 0, "the finding is not resolved — it is reinterpreted");
   assert.equal(result.refreshed, 1);
-  assert.equal(state.refreshed[0]?.severity, "info");
+  assert.equal(state.refreshed[0]?.severity, "medium");
   assert.match(state.refreshed[0]?.evidence ?? "", /refuted/);
 });
 

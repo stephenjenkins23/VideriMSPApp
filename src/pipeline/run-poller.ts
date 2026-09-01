@@ -39,6 +39,7 @@ import {
   type ScreenVerifyTarget,
 } from "./pollers/screen-verify-slowlane.js";
 import { normalizeEvents } from "../intelligence/proof-of-play.js";
+import { aiJobTasks } from "../ai/scheduled.js";
 import type { TelemetryRunner } from "../videri/telemetry.js";
 import type { PollerResult } from "./pollers/types.js";
 
@@ -292,6 +293,13 @@ if (!dryRun) {
         );
       },
     },
+    // The two AI artifacts (brief + action plan). Scheduled here because run-by-
+    // hand is how they drifted: a plan is only true about the fleet it was
+    // generated from, and one that outlives a fix contradicts the engine that
+    // made it. Both are gated behind ENABLE_AI_JOBS and left OFF — every tick is
+    // a paid Claude call — and both call the SAME core the npm scripts do
+    // (src/ai/jobs.ts), so there is no second prompt or persistence path.
+    ...aiJobTasks(pool, { record, log }),
     {
       // Evaluation is pure and cheap, so it runs regardless of whether the
       // settings poll is enabled — it simply reports how many devices lack
