@@ -789,12 +789,25 @@ export class Repository {
     pollerRunsDays?: number;
     resolvedAlertsDays?: number;
     snapshotsDays?: number;
+    /**
+     * fleet_snapshots was previously NEVER pruned — `snapshotsDays` governs
+     * device_settings and compliance_results, not this table, so it grew without
+     * bound (938 rows inside one week of partial uptime; ~288/day when the
+     * daemon is up, each carrying a jsonb blob).
+     *
+     * Defaulted to match `samplesDays` rather than the shorter snapshot window:
+     * these rows are the deepest COMPUTED history we hold, and a trend window
+     * can legitimately reach back as far as the raw samples do. Pruning them
+     * sooner than the samples they summarise would be the wrong asymmetry.
+     */
+    fleetSnapshotsDays?: number;
   } = {}): Promise<Record<string, number>> {
     const {
       samplesDays = 90,
       pollerRunsDays = 14,
       resolvedAlertsDays = 180,
       snapshotsDays = 30,
+      fleetSnapshotsDays = 90,
     } = opts;
     const deleted: Record<string, number> = {};
 
@@ -809,6 +822,9 @@ export class Repository {
     await run("poller_runs",
       `DELETE FROM poller_runs WHERE started_at < now() - ($1::text || ' days')::interval`,
       [String(pollerRunsDays)]);
+    await run("fleet_snapshots",
+      `DELETE FROM fleet_snapshots WHERE computed_at < now() - ($1::text || ' days')::interval`,
+      [String(fleetSnapshotsDays)]);
     await run("alerts_resolved",
       `DELETE FROM alerts
         WHERE resolved_at IS NOT NULL

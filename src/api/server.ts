@@ -20,6 +20,7 @@ import { registerFleetRoutes } from "./routes/fleet.js";
 import { registerDeviceRoutes } from "./routes/devices.js";
 import { registerAlertRoutes } from "./routes/alerts.js";
 import { registerSystemRoutes } from "./routes/system.js";
+import { registerHealthRoutes } from "./routes/health.js";
 import { registerSlaRoutes } from "./routes/sla.js";
 import type { Repository } from "../db/repository.js";
 import type { VideriHttp } from "../videri/http.js";
@@ -154,6 +155,7 @@ export async function buildServer(options: BuildServerOptions): Promise<FastifyI
   await registerRollupRoutes(app, ctx);
   await registerActionPlanRoutes(app, ctx);
   await registerTrendRoutes(app, ctx);
+  await registerHealthRoutes(app, ctx);
 
   return app;
 }

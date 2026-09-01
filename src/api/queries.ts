@@ -449,7 +449,16 @@ export class ReadQueries {
     state: "open" | "resolved" | "all";
     deviceId?: string | undefined;
   }): Promise<{ items: Array<Record<string, unknown>>; totalItems: number }> {
-    const where: string[] = [];
+    const where: string[] = [
+      // A retired device's alerts must appear in neither the list nor the count.
+      // Written as NOT EXISTS rather than `d.retired_at IS NULL`: the COUNT query
+      // below selects from `alerts` alone with no devices join, so an alias-based
+      // filter would compile here and fail there — the exact shape of the bug that
+      // once 500'd a live endpoint while stub tests passed. This mismatch is also
+      // why the list reported 306 open while the repository's own invariant said 304.
+      `NOT EXISTS (SELECT 1 FROM devices rd
+                    WHERE rd.id = a.device_id AND rd.retired_at IS NOT NULL)`,
+    ];
     const params: unknown[] = [];
 
     if (filters.state === "open") where.push(`a.resolved_at IS NULL`);
