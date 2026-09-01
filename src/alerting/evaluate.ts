@@ -16,6 +16,7 @@
 
 import type { AlertRule, Comparator, MetricField, StateField } from "./rules.js";
 import type { Severity } from "../domain/types.js";
+import type { ScreenVerdict } from "../intelligence/screen-verify.js";
 
 /** One row from health_samples, as the engine needs it. */
 export interface SampleRow {
@@ -73,6 +74,16 @@ export interface Verdict {
    * for both tells the operator the opposite of the truth.
    */
   unreadable?: true;
+  /**
+   * Set when the rule's condition genuinely held on platform data but the DEVICE
+   * ITSELF refuted the claim underneath it (see the black-screen branch below).
+   *
+   * The verdict still FIRES — a refuted platform flag is a data-quality finding,
+   * not nothing — but at `info` rather than `critical`, and this flag is what
+   * makes the de-escalation countable. Suppressing the alert outright would hide
+   * the disagreement, which is the one outcome worse than the false critical.
+   */
+  refuted?: true;
 }
 
 const METRIC_ACCESSORS: Record<MetricField, (s: SampleRow) => number | null> = {
@@ -137,6 +148,10 @@ interface RunSummary {
   /** Largest gap between consecutive considered readings, in seconds. */
   maxGapSeconds: number;
   values: number[];
+  /** Newest reading in the run. null when the run is empty. */
+  newestAt: Date | null;
+  /** Oldest reading in the run — i.e. when the episode started. */
+  oldestAt: Date | null;
 }
 
 /**
@@ -181,17 +196,134 @@ function measureRun<T>(
 
   const spanSeconds =
     newest && oldest ? (newest.getTime() - oldest.getTime()) / 1000 : 0;
-  return { readings, spanSeconds, maxGapSeconds, values };
+  return { readings, spanSeconds, maxGapSeconds, values, newestAt: newest, oldestAt: oldest };
 }
 
 /** A run stitched across a gap this large is not evidence of continuity. */
 const gapTolerance = (sustainedForSeconds: number) =>
   Math.max(600, sustainedForSeconds * 0.5);
 
+/**
+ * The newest persisted screen-check for a device, as the engine reads it.
+ *
+ * Written by the verification slow lane (pipeline/pollers/screen-verify-slowlane.ts)
+ * into `device_screen_verdict`. NOTHING here issues a device command: alerting
+ * runs every ~450s across the whole fleet, and a synchronous verb costs ~11s
+ * when the panel does not answer. The lane asks; the engine only reads.
+ */
+export interface ScreenVerdictRecord {
+  verdict: ScreenVerdict | string;
+  /** When the panel was asked — not when the platform sampled. */
+  observedAt: Date;
+  /** The panel's own answer. null = it did not answer. Reported, never inferred. */
+  deviceIsBlack?: boolean | null;
+}
+
+/**
+ * How old a screen-check may be and still speak for the current episode.
+ *
+ * 20 minutes. The status poller runs every 120s (config.POLL_STATUS_INTERVAL_MS)
+ * and the black-screen rule needs 5 minutes of sustain, so 20 minutes is about
+ * ten status cycles — long enough that a verification lane on any sane cadence
+ * (15 min matches the other slow lanes) always has a usable answer, short enough
+ * that a panel's answer is still describing the screen an operator would see if
+ * they walked up to it. Past that we say "unverified" rather than pretend.
+ */
+export const SCREEN_VERDICT_MAX_AGE_SECONDS = 20 * 60;
+
+/** What a stored screen-check is entitled to say about the episode in front of us. */
+export type ScreenVerdictStanding = "refutes" | "confirms" | "unverified";
+
+/**
+ * Decide whether a stored verdict may speak, and what it says — pure.
+ *
+ * TWO independent freshness gates, because they catch different lies:
+ *
+ *   age vs `now`  — a verdict from yesterday describes yesterday's screen.
+ *   age vs the EPISODE START — a verdict recorded before the current unbroken
+ *     run of `is_black_screen = true` began says nothing about this episode,
+ *     even if it is only minutes old. This is the gate that stops a `contradicted`
+ *     answer from silencing a genuinely new outage that started right after it.
+ *
+ * The episode gate is deliberately measured against the OLDEST reading in the
+ * current run, not the newest. Anchoring it to the newest sample would mean the
+ * next status poll (120s away) invalidates every refutation, so the feature would
+ * be inert within one cycle — and inert here means we keep paging on claims we
+ * have already disproved. A verdict recorded anywhere inside an unbroken black
+ * run is an observation OF that run, so it is entitled to contradict it.
+ *
+ * `unanswered` and `no-claim` both land on `unverified`. Silence from a panel is
+ * neither agreement nor refutation, and folding it into either would rebuild the
+ * exact failure this whole path exists to stop.
+ */
+export function screenVerdictStanding(
+  record: ScreenVerdictRecord | null | undefined,
+  episodeStartedAt: Date | null,
+  now: Date,
+  maxAgeSeconds: number = SCREEN_VERDICT_MAX_AGE_SECONDS,
+): { standing: ScreenVerdictStanding; why: string } {
+  if (!record) {
+    return {
+      standing: "unverified",
+      why: "no screen-check has ever been recorded for this device",
+    };
+  }
+
+  const ageSeconds = (now.getTime() - record.observedAt.getTime()) / 1000;
+  if (ageSeconds > maxAgeSeconds) {
+    return {
+      standing: "unverified",
+      why:
+        `the last screen-check (${record.verdict}, ${record.observedAt.toISOString()}) is ` +
+        `${formatDuration(ageSeconds)} old, past the ${formatDuration(maxAgeSeconds)} limit`,
+    };
+  }
+
+  // Strictly newer: a verdict stamped at the same instant the episode started is
+  // not evidence about it.
+  if (episodeStartedAt && record.observedAt.getTime() <= episodeStartedAt.getTime()) {
+    return {
+      standing: "unverified",
+      why:
+        `the last screen-check (${record.verdict}, ${record.observedAt.toISOString()}) predates ` +
+        `this black episode, which began at ${episodeStartedAt.toISOString()}`,
+    };
+  }
+
+  switch (record.verdict) {
+    case "contradicted": return { standing: "refutes", why: "" };
+    case "confirmed": return { standing: "confirms", why: "" };
+    case "unanswered":
+      return {
+        standing: "unverified",
+        why:
+          `the panel was asked at ${record.observedAt.toISOString()} and did not answer ` +
+          `is_blackscreen — silence is neither agreement nor refutation`,
+      };
+    case "no-claim":
+      return {
+        standing: "unverified",
+        why:
+          `the last screen-check at ${record.observedAt.toISOString()} found no black-screen ` +
+          `claim to test, so the current claim is unchecked`,
+      };
+    default:
+      return {
+        standing: "unverified",
+        why: `the last screen-check carries an unrecognised verdict "${record.verdict}"`,
+      };
+  }
+}
+
 export interface EvaluateContext {
   device: DeviceRow;
   samples: SampleRow[];
   now: Date;
+  /**
+   * The device's newest stored screen-check, if we hold one. Absent/null is the
+   * normal case and means "unverified" — never "fine" and never "refuted".
+   */
+  screenVerdict?: ScreenVerdictRecord | null;
 }
 
 export function evaluateRule(rule: AlertRule, ctx: EvaluateContext): Verdict {
@@ -344,12 +476,91 @@ function evaluateState(
   }
 
   const description = rule.equals ? labels.whenTrue : labels.whenFalse;
+  const held =
+    `continuously for ${Math.round(run.spanSeconds / 60)} minutes across ${run.readings} readings`;
+
+  // The condition has held. For the black-screen claim specifically there may be
+  // a second opinion on file from the panel itself, and it changes what we are
+  // entitled to say. Keyed on the FIELD, not the rule id, because rule ids are
+  // operator-editable while `is_black_screen`/`equals: true` is what actually
+  // identifies "the platform claims this screen is black".
+  if (rule.field === "is_black_screen" && rule.equals === true) {
+    return applyScreenVerdict(ctx, base, run, held);
+  }
+
+  return { ...base, firing: true, evidence: `${description} ${held}.` };
+}
+
+/**
+ * Reconcile a sustained black-screen claim with the panel's own answer.
+ *
+ * Three outcomes, and the one thing none of them do is go quiet:
+ *
+ *   refutes  → fires at `info` with `refuted: true`, title changed, evidence
+ *              naming both observations. NOT a critical, because we can disprove
+ *              it; NOT silence, because a platform flag contradicting its own
+ *              hardware is a real data-quality fault someone should see.
+ *   confirms → fires the critical, and says the panel confirmed it. Same
+ *              severity as before, strictly higher confidence.
+ *   unverified → fires the critical exactly as it did before this code existed,
+ *              and says so. Unverified is the honest default, not a downgrade.
+ */
+function applyScreenVerdict(
+  ctx: EvaluateContext,
+  base: VerdictBase,
+  run: RunSummary,
+  held: string,
+): Verdict {
+  const { standing, why } = screenVerdictStanding(
+    ctx.screenVerdict,
+    run.oldestAt,
+    ctx.now,
+  );
+  const claimAt = run.newestAt?.toISOString() ?? "an unrecorded time";
+  const verdictAt = ctx.screenVerdict?.observedAt;
+
+  if (standing === "refutes") {
+    // The lag between the two observations is the whole point: an operator has to
+    // see that the panel spoke AFTER the platform did.
+    const lag = verdictAt && run.newestAt
+      ? formatDuration((verdictAt.getTime() - run.newestAt.getTime()) / 1000)
+      : null;
+    return {
+      ...base,
+      severity: "info",
+      title: "Black-screen claim refuted by the device",
+      firing: true,
+      refuted: true,
+      evidence:
+        `The platform reported is_black_screen=true ${held} (latest ${claimAt}); the screen ` +
+        `itself answered not-black at ${verdictAt!.toISOString()}` +
+        (lag ? `, ${lag} later` : "") +
+        ` — claim refuted, so no critical was raised. The panel's own answer outranks the ` +
+        `platform flag, which has been observed asserting black on a device demonstrably ` +
+        `showing content. The disagreement is the finding: treat this as a platform ` +
+        `data-quality fault, not a dark screen.`,
+    };
+  }
+
+  if (standing === "confirms") {
+    return {
+      ...base,
+      firing: true,
+      evidence:
+        `Screen is black ${held} (latest ${claimAt}), and the screen itself answered ` +
+        `is_blackscreen=true at ${verdictAt!.toISOString()} — the device confirms the ` +
+        `platform's claim. Higher confidence than an unverified black-screen alert: this ` +
+        `is the panel's own report, not just the platform flag.`,
+    };
+  }
+
   return {
     ...base,
     firing: true,
     evidence:
-      `${description} continuously for ${Math.round(run.spanSeconds / 60)} minutes ` +
-      `across ${run.readings} readings.`,
+      `Screen is black ${held} (latest ${claimAt}). UNVERIFIED by the device — ${why}. ` +
+      `The platform flag alone has been wrong on this fleet, so this may be a dark screen ` +
+      `or may be a bad flag; nothing here settles it.`,
   };
 }
 

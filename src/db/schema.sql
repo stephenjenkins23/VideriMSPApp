@@ -455,3 +455,27 @@ CREATE TABLE IF NOT EXISTS action_plans (
   output_tokens integer
 );
 CREATE INDEX IF NOT EXISTS action_plans_generated_idx ON action_plans (generated_at DESC);
+
+-- ── Screen-check verdicts (verification slow lane) ───────────────────────────
+-- The platform's `is_black_screen` flag has been observed asserting black on a
+-- panel that was demonstrably showing content. This table holds the panel's OWN
+-- answer, so the alerting engine can refuse to raise a critical it can refute —
+-- while staying pure: the lane asks the device, the engine only reads rows.
+-- Mirrored here because setup-db.sh applies only this file; see
+-- migrations/008-screen-verdict.sql for the full reasoning.
+--
+-- NULL everywhere means "not readable", never false. `device_is_black` NULL is
+-- the panel declining to answer, which is neither agreement nor refutation.
+CREATE TABLE IF NOT EXISTS device_screen_verdict (
+  device_id              text        NOT NULL REFERENCES devices (id) ON DELETE CASCADE,
+  observed_at            timestamptz NOT NULL DEFAULT now(),
+  platform_claim         boolean,
+  device_is_black        boolean,
+  device_is_showing_logo boolean,
+  verdict                text        NOT NULL,
+  detail                 text        NOT NULL DEFAULT '',
+  verbs_read             text[]      NOT NULL DEFAULT '{}',
+  PRIMARY KEY (device_id, observed_at)
+);
+CREATE INDEX IF NOT EXISTS device_screen_verdict_latest_idx
+  ON device_screen_verdict (device_id, observed_at DESC);

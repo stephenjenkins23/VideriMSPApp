@@ -504,6 +504,146 @@ export class Repository {
     );
   }
 
+  /**
+   * The next batch of devices whose black-screen CLAIM is worth verifying.
+   *
+   * Deliberately the narrowest target set in the codebase, because the cost of a
+   * wrong one is measured in wall-clock seconds. Two filters do the work:
+   *
+   *   reachable — the LATEST presence sample must be `online`, the same idiom
+   *     `listSettingsTargets` uses. Measured 2026-09-01: 8 of the 9 devices
+   *     flagged `is_black_screen = true` were offline, and an unanswered
+   *     demo_command verb costs ~11s of timeout against ~0.6s when answered. So
+   *     verifying the flagged fleet would spend ~90s to learn nothing, while
+   *     verifying the reachable subset costs about a second. Note this is the
+   *     STRICT reading of online — not `telemetrySlowLaneTargets`' "was online
+   *     in the last 30 minutes" — because a claim is only refutable by a panel
+   *     that can answer right now.
+   *
+   *   claiming black — the newest READABLE `is_black_screen` sample must be
+   *     true. There is nothing to verify otherwise, and `verifyBlackScreenClaim`
+   *     would return `no-claim`; spending a device command to hear that would be
+   *     pure waste. Samples where the flag is NULL are skipped rather than read
+   *     as false, so an unreadable flag never masquerades as "not black".
+   *
+   * Rotation is stalest-verdict-first (NULLS FIRST, so a never-verified device
+   * leads), and saving a verdict moves the device to the back of the queue for
+   * free — the same cursor trick as the telemetry and schedule lanes.
+   *
+   * `claimObservedAt` comes back with the target so the lane persists the exact
+   * sample it tested against, rather than re-reading a row that may have moved.
+   */
+  async screenVerifyTargets(batchSize: number): Promise<
+    Array<{
+      id: string;
+      deviceId: string;
+      deviceJid: string | null;
+      playerId: string | null;
+      name: string | null;
+      platformClaim: boolean;
+      claimObservedAt: Date;
+    }>
+  > {
+    const { rows } = await this.pool.query<{
+      id: string; device_id: string; device_jid: string | null;
+      player_id: string | null; name: string | null;
+      is_black_screen: boolean; claim_observed_at: Date;
+    }>(
+      `SELECT d.id, d.device_id, d.device_jid, d.player_id, d.name,
+              claim.is_black_screen, claim.observed_at AS claim_observed_at
+         FROM devices d
+         JOIN LATERAL (
+           SELECT presence FROM health_samples
+            WHERE device_id = d.id ORDER BY observed_at DESC LIMIT 1
+         ) hs ON hs.presence = 'online'
+         JOIN LATERAL (
+           SELECT is_black_screen, observed_at FROM health_samples
+            WHERE device_id = d.id AND is_black_screen IS NOT NULL
+            ORDER BY observed_at DESC LIMIT 1
+         ) claim ON claim.is_black_screen
+         LEFT JOIN LATERAL (
+           SELECT observed_at FROM device_screen_verdict v
+            WHERE v.device_id = d.id
+            ORDER BY observed_at DESC LIMIT 1
+         ) latest ON true
+        WHERE d.device_id IS NOT NULL
+          AND d.device_jid IS NOT NULL
+          AND d.retired_at IS NULL
+        ORDER BY latest.observed_at ASC NULLS FIRST, d.id
+        LIMIT $1`,
+      [batchSize],
+    );
+    return rows.map((r) => ({
+      id: r.id,
+      deviceId: r.device_id,
+      deviceJid: r.device_jid,
+      playerId: r.player_id,
+      name: r.name,
+      platformClaim: r.is_black_screen,
+      claimObservedAt: r.claim_observed_at,
+    }));
+  }
+
+  /** Persist one screen-check verdict (verification slow lane). */
+  async saveScreenVerdict(
+    deviceId: string,
+    v: {
+      platformClaim: boolean | null;
+      deviceIsBlack: boolean | null;
+      deviceIsShowingLogo: boolean | null;
+      verdict: string;
+      detail: string;
+      verbsRead: string[];
+      observedAt: Date;
+    },
+  ): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO device_screen_verdict
+         (device_id, observed_at, platform_claim, device_is_black,
+          device_is_showing_logo, verdict, detail, verbs_read)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+       ON CONFLICT (device_id, observed_at) DO NOTHING`,
+      [deviceId, v.observedAt, v.platformClaim, v.deviceIsBlack,
+       v.deviceIsShowingLogo, v.verdict, v.detail, v.verbsRead],
+    );
+  }
+
+  /**
+   * The newest verdict per device, for the alerting engine.
+   *
+   * One query for the whole fleet rather than one per device: the engine already
+   * loads every device's samples in a single call and must not turn into N+1
+   * round-trips just to learn whether a claim was checked. Retired devices are
+   * excluded, matching `loadEvaluationInput`.
+   *
+   * `detail` is deliberately NOT returned. The engine writes its own evidence
+   * sentence from the verdict and the two timestamps; carrying a second prose
+   * field would give the same alert two competing narratives.
+   */
+  async latestScreenVerdicts(): Promise<
+    Map<string, { verdict: string; observedAt: Date; deviceIsBlack: boolean | null }>
+  > {
+    const { rows } = await this.pool.query<{
+      device_id: string; verdict: string; observed_at: Date; device_is_black: boolean | null;
+    }>(
+      `SELECT d.id AS device_id, v.verdict, v.observed_at, v.device_is_black
+         FROM devices d
+         JOIN LATERAL (
+           SELECT verdict, observed_at, device_is_black
+             FROM device_screen_verdict
+            WHERE device_id = d.id
+            ORDER BY observed_at DESC LIMIT 1
+         ) v ON true
+        WHERE d.retired_at IS NULL`,
+    );
+    return new Map(
+      rows.map((r) => [
+        r.device_id,
+        { verdict: r.verdict, observedAt: r.observed_at, deviceIsBlack: r.device_is_black },
+      ]),
+    );
+  }
+
   /** Latest cached telemetry for one device, if any. */
   async latestTelemetry(deviceId: string): Promise<Record<string, unknown> | null> {
     const { rows } = await this.pool.query(

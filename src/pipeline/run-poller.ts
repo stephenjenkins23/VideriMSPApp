@@ -34,6 +34,10 @@ import {
   pollScheduleSlowLane,
   type ScheduleReader,
 } from "./pollers/schedule-slowlane.js";
+import {
+  pollScreenVerifySlowLane,
+  type ScreenVerifyTarget,
+} from "./pollers/screen-verify-slowlane.js";
 import { normalizeEvents } from "../intelligence/proof-of-play.js";
 import type { TelemetryRunner } from "../videri/telemetry.js";
 import type { PollerResult } from "./pollers/types.js";
@@ -57,6 +61,30 @@ const makeTelemetryRunner = (t: TelemetrySlowLaneTarget): TelemetryRunner => asy
     message?: string;
     responses?: Array<{ params?: { response_code?: string } }>;
         others?: unknown;
+  }>("messaging", "/messaging/sync_command", {
+    method: "POST",
+    body: {
+      device_id: t.deviceId,
+      device_jid: t.deviceJid,
+      player_id: t.playerId ?? t.deviceId,
+      command_name: "demo_command",
+      command_params: { arg },
+      message_id: crypto.randomUUID(),
+    },
+  });
+  const code = r.response_code ?? r.responses?.[0]?.params?.response_code ?? "UNKNOWN";
+  return { code, message: r.message ?? "", others: r.others };
+};
+
+/** Bind a TelemetryRunner to one screen-verify target — same read-only
+ *  demo_command sync_command as the telemetry lane and the screen-check route.
+ *  Separate factory only because the target shape differs. */
+const makeScreenRunner = (t: ScreenVerifyTarget): TelemetryRunner => async (arg) => {
+  const r = await http.request<{
+    response_code?: string;
+    message?: string;
+    responses?: Array<{ params?: { response_code?: string } }>;
+    others?: unknown;
   }>("messaging", "/messaging/sync_command", {
     method: "POST",
     body: {
@@ -231,6 +259,37 @@ if (!dryRun) {
         }
         const targets = await repo.scheduleSlowLaneTargets(20);
         record(await pollScheduleSlowLane(repo, targets, readSchedule, { concurrency: 8, log }));
+      },
+    },
+    {
+      // SLOW LANE. Asks the panels the alerting engine is about to raise a
+      // CRITICAL over whether they are actually black, and persists the verdict
+      // for the engine to READ — the engine never commands a device itself.
+      //
+      // Deliberately the smallest lane here. `screenVerifyTargets` selects only
+      // devices online RIGHT NOW whose newest readable flag claims black, which
+      // on 2026-09-01 was 1 of the 9 flagged devices; an unanswered verb costs
+      // ~11s of timeout, so a wider net buys silence. Batch 5 / concurrency 2
+      // means a worst case of roughly one minute.
+      //
+      // Opt-in behind ENABLE_SCREEN_VERIFY and left OFF: it issues device
+      // commands, and cadence against a live fleet is a human's call. Reads only
+      // — is_blackscreen and is_showing_logo change nothing on the device.
+      name: "screen-verify-slowlane",
+      intervalMs: 15 * 60_000,
+      runOnStart: false,
+      handler: async () => {
+        if (process.env["ENABLE_SCREEN_VERIFY"] !== "true") {
+          console.log("[screen-verify-slowlane] skipped — set ENABLE_SCREEN_VERIFY=true to enable");
+          return;
+        }
+        const targets = await repo.screenVerifyTargets(5);
+        record(
+          await pollScreenVerifySlowLane(repo, targets, makeScreenRunner, {
+            concurrency: 2,
+            log,
+          }),
+        );
       },
     },
     {

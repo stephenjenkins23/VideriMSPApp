@@ -15,7 +15,13 @@
 
 import type { Repository, OpenAlertRow } from "../db/repository.js";
 import { DEFAULT_RULES, requiredWindowSeconds, validateRule, isTierB, type AlertRule } from "./rules.js";
-import { evaluateDevice, type Verdict, type SampleRow, type DeviceRow } from "./evaluate.js";
+import {
+  evaluateDevice,
+  type Verdict,
+  type SampleRow,
+  type DeviceRow,
+  type ScreenVerdictRecord,
+} from "./evaluate.js";
 
 export interface AlertingResult {
   startedAt: Date;
@@ -26,6 +32,17 @@ export interface AlertingResult {
   refreshed: number;
   resolved: number;
   supersededResolved: number;
+  /**
+   * Claims the DEVICE ITSELF refuted this cycle — a critical we did not raise
+   * because we could disprove it (see evaluate.ts `applyScreenVerdict`).
+   *
+   * Counted and reported rather than left implicit: every one of these is a
+   * disagreement between the platform's flag and its own hardware, and a number
+   * that quietly grows is the signal that the platform's `is_black_screen` is
+   * broken fleet-wide rather than flaky on one panel. Free to compute — the
+   * verdicts are already in hand.
+   */
+  refutedClaims: number;
   /** Rules that could not be judged for any device, and why. */
   inertRules: Array<{ ruleId: string; reason: string; tierB: boolean }>;
   /**
@@ -89,6 +106,7 @@ export async function runAlerting(
     refreshed: 0,
     resolved: 0,
     supersededResolved: 0,
+    refutedClaims: 0,
     inertRules: [],
     collectionStale: null,
     errors: [],
@@ -144,9 +162,20 @@ export async function runAlerting(
   }
 
   const windowSeconds = requiredWindowSeconds(active);
-  const [input, openAlerts] = await Promise.all([
+  const [input, openAlerts, screenVerdicts] = await Promise.all([
     repo.loadEvaluationInput(windowSeconds, maxSamplesPerDevice),
     repo.loadOpenAlerts(),
+    // One fleet-wide read of the newest verdict per device, alongside the other
+    // two — never a per-device round trip, and never a device command. Guarded
+    // the same way `collectionAgeSeconds` is, so a repository (or stub) without
+    // the method degrades to "unverified everywhere", which is exactly the
+    // behaviour that predates this feature.
+    typeof repo.latestScreenVerdicts === "function"
+      ? repo.latestScreenVerdicts().catch((error) => {
+          result.errors.push(`latestScreenVerdicts: ${(error as Error).message}`);
+          return new Map<string, ScreenVerdictRecord>();
+        })
+      : Promise.resolve(new Map<string, ScreenVerdictRecord>()),
   ]);
 
   result.devicesEvaluated = input.size;
@@ -166,13 +195,20 @@ export async function runAlerting(
   for (const [deviceId, entry] of input) {
     const device: DeviceRow = entry.device;
     const samples: SampleRow[] = entry.samples;
-    const verdicts = evaluateDevice(active, { device, samples, now });
+    const verdicts = evaluateDevice(active, {
+      device,
+      samples,
+      now,
+      screenVerdict: screenVerdicts.get(deviceId) ?? null,
+    });
 
     const firingIds = new Set(verdicts.filter((v) => v.firing).map((v) => v.ruleId));
 
     for (const verdict of verdicts) {
       const rule = rulesById.get(verdict.ruleId);
       if (!rule) continue;
+
+      if (verdict.refuted) result.refutedClaims += 1;
 
       if (verdict.firing) judgeable.set(verdict.ruleId, true);
       else if (!judgeable.has(verdict.ruleId)) {
@@ -268,7 +304,8 @@ export async function runAlerting(
   log(
     `  alerting: ${result.devicesEvaluated} device(s) × ${result.rulesEvaluated} rule(s) — ` +
       `opened ${result.opened}, refreshed ${result.refreshed}, resolved ${result.resolved}` +
-      (result.supersededResolved > 0 ? ` (+${result.supersededResolved} superseded)` : ""),
+      (result.supersededResolved > 0 ? ` (+${result.supersededResolved} superseded)` : "") +
+      (result.refutedClaims > 0 ? ` (+${result.refutedClaims} claim(s) refuted by the device)` : ""),
   );
 
   const inertTierB = result.inertRules.filter((r) => r.tierB);
@@ -301,6 +338,15 @@ export function toPollerRun(result: AlertingResult) {
     telemetryYield: null,
     errors: [
       ...result.errors,
+      // Not an error, but poller_runs is the only per-cycle record we keep and a
+      // refuted claim must be findable after the fact — an alert that was never
+      // raised leaves no other trace.
+      ...(result.refutedClaims > 0
+        ? [
+            `${result.refutedClaims} black-screen claim(s) refuted by the device itself — ` +
+              `no critical raised; see device_screen_verdict`,
+          ]
+        : []),
       ...result.inertRules
         .filter((r) => r.tierB)
         .map((r) => `rule "${r.ruleId}" inert: ${r.reason}`),
