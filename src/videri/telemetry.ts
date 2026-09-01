@@ -471,3 +471,172 @@ export async function readDeviceNetwork(run: TelemetryRunner): Promise<DeviceNet
 
   return n;
 }
+
+// ─── screen state: is the panel actually black, per the panel itself ──────────
+
+/**
+ * The two verbs that let a DEVICE answer the question the platform's
+ * `is_black_screen` flag only asserts:
+ *
+ *   is_blackscreen  → "returns whether the display screen is black or not"
+ *   is_showing_logo → "returns whether or not the device is currently showing
+ *                      the logo either though AdSync or iCanvasPlayer"
+ *
+ * (verbatim from the demo_command help text; both are READS.)
+ *
+ * Why they exist here: on device 1000152 the platform reported
+ * `is_black_screen = true` in every status sample for 25+ minutes and our alert
+ * engine raised a CRITICAL from it — while an on-demand screenshot showed a live
+ * dashboard and telemetry read CPU 28% / RAM 25%. Repeating a platform claim is
+ * not verifying it, so we ask the panel.
+ *
+ * Their output shape is not documented anywhere. Captured live 2026-09-01 off a
+ * SparkBridge+, both in `message` with an EMPTY `others`:
+ *
+ *   is_blackscreen  → `{response_code:"SUCCESS", message:"Black Screen: true"}`
+ *   is_showing_logo → `{response_code:"SUCCESS", message:"Currently showing logo: false"}`
+ *
+ * Prose with a boolean on the end — the shape the sibling `is_showing_overlay`
+ * documents (`"returns overlay showing: True/False"`), and NOT a bare token or a
+ * `key=value`. One device class is not the fleet, so parseBooleanReply accepts
+ * every plausible form and returns null for everything else: a wrong guess here
+ * does not produce a slightly-off number, it flips the verdict on a CRITICAL
+ * alert. `commandMessage` is still used for the read, because a firmware that
+ * answers in JSON would otherwise look like hardware without the verb.
+ */
+
+/**
+ * The only value tokens read as a boolean.
+ *
+ * Deliberately excludes `1`/`0`: a bare "1" is indistinguishable from a count,
+ * an index or an error code, and `parseKeyEqNum`-style numeric replies are
+ * common on this shell. An unrecognised answer must stay `null` — "the device
+ * did not answer" is a supported outcome here (see the `unanswered` verdict),
+ * a guess is not.
+ */
+const BOOLEAN_WORDS = new Map<string, boolean>([
+  ["true", true], ["false", false], ["yes", true], ["no", false],
+]);
+
+const booleanWord = (v: unknown): boolean | null => {
+  if (typeof v === "boolean") return v;
+  if (typeof v !== "string") return null;
+  return BOOLEAN_WORDS.get(v.trim().toLowerCase().replace(/[.!]+$/, "")) ?? null;
+};
+
+/** "black screen", "is_black_screen", "blackScreen" all compare equal. */
+const canonicalKey = (s: string): string => s.toLowerCase().replace(/[^a-z0-9]/g, "");
+
+/** A key hint as a regex fragment, tolerant of the separator the device chose. */
+const keyPattern = (key: string): string =>
+  key.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean).join("[\\s_.-]*");
+
+/**
+ * A boolean out of one demo_command reply, or null.
+ *
+ * Accepts, in order of confidence:
+ *   1. JSON (the `others` shape routed through `commandMessage`) — a bare
+ *      `true`, or a named field, looked up by NAME;
+ *   2. `<named key><sep><boolean>` anywhere in the text, keys tried in the
+ *      caller's order — a reply naming several fields must be read by name, or
+ *      `blackscreen=false logo=true` reads as the wrong answer;
+ *   3. a bare `true`/`false`, or a single `<anything><sep><boolean>` that is the
+ *      WHOLE message — the start/end anchors are what keep step 3 from picking
+ *      the last field out of a multi-field reply it did not understand.
+ *
+ * Everything else — an empty body, "Unknown command", `logo=videri.png`, a
+ * number — is null.
+ */
+export function parseBooleanReply(message: string, keyHints: string[]): boolean | null {
+  const text = message.trim();
+  if (text === "") return null;
+
+  // 1. JSON, including the `{message_json:{…}}` envelope the JSON verbs use.
+  try {
+    const payload: unknown = JSON.parse(text);
+    const direct = booleanWord(payload);
+    if (direct !== null) return direct;
+    if (payload !== null && typeof payload === "object" && !Array.isArray(payload)) {
+      const outer = payload as Record<string, unknown>;
+      const inner = outer["message_json"];
+      const j = (inner !== null && typeof inner === "object" && !Array.isArray(inner)
+        ? inner
+        : outer) as Record<string, unknown>;
+      // The verb's own key first, then the generic carriers the shell uses for
+      // a scalar answer.
+      for (const key of [...keyHints, "message", "value", "result", "state"]) {
+        const hit = Object.entries(j).find(([name]) => canonicalKey(name) === canonicalKey(key));
+        const b = hit ? booleanWord(hit[1]) : null;
+        if (b !== null) return b;
+      }
+      // A JSON object that named none of them is some other payload, not an
+      // answer to this question.
+      return null;
+    }
+  } catch {
+    // Not JSON — fall through to the text shapes.
+  }
+
+  // 2. A named field, by name.
+  for (const key of keyHints) {
+    const m = new RegExp(`(?:^|[^a-z0-9])${keyPattern(key)}[\\s_.-]*[:=]{1,2}\\s*([a-z]+)`, "i")
+      .exec(text);
+    const b = m ? booleanWord(m[1]!) : null;
+    if (b !== null) return b;
+  }
+
+  // 3. The whole message is the answer.
+  const bare = booleanWord(text);
+  if (bare !== null) return bare;
+  // `[\w .()\-]` excludes `:` and `=`, so a reply carrying a SECOND `key=value`
+  // cannot match here — it fails to null instead of answering from the wrong field.
+  const whole = /^[\w .()-]{0,60}?[:=]{1,2}\s*([A-Za-z]+)\s*[.!]?$/.exec(text);
+  return whole ? booleanWord(whole[1]!) : null;
+}
+
+/** `is_blackscreen` → is the panel black, per the panel. */
+export function parseIsBlackscreen(message: string): boolean | null {
+  return parseBooleanReply(message, [
+    "is_blackscreen", "blackscreen", "black_screen", "black", "screen_black",
+  ]);
+}
+
+/** `is_showing_logo` → is the panel showing the Videri logo instead of content. */
+export function parseIsShowingLogo(message: string): boolean | null {
+  return parseBooleanReply(message, [
+    "is_showing_logo", "showing_logo", "logo_showing", "showing", "logo",
+  ]);
+}
+
+export interface ScreenStateReading {
+  /** The panel's own answer to "are you black". null = it did not answer. */
+  isBlack: boolean | null;
+  isShowingLogo: boolean | null;
+  /** Which verbs answered — so a null reads as "not answered", never as "no". */
+  read: string[];
+}
+
+/**
+ * Ask the device what is on its screen. Two commands, concurrent, each
+ * independently optional — same structure and same reasons as
+ * `readDeviceTelemetry`: the device serialises internally, so issuing both at
+ * once costs nothing, and a device that cannot answer one still yields the other.
+ *
+ * Reads only. Nothing here changes a pixel.
+ */
+export async function readScreenState(run: TelemetryRunner): Promise<ScreenStateReading> {
+  const s: ScreenStateReading = { isBlack: null, isShowingLogo: null, read: [] };
+
+  const [black, logo] = await Promise.all([run("is_blackscreen"), run("is_showing_logo")]);
+
+  if (ok(black)) {
+    const v = parseIsBlackscreen(commandMessage(black));
+    if (v !== null) { s.isBlack = v; s.read.push("is_blackscreen"); }
+  }
+  if (ok(logo)) {
+    const v = parseIsShowingLogo(commandMessage(logo));
+    if (v !== null) { s.isShowingLogo = v; s.read.push("is_showing_logo"); }
+  }
+
+  return s;
+}

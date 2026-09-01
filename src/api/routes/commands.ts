@@ -30,8 +30,10 @@ import type { ApiContext } from "../server.js";
 import { envelope } from "../freshness.js";
 import { applyBrightness, applyBrightnessLive, type CommandRunner } from "../../videri/brightness.js";
 import {
-  readDeviceTelemetry, readDeviceNetwork, commandMessage, type TelemetryRunner,
+  readDeviceTelemetry, readDeviceNetwork, readScreenState, commandMessage,
+  type TelemetryRunner,
 } from "../../videri/telemetry.js";
+import { verifyBlackScreenClaim } from "../../intelligence/screen-verify.js";
 
 type Risk = "read" | "disruptive" | "unverified";
 
@@ -484,6 +486,112 @@ export async function registerCommandRoutes(app: FastifyInstance, ctx: ApiContex
     // honest report, and it is not an error on our side.
     return envelope(
       { ...network, live: true, observedAt: new Date().toISOString(), durationMs: Date.now() - startedAt },
+      freshness,
+    );
+  });
+
+  /**
+   * Verify the platform's black-screen claim against the panel itself.
+   *
+   * The alert engine raises a CRITICAL "Screen is black" from
+   * `health_samples.is_black_screen`. On 2026-09-01 that flag was true in every
+   * sample for 25+ minutes on device 1000152 while a fresh screenshot showed a
+   * live dashboard and telemetry read CPU 28% / RAM 25% — four devices
+   * fleet-wide were in the same state. Restating an upstream flag is not
+   * evidence, so this endpoint asks the device (`is_blackscreen`,
+   * `is_showing_logo`) and reports whether the two agree.
+   *
+   * Built exactly like `/telemetry` above — same runner, same gates, same
+   * envelope — with two deliberate differences:
+   *
+   *  - no cached fallback. A verification is worth nothing if half of it is a
+   *    stale reading, so with no Videri client the answer is 503, not a guess;
+   *  - a silent device is a 200 carrying `verdict: "unanswered"`. That is the
+   *    honest outcome of a check that could not be completed, and the one thing
+   *    it must never become is a confirmation by default.
+   */
+  app.get<{ Params: { id: string } }>("/api/devices/:id/screen-check", async (request, reply) => {
+    if (!ctx.videri) {
+      return reply.code(503).send({
+        error: "screen_check_unavailable",
+        message:
+          "This server has no Videri credentials, so it cannot ask the device " +
+          "anything — and a verification made only of our cached copy of the " +
+          "platform's claim would verify nothing.",
+      });
+    }
+    const device = await ctx.queries.device(request.params.id);
+    if (!device) return reply.code(404).send({ error: "not_found", message: "No such device." });
+    const target = await ctx.repo.commandTarget(request.params.id);
+    if (!target || !target.deviceJid) {
+      return reply.code(409).send({
+        error: "not_addressable",
+        message: "This device has no XMPP JID recorded, so it cannot be commanded.",
+      });
+    }
+
+    // A transport failure IS the device not answering, which is precisely what
+    // the `unanswered` verdict is for — so it is caught here and reported as
+    // silence rather than thrown into a 500 that would hide the platform claim
+    // we already have. The reason is kept and surfaced so "we could not ask" is
+    // never mistaken for "we asked and it said nothing".
+    let transportError: string | null = null;
+    const run: TelemetryRunner = async (arg) => {
+      try {
+        const r = await ctx.videri!.request<{
+          response_code?: string; message?: string;
+          responses?: Array<{ params?: { response_code?: string } }>;
+          others?: unknown;
+        }>("messaging", "/messaging/sync_command", {
+          method: "POST",
+          body: {
+            device_id: target.deviceId, device_jid: target.deviceJid,
+            player_id: target.playerId ?? target.deviceId,
+            command_name: "demo_command", command_params: { arg },
+            message_id: crypto.randomUUID(),
+          },
+        });
+        const code = r.response_code ?? r.responses?.[0]?.params?.response_code ?? "UNKNOWN";
+        return { code, message: r.message ?? "", others: r.others };
+      } catch (error) {
+        transportError ??= (error as Error).message;
+        return { code: "REQUEST_FAILED", message: "" };
+      }
+    };
+
+    const startedAt = Date.now();
+    const screen = await readScreenState(run);
+    const deviceObservedAt = new Date().toISOString();
+
+    // The platform's LATEST claim is the newest status sample we hold — the same
+    // row the drawer and the alert engine read, so a verdict here can never
+    // disagree with the alert it is explaining.
+    const platform = {
+      isBlackScreen: device.latest.isBlackScreen,
+      showingLogo: device.latest.showingLogo,
+      observedAt: device.latest.observedAt,
+    };
+    const { verdict, detail } = verifyBlackScreenClaim(
+      { isBlackScreen: platform.isBlackScreen, observedAt: platform.observedAt },
+      { isBlack: screen.isBlack, isShowingLogo: screen.isShowingLogo, observedAt: deviceObservedAt },
+    );
+
+    const freshness = await ctx.freshness();
+    return envelope(
+      {
+        platform,
+        device: {
+          isBlack: screen.isBlack,
+          isShowingLogo: screen.isShowingLogo,
+          read: screen.read,
+          observedAt: deviceObservedAt,
+          /** Non-null only when the command could not be sent at all. */
+          error: transportError,
+        },
+        verdict,
+        detail,
+        durationMs: Date.now() - startedAt,
+      },
       freshness,
     );
   });
