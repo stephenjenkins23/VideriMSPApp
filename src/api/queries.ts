@@ -909,18 +909,74 @@ export class ReadQueries {
   }
 
   /** Fleet-wide telemetry availability — drives the "why is this empty" UI. */
+  /**
+   * Which hardware inputs we can actually read, per device.
+   *
+   * THIS DRIVES A CUSTOMER-FACING CLAIM, so the window matters more than it
+   * looks. It previously counted non-null fields in `health_samples` alone
+   * within ONE HOUR. But the batch metrics feed carries no hardware fields at
+   * all, and the per-device values live in `device_telemetry`, written by a slow
+   * lane that sweeps roughly every two hours — so the count was a structural
+   * 0-of-249 forever, and the console turned that windowing artefact into
+   * "these have no data source on this platform, so rules reading them can never
+   * fire". On the same page load the Overview tile read "Hardware telemetry 44%
+   * of fleet" and the trends engine was fitting storage slopes for 107 devices.
+   *
+   * That is exactly the mistake this project exists not to make: concluding the
+   * platform cannot do something from the way we happened to look. So this now
+   * unions BOTH sources over each one's own realistic window, exactly as
+   * `computeFleetSnapshot` already did.
+   *
+   * The two schemas name the same capabilities differently, which is why the
+   * mapping is written out rather than inferred:
+   *   ram_percent      <- device_telemetry.ram_used_percent
+   *   storage_percent  <- device_telemetry.storage_used_percent
+   *   wifi_signal_dbm  <- device_telemetry.rssi_dbm
+   *   ntp_sync_percent <- device_telemetry.ntp_offset_ms
+   * `temperature_c` and `playback_quality` have NO column in device_telemetry
+   * and no verb that returns them, so they stay false there — those two are the
+   * genuinely sourceless fields, and after this fix they are the only ones the
+   * console should be describing as such.
+   *
+   * The denominator is the ACTIVE fleet, not "devices we happen to have a row
+   * for", so a thin sweep reads as low coverage rather than as full coverage of
+   * a small sample.
+   */
   async telemetryAvailability(): Promise<Record<string, { readable: number; total: number }>> {
     const { rows } = await this.pool.query<Record<string, string>>(
-      `SELECT COUNT(DISTINCT device_id)::text AS total,
-              COUNT(DISTINCT device_id) FILTER (WHERE cpu_percent IS NOT NULL)::text        AS cpu_percent,
-              COUNT(DISTINCT device_id) FILTER (WHERE ram_percent IS NOT NULL)::text        AS ram_percent,
-              COUNT(DISTINCT device_id) FILTER (WHERE temperature_c IS NOT NULL)::text      AS temperature_c,
-              COUNT(DISTINCT device_id) FILTER (WHERE wifi_signal_dbm IS NOT NULL)::text    AS wifi_signal_dbm,
-              COUNT(DISTINCT device_id) FILTER (WHERE ntp_sync_percent IS NOT NULL)::text   AS ntp_sync_percent,
-              COUNT(DISTINCT device_id) FILTER (WHERE storage_percent IS NOT NULL)::text    AS storage_percent,
-              COUNT(DISTINCT device_id) FILTER (WHERE playback_quality IS NOT NULL)::text   AS playback_quality
-         FROM health_samples
-        WHERE observed_at > now() - interval '1 hour'`,
+      `WITH readings AS (
+         SELECT device_id,
+                cpu_percent      IS NOT NULL AS cpu_percent,
+                ram_percent      IS NOT NULL AS ram_percent,
+                temperature_c    IS NOT NULL AS temperature_c,
+                wifi_signal_dbm  IS NOT NULL AS wifi_signal_dbm,
+                ntp_sync_percent IS NOT NULL AS ntp_sync_percent,
+                storage_percent  IS NOT NULL AS storage_percent,
+                playback_quality IS NOT NULL AS playback_quality
+           FROM health_samples
+          WHERE observed_at > now() - interval '1 hour'
+         UNION ALL
+         SELECT device_id,
+                cpu_percent          IS NOT NULL,
+                ram_used_percent     IS NOT NULL,
+                FALSE,
+                rssi_dbm             IS NOT NULL,
+                ntp_offset_ms        IS NOT NULL,
+                storage_used_percent IS NOT NULL,
+                FALSE
+           FROM device_telemetry
+          WHERE observed_at > now() - interval '3 hours'
+       )
+       SELECT (SELECT COUNT(*)::text FROM devices WHERE retired_at IS NULL) AS total,
+              COUNT(DISTINCT device_id) FILTER (WHERE cpu_percent)::text      AS cpu_percent,
+              COUNT(DISTINCT device_id) FILTER (WHERE ram_percent)::text      AS ram_percent,
+              COUNT(DISTINCT device_id) FILTER (WHERE temperature_c)::text    AS temperature_c,
+              COUNT(DISTINCT device_id) FILTER (WHERE wifi_signal_dbm)::text  AS wifi_signal_dbm,
+              COUNT(DISTINCT device_id) FILTER (WHERE ntp_sync_percent)::text AS ntp_sync_percent,
+              COUNT(DISTINCT device_id) FILTER (WHERE storage_percent)::text  AS storage_percent,
+              COUNT(DISTINCT device_id) FILTER (WHERE playback_quality)::text AS playback_quality
+         FROM readings
+        WHERE device_id IN (SELECT id FROM devices WHERE retired_at IS NULL)`,
     );
     const row = rows[0] ?? {};
     const total = Number(row["total"] ?? 0);
