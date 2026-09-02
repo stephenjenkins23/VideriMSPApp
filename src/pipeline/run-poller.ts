@@ -113,7 +113,18 @@ const readSchedule: ScheduleReader = async (t, date) => {
   return normalizeEvents(raw);
 };
 
-/** Records every run and surfaces failures without letting them escape. */
+/**
+ * Records every run and surfaces failures without letting them escape.
+ *
+ * CALLERS MUST AWAIT THIS. Four gated lanes called it as a bare statement, so the
+ * handler resolved before the poller_runs insert landed. Harmless in daemon mode,
+ * but `--once` is the mode DEPLOY.md recommends for cron, and there closePool()
+ * runs immediately after the pass — so the insert raced teardown and record()
+ * swallowed the error. A lost run row is not cosmetic: pipeline-health reads
+ * poller_runs, so a dropped record makes a lane that DID run look never-run or
+ * stalled. It would have manufactured the exact fault the self-check exists to
+ * report, and for the data-usage lane it would also have re-opened the 20h gate.
+ */
 async function record(result: PollerResult): Promise<void> {
   try {
     await repo.recordPollerRun(result);
@@ -217,7 +228,7 @@ if (!dryRun) {
           return;
         }
         const targets = await repo.listSettingsTargets(true);
-        record(await pollDeviceSettings(http, repo, targets, { log }));
+        await record(await pollDeviceSettings(http, repo, targets, { log }));
       },
     },
     {
@@ -237,7 +248,7 @@ if (!dryRun) {
           return;
         }
         const targets = await repo.telemetrySlowLaneTargets(10);
-        record(await pollTelemetrySlowLane(repo, targets, makeTelemetryRunner, { concurrency: 4, log }));
+        await record(await pollTelemetrySlowLane(repo, targets, makeTelemetryRunner, { concurrency: 4, log }));
       },
     },
     {
@@ -259,7 +270,7 @@ if (!dryRun) {
           return;
         }
         const targets = await repo.scheduleSlowLaneTargets(20);
-        record(await pollScheduleSlowLane(repo, targets, readSchedule, { concurrency: 8, log }));
+        await record(await pollScheduleSlowLane(repo, targets, readSchedule, { concurrency: 8, log }));
       },
     },
     {
@@ -285,7 +296,7 @@ if (!dryRun) {
           return;
         }
         const targets = await repo.screenVerifyTargets(5);
-        record(
+        await record(
           await pollScreenVerifySlowLane(repo, targets, makeScreenRunner, {
             concurrency: 2,
             log,

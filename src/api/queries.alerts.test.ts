@@ -420,14 +420,19 @@ test("deviceIds and severity compose: both statements carry both parameters in o
   assert.deepEqual(fake.listSql().values, ["critical", ["d1", "d2"]]);
 });
 
-test("an empty deviceIds array adds no predicate rather than an always-false one", async () => {
+test("DECIDED: an empty deviceIds array matches NOTHING, not everything", async () => {
+  // This test previously pinned the opposite (an empty array dropped the filter),
+  // flagged as an open design question rather than a bug. It is now decided the
+  // other way: a filter whose entire job is to NARROW must not fail open. The
+  // dormant drilldown builds its query from rollup.drilldown.deviceIds, so an
+  // empty list rendering every open alert is the wrong direction to fail in.
   const fake = fakePostgres({
     alerts: [alert({ id: "a", device_id: "d1" })],
     devices: [device("d1")],
   });
   const result = await new ReadQueries(fake.pool).alerts({ ...base, deviceIds: [] });
-  assert.ok(!/ANY\(/i.test(whereClause(fake.countSql().sql)));
-  assert.equal(result.totalItems, 1);
+  assert.ok(/ANY\(/i.test(whereClause(fake.countSql().sql)), "the predicate must still be applied");
+  assert.equal(result.totalItems, 0, "an explicit filter matching nothing returns nothing");
 });
 
 test("deviceIds is parameterised, so an id carrying SQL is data and not syntax", async () => {
@@ -496,11 +501,13 @@ test("empty entries are dropped rather than binding an empty-string id", async (
   assert.deepEqual(boundIds(fake), ["dark-1", "dark-2", "dark-3"]);
 });
 
-test("a deviceIds list of nothing but separators drops the filter instead of erroring", async () => {
+test("DECIDED: a deviceIds list of nothing but separators matches nothing, and does not error", async () => {
   const { status, fake } = await inject(encodeURI("deviceIds=, ,,"));
-  assert.equal(status, 200);
-  // No array parameter at all: the request is treated as unfiltered.
-  assert.ok(!fake.countSql().values.some((v) => Array.isArray(v)));
+  assert.equal(status, 200, "garbage separators are not a client error");
+  // An empty array IS still bound, so the predicate is present and matches
+  // nothing — the request is explicitly filtered, not unfiltered.
+  const bound = fake.countSql().values.find((v) => Array.isArray(v));
+  assert.deepEqual(bound, [], "an empty id array must be bound, not dropped");
 });
 
 test("the deviceIds list is CAPPED at 500 — truncated, never passed unbounded", async () => {

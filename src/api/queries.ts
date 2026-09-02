@@ -471,7 +471,12 @@ export class ReadQueries {
     }
     // Same NOT-EXISTS discipline as above: this predicate must work in the
     // COUNT query, which has no devices join.
-    if (filters.deviceIds && filters.deviceIds.length > 0) {
+    if (filters.deviceIds) {
+      // An explicitly supplied filter that resolves to NOTHING must match
+      // nothing — not everything. `deviceIds=,%20,,` passes the route's length
+      // check and transforms to [], and treating that as "no filter" made the
+      // dormant drilldown render every open alert. Failing open is the wrong
+      // direction for a filter whose whole job is to narrow.
       params.push(filters.deviceIds);
       where.push(`a.device_id = ANY($${params.length}::text[])`);
     }
