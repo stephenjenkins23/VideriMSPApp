@@ -2613,7 +2613,12 @@ function tabNetwork(d) {
         ${(() => {
           const nt = S.dev._net;
           if (!isReachable(d))
-            return `<div class="kv"><span class="v na">The screen is offline, so it cannot be asked</span></div>`;
+            // References the constant rather than repeating the sentence. It was
+            // byte-identical, so nothing was wrong on screen — but this is the
+            // very block that used to carry its own copy of the offline
+            // decision, and a reword of the constant would have left two
+            // different sentences for one fact.
+            return `<div class="kv"><span class="v na">${OFFLINE_UNASKED}</span></div>`;
           if (nt === undefined)
             return `<div class="kv"><span class="v na">Reading from the device&#8230;</span></div>`;
           // The device reports Android's literal placeholder when nothing is
