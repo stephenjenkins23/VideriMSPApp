@@ -150,6 +150,24 @@ export interface AlertHygiene {
     byRule: RuleBreakdown[];
     oldestOpenedAt: string | null;
     deviceIds: string[];
+    /**
+     * The ALERT ids in this band — the authoritative classification.
+     *
+     * `deviceIds` is not sufficient to reproduce the band, and a client that
+     * tried would get it wrong: a critical or high alert stays in the INCIDENT
+     * list even when its device is dormant (see NEVER_ABSORBED), so the dormant
+     * device set is deliberately a superset of the dormant alert set. A UI
+     * filtering on devices swept those held-back criticals into the dormant band
+     * and defeated the safety valve. Publishing alert ids means the client never
+     * has to know the rule, so the rule cannot drift out from under it.
+     */
+    alertIds: string[];
+    /**
+     * Alerts on a dormant device that were KEPT in the incident list, because
+     * their severity is never absorbed. Exposed so the decision is auditable
+     * rather than merely described in a note.
+     */
+    heldBackAlertIds: string[];
   };
   rollup: DormancyRollup | null;
   /**
@@ -314,7 +332,14 @@ export function classifyOpenAlerts(
     totalOpen: alerts.length,
     excludedRetiredAlerts: retiredAlertCount,
     incidents,
-    dormant: { ...dormantBand, byRule, oldestOpenedAt: oldestOpenedAt?.toISOString() ?? null, deviceIds },
+    dormant: {
+      ...dormantBand,
+      byRule,
+      oldestOpenedAt: oldestOpenedAt?.toISOString() ?? null,
+      deviceIds,
+      alertIds: dormantAlerts.map((a) => a.id),
+      heldBackAlertIds: heldBack.map((a) => a.id),
+    },
     rollup,
     chips,
     notes: buildNotes({

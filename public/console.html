@@ -1516,13 +1516,32 @@ const isDormantAlert = (a, dormIds) =>
  * With hygiene unavailable the dormant id set is empty, so everything lands in
  * `incidents` and the view degrades to the old single list, not to a blank one.
  */
+/**
+ * The one band split. Header, chips, rows and pills all consume this, so they
+ * cannot re-derive it independently and disagree.
+ *
+ * PREFERS the server's per-alert classification (`dormant.alertIds`). The client
+ * must not own this rule: a critical or high alert stays in the INCIDENT list
+ * even when its device is dormant, so the dormant DEVICE set is a superset of
+ * the dormant ALERT set. Re-deriving from devices swept those held-back
+ * criticals into the dormant band and silently defeated the safety valve.
+ * The device-based path is kept only as a fallback for a payload that predates
+ * `alertIds`, and it applies the same exemption so the fallback is not a
+ * different product.
+ */
 function alertBands() {
   const dormIds = dormantIdSet();
+  const serverIds = (S.hyg && S.hyg.dormant && Array.isArray(S.hyg.dormant.alertIds))
+    ? new Set(S.hyg.dormant.alertIds)
+    : null;
+  const inDormantBand = serverIds
+    ? (a) => serverIds.has(a.id)
+    : (a) => isDormantAlert(a, dormIds);
   const incidents = [];
   const dormant = [];
-  for (const a of S.alerts) (isDormantAlert(a, dormIds) ? dormant : incidents).push(a);
+  for (const a of S.alerts) (inDormantBand(a) ? dormant : incidents).push(a);
   const band = S.aband === "dormant" ? "dormant" : "incidents";
-  return { band, dormIds, incidents, dormant,
+  return { band, dormIds, incidents, dormant, authoritative: serverIds !== null,
            scoped: band === "dormant" ? dormant : incidents };
 }
 
