@@ -24,12 +24,23 @@
  * intelligence/screen-state.ts. They used to read the stored `brightness`
  * setting, which is the scheduled/base value, and told operators to "restore
  * brightness" on 21 demonstrably lit screens. See that module's header.
+ *
+ * "The screen is showing nothing" is not one symptom, so it does not get one
+ * rule. `blankCause()` classifies WHY the screen is blank and this engine routes
+ * each cause to the action that can actually change it — a dark panel inside its
+ * window to the brightness restore, a LIT panel rendering black to a
+ * content/player fix with brightness explicitly SUPPRESSED (it is already at
+ * 255, so the write would be a no-op on a device that genuinely has a fault),
+ * and two contradicting readings of panel power to a data-quality item rather
+ * than a device action. Exactly one such recommendation per device, so a screen
+ * never appears twice under two different causes.
  */
 
 import {
+  blankCause,
   darknessVerdict,
-  describeDarkEvidence,
   describeOnWindow,
+  isReachableStatus,
 } from "./screen-state.js";
 
 /** The assembled per-device facts the engine reasons over. Honest nulls throughout. */
@@ -59,8 +70,24 @@ export interface DeviceView {
   firmwareBehind: boolean;
   /** Latest screen-state reading. Any field null = unread, not "fine". */
   screen: {
+    /**
+     * `is_black_screen` — a RENDERED-CONTENT flag, NOT panel power. Verified
+     * 2026-09-02: of 26 reachable panels demonstrably powered off, zero carry it.
+     * So a device it flags is by construction a LIT panel rendering black, and a
+     * panel dark because its backlight is off is invisible to it.
+     */
     isBlackScreen: boolean | null;
     showingLogo: boolean | null;
+    /**
+     * `is_screen_on` — the status feed's OWN view of panel power, and the second
+     * opinion that lets us catch it contradicting `display_on` (5 devices do).
+     *
+     * Optional rather than required: it was added to this projection after the
+     * fact and older callers legitimately do not carry it. Absent and `null` mean
+     * the same thing — "no second opinion" — and NEITHER is ever read as `false`
+     * (screen-state.ts normalises it on entry).
+     */
+    isScreenOn?: boolean | null;
     nowPlayingId: string | null;
   };
   /**
@@ -120,7 +147,7 @@ export interface Recommendation {
   id: string;
   deviceIds: string[];
   deviceLabel: string;
-  category: "display" | "content" | "telemetry" | "compliance";
+  category: "display" | "content" | "telemetry" | "compliance" | "data-quality";
   symptom: string;
   action: string;
   rationale: string;
@@ -168,7 +195,7 @@ const SEVERITY_RANK: Record<Severity, number> = { critical: 0, high: 1, medium: 
  * them. Every rule gates on this: a recommendation implies we could do something
  * about it, which requires a device we can currently reach.
  */
-const isOnline = (status: string): boolean => status !== "offline" && status !== "unknown";
+const isOnline = isReachableStatus;
 
 const labelOf = (d: DeviceView): string => d.name ?? d.id;
 
@@ -185,107 +212,151 @@ export function recommendationsFor(devices: DeviceView[], now: Date = new Date()
 
     const label = labelOf(d);
     // Live panel state, judged against the device's own on/off schedule in its
-    // own timezone. Four outcomes, and only ONE of them is a fault.
+    // own timezone. Four outcomes, and only ONE of them is a fault. Kept as the
+    // gate on the brightness-DRIFT rule below: the blank-cause classifier owns
+    // which display/content recommendation fires, while this owns whether the
+    // stored brightness value is worth pushing, and they are different questions
+    // (a lit panel is not a drift to fix; a scheduled-off panel is a schedule to
+    // leave alone).
     const verdict = darknessVerdict(d, now);
     // A dark panel explains a black capture, and a scheduled-off panel explains
     // it just as well as a faulty one. Either way the darkness is accounted for,
-    // so the content-fault and brightness-drift rules stand down rather than
-    // telling an operator to re-push content at an off screen.
+    // so the brightness-drift rule stands down rather than fighting it.
     const darknessExplained = verdict === "dark-unexpected" || verdict === "dark-expected";
 
-    // US-1.2 — Dark panel while online, and NOT explained by its schedule →
-    // one-click restore. `lit` and `unknown` produce nothing at all: the whole
-    // point of the verdict is that we no longer fire on the stored brightness
-    // value, which is the scheduled base and is 0 on plenty of lit screens.
-    if (verdict === "dark-unexpected") {
-      const evidence = describeDarkEvidence(d) ?? "the panel reports no light output";
-      const window = describeOnWindow(d);
-      const scheduled = d.brightnessScheduleEnabled === true;
-      out.push({
-        id: `${d.id}::display-off`,
-        deviceIds: [d.id],
-        deviceLabel: label,
-        category: "display",
-        symptom: scheduled
-          ? `Display is dark inside its scheduled ON window — ${evidence}.`
-          : `Display is dark with no schedule to explain it — ${evidence}.`,
-        action: "Restore brightness",
-        rationale:
-          (scheduled && window
-            ? `Scheduled on ${window}, and we are inside that window, but ${evidence}. `
-            : scheduled
-              ? `A brightness schedule is enabled but its window is unreadable; ${evidence}. `
-              : `No brightness schedule is enabled, so nothing should be holding the panel dark; ${evidence}. `) +
-          "We hold the verified brightness write (preflight → verify → rollback), so " +
-          "this is a safe one-click restore.",
-        severity: "high",
-        confidence: 0.9,
-        kind: "auto-safe",
-      });
-    }
+    // WHY is this screen showing nothing? One classification per device
+    // (screen-state.ts `blankCause`), and exactly ONE display/content
+    // recommendation follows from it — so a device can never surface twice under
+    // two causes that want opposite actions.
+    const blank = blankCause(d, now);
+    const evidence = blank.evidence.join(" and ");
 
-    // Dark BECAUSE its schedule says so. Informational only — never auto-safe,
-    // never above `low`, and worded so it cannot be read as a fault: an operator
-    // staring at a black screen still needs to be told why it is black, and the
-    // answer here is "because you asked it to be".
-    if (verdict === "dark-expected") {
-      const window = describeOnWindow(d);
-      out.push({
-        id: `${d.id}::display-off-scheduled`,
-        deviceIds: [d.id],
-        deviceLabel: label,
-        category: "display",
-        symptom: window
-          ? `Display is off per its own schedule (on ${window}) — working as configured.`
-          : "Display is off per its own brightness schedule — working as configured.",
-        action: "No action needed. Change the schedule only if this screen should be lit now.",
-        rationale:
-          "The panel is dark and the device's brightness schedule puts it outside its ON " +
-          "window, which accounts for it. Not a fault, and NOT a one-click: forcing " +
-          "brightness here would override a working schedule.",
-        severity: "low",
-        confidence: 0.85,
-        kind: "manual",
-      });
-    }
+    switch (blank.cause) {
+      // US-1.2 — the backlight is off INSIDE its ON window, or with no schedule
+      // to explain it. The one and only cause a brightness write can address,
+      // which is why `brightnessActionApplicable` is asserted rather than
+      // assumed: if this branch ever stops being the brightness case, the
+      // assertion fails loudly instead of quietly shipping a no-op action.
+      case "panel-off-unexpected": {
+        const scheduled = d.brightnessScheduleEnabled === true;
+        out.push({
+          id: `${d.id}::display-off`,
+          deviceIds: [d.id],
+          deviceLabel: label,
+          category: "display",
+          symptom: scheduled
+            ? `Display is dark inside its scheduled ON window — ${evidence}.`
+            : `Display is dark with no schedule to explain it — ${evidence}.`,
+          action: "Restore brightness",
+          rationale:
+            `${blank.rationale} ` +
+            "We hold the verified brightness write (preflight → verify → rollback), so " +
+            "this is a safe one-click restore.",
+          severity: "high",
+          confidence: 0.9,
+          kind: "auto-safe",
+        });
+        break;
+      }
 
-    // US-1.3 — Black screen while ONLINE → content/player fault. Suppressed when
-    // the darkness is already explained (dark panel, faulty or scheduled).
-    if (d.screen.isBlackScreen === true && !darknessExplained) {
-      out.push({
-        id: `${d.id}::black-screen`,
-        deviceIds: [d.id],
-        deviceLabel: label,
-        category: "content",
-        symptom: "Screen is black while the device is online.",
-        action:
-          "Capture a fresh frame to confirm; if still black, this is a content/player " +
-          "fault — re-push content. (Reboot is device-rejected on this hardware.)",
-        rationale:
-          "Online + black points at content or the player, not the network. A stale " +
-          "black flag is worth confirming with a live capture before re-pushing.",
-        severity: "high",
-        confidence: 0.7,
-        kind: "manual",
-      });
-    }
+      // Dark BECAUSE its schedule says so. Informational only — never auto-safe,
+      // never above `low`, and worded so it cannot be read as a fault: an
+      // operator staring at a black screen still needs to be told why it is
+      // black, and the answer here is "because you asked it to be".
+      case "panel-off-expected": {
+        const window = describeOnWindow(d);
+        out.push({
+          id: `${d.id}::display-off-scheduled`,
+          deviceIds: [d.id],
+          deviceLabel: label,
+          category: "display",
+          symptom: window
+            ? `Display is off per its own schedule (on ${window}) — working as configured.`
+            : "Display is off per its own brightness schedule — working as configured.",
+          action: "No action needed. Change the schedule only if this screen should be lit now.",
+          rationale: blank.rationale,
+          severity: "low",
+          confidence: 0.85,
+          kind: "manual",
+        });
+        break;
+      }
 
-    // US-1.4 — Logo fallback → no content resolved.
-    if (d.screen.showingLogo === true) {
-      out.push({
-        id: `${d.id}::logo-fallback`,
-        deviceIds: [d.id],
-        deviceLabel: label,
-        category: "content",
-        symptom: "Showing the Videri logo — no content resolved to play.",
-        action: "Check the playlist / content assignment for this device or its group.",
-        rationale:
-          "The logo is the fallback when nothing resolves to play — usually a missing " +
-          "or empty playlist assignment rather than a device fault.",
-        severity: "medium",
-        confidence: 0.6,
-        kind: "manual",
-      });
+      // US-1.3 — a LIT panel rendering black. The panel is at full output, so
+      // this is the player or the content, and a brightness action is a no-op we
+      // must not offer. The rationale says so in as many words, because an
+      // operator who has just been told "the screen is black" will otherwise
+      // reach for the brightness control themselves.
+      case "content-black": {
+        out.push({
+          id: `${d.id}::black-screen`,
+          deviceIds: [d.id],
+          deviceLabel: label,
+          category: "content",
+          symptom: blank.panelLitConfirmed
+            ? `Screen is rendering black on a LIT panel — ${evidence}.`
+            : "Screen is black while the device is online.",
+          action:
+            "Capture a fresh frame to confirm; if still black, this is a content/player " +
+            "fault — re-push content. (Reboot is device-rejected on this hardware.)",
+          rationale:
+            `${blank.rationale} A stale black flag is worth confirming with a live ` +
+            "capture before re-pushing.",
+          severity: "high",
+          confidence: blank.panelLitConfirmed ? 0.8 : 0.7,
+          kind: "manual",
+        });
+        break;
+      }
+
+      // US-1.4 — logo fallback → no content resolved.
+      case "showing-logo": {
+        out.push({
+          id: `${d.id}::logo-fallback`,
+          deviceIds: [d.id],
+          deviceLabel: label,
+          category: "content",
+          symptom: "Showing the Videri logo — no content resolved to play.",
+          action: "Check the playlist / content assignment for this device or its group.",
+          rationale:
+            "The logo is the fallback when nothing resolves to play — usually a missing " +
+            "or empty playlist assignment rather than a device fault.",
+          severity: "medium",
+          confidence: 0.6,
+          kind: "manual",
+        });
+        break;
+      }
+
+      // Our two readings of panel power contradict each other. This is a data
+      // problem, NOT a device action: we cannot say which source is right, and
+      // both candidate actions (light it / leave it) are wrong against the other
+      // reading. So it is filed against the pipeline, not the panel.
+      case "signals-disagree": {
+        out.push({
+          id: `${d.id}::screen-signals-disagree`,
+          deviceIds: [d.id],
+          deviceLabel: label,
+          category: "data-quality",
+          symptom: `Panel-power signals contradict each other — ${evidence}.`,
+          action:
+            "Re-read this device's settings and status together and reconcile the two " +
+            "sources. No device action until they agree.",
+          rationale: blank.rationale,
+          severity: "medium",
+          // We are certain of the CONTRADICTION; the confidence is in the
+          // finding, not in any guess about which side is true.
+          confidence: 0.9,
+          kind: "manual",
+        });
+        break;
+      }
+
+      // `unknown` and `not-blank` produce nothing, by rule. A missing reading is
+      // not a symptom, and a screen nothing flags as blank is not a finding.
+      case "unknown":
+      case "not-blank":
+        break;
     }
 
     // US-1.5 — telemetry-driven advice. Each gate requires a real reading; a

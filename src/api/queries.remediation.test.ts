@@ -43,6 +43,7 @@ const row = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
   timezone: "America/New_York",
   is_black_screen: false,
   showing_logo: false,
+  is_screen_on: true,
   telemetry_observed_at: null,
   cpu_percent: null,
   ram_used_percent: null,
@@ -74,9 +75,34 @@ test("the projection selects the live panel fields, the schedule and the device 
     "'turn_on_time'",
     "'turn_off_time'",
     "d.timezone",
+    // The status feed's own view of panel power. Without it we cannot see the 5
+    // devices whose `is_screen_on` contradicts `display_on`, and they silently
+    // become "panel off → restore brightness" off ONE of two disagreeing sources.
+    "hs.is_screen_on",
   ]) {
     assert.ok(text.includes(needle), `remediation projection must select ${needle}`);
   }
+});
+
+test("the status feed's is_screen_on rides along, and an unread sample is null not false", async () => {
+  const { pool } = stubPool([row({ is_screen_on: true })]);
+  const [d] = await new ReadQueries(pool).remediationDevices();
+  assert.equal(d!.screen.isScreenOn, true);
+
+  const { pool: p2 } = stubPool([row({ is_screen_on: null })]);
+  const [d2] = await new ReadQueries(p2).remediationDevices();
+  assert.equal(d2!.screen.isScreenOn, null, "no sample means no second opinion, not 'off'");
+});
+
+test("the live contradiction shape survives the projection intact", async () => {
+  // 5 reachable devices read display_on=false while is_screen_on=true. Both
+  // values must arrive as themselves, or the classifier cannot see the conflict.
+  const { pool } = stubPool([
+    row({ display_on: "false", current_brightness_raw: "0", is_screen_on: true }),
+  ]);
+  const [d] = await new ReadQueries(pool).remediationDevices();
+  assert.equal(d!.displayOn, false);
+  assert.equal(d!.screen.isScreenOn, true);
 });
 
 test("the real fleet shape — base brightness 0 on a LIT panel — is shaped faithfully", async () => {

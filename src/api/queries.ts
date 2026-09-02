@@ -623,7 +623,7 @@ export class ReadQueries {
       `SELECT d.id, d.name, d.city, d.group_id, d.firmware_current, d.firmware_latest,
               ${STATUS_SQL} AS status,
               d.last_online_time, d.timezone,
-              hs.is_black_screen, hs.showing_logo,
+              hs.is_black_screen, hs.showing_logo, hs.is_screen_on,
               tel.observed_at AS telemetry_observed_at, tel.cpu_percent,
               tel.ram_used_percent, tel.storage_used_percent, tel.rssi_dbm,
               tel.ntp_offset_ms,
@@ -692,6 +692,14 @@ export class ReadQueries {
         screen: {
           isBlackScreen: (r["is_black_screen"] as boolean | null) ?? null,
           showingLogo: (r["showing_logo"] as boolean | null) ?? null,
+          // The status feed's own view of panel power — the SECOND opinion the
+          // blank-cause classifier needs. It is a real boolean column, so `?? null`
+          // only maps a missing/NULL sample to unread; it never invents a `false`,
+          // and a false here is a genuine "the feed says the screen is off".
+          // Verified 2026-09-02: 5 reachable devices report is_screen_on=true while
+          // the settings poll reports display_on=false. Without this field those 5
+          // silently became "panel off, restore brightness".
+          isScreenOn: (r["is_screen_on"] as boolean | null) ?? null,
           // now_playing_id is not projected by the shared latest-sample lateral
           // and the status poller does not yet write it, so it is always null
           // here. No remediation rule reads it; wired as null until a content
