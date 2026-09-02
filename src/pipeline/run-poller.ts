@@ -41,6 +41,7 @@ import {
 import { normalizeEvents } from "../intelligence/proof-of-play.js";
 import { aiJobTasks } from "../ai/scheduled.js";
 import type { TelemetryRunner } from "../videri/telemetry.js";
+import { dataUsageTask } from "./lanes/data-usage.js";
 import type { PollerResult } from "./pollers/types.js";
 
 const args = process.argv.slice(2);
@@ -174,39 +175,11 @@ if (!dryRun) {
     // once a day cannot produce a new row.
     ...(process.env["ENABLE_DATA_USAGE_POLL"] !== "false"
       ? [
-          {
-            name: "data-usage",
-            intervalMs: 24 * 60 * 60_000,
-            // runOnStart is TRUE, with a last-run gate inside the handler.
-            //
-            // It was false, which combined with a 24h interval meant the lane
-            // never fired at all if the daemon restarted inside 24h — and we
-            // restart it often. The pipeline-health check caught this: 48.8h
-            // since the last run against a 24.3h cadence, with only 2 runs in
-            // the whole 14-day retention window.
-            //
-            // Simply flipping runOnStart would re-poll 249 devices on every
-            // restart, so the handler asks poller_runs when it last succeeded
-            // and skips if that was recent. Cheap, and it uses the history the
-            // self-observability work already exposes.
-            runOnStart: true,
-            handler: async () => {
-              const MIN_GAP_MS = 20 * 60 * 60_000;
-              const history = await repo.pollerRunHistory({ lookbackHours: 48, runsPerLane: 1 });
-              const last = history.find((r) => r.poller === "data-usage");
-              if (last) {
-                const ageMs = Date.now() - new Date(last.startedAt).getTime();
-                if (ageMs < MIN_GAP_MS) {
-                  console.log(
-                    `[data-usage] skipped — last run ${Math.round(ageMs / 3_600_000)}h ago; ` +
-                      `the aggregation is per-day, so a second run cannot produce a new row`,
-                  );
-                  return;
-                }
-              }
-              record(await pollDataUsage(http, repo, await targets(), { log }));
-            },
-          } satisfies Task,
+          dataUsageTask({
+            history: () => repo.pollerRunHistory({ lookbackHours: 48, runsPerLane: 5 }),
+            poll: async () => pollDataUsage(http, repo, await targets(), { log }),
+            record,
+          }),
         ]
       : []),
     {

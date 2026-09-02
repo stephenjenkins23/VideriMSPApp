@@ -496,6 +496,42 @@ table.dt td.n{font-variant-numeric:tabular-nums}
   max-width:280px}
 .shotbig img{width:100%;display:block}
 .shotbig.stale img{filter:grayscale(.5) brightness(.75)}
+
+/* ── VFI pipeline health + trends ──
+   Same TOKEN-ONLY rule as the block above. Two scales meet here and must never
+   be crossed: lane STATUS (8 values, its own dot map) and finding SEVERITY
+   (critical|high|medium|info, the .sev chips). SEV_COLOR is a third scale that
+   ends in `low`, so it is not used on either. */
+.d.grn{background:var(--green)}
+/* Same trap as `.kv .k .prov` above: inline, a table-cell sublabel concatenates
+   into the value — "every 8 minmeasured · median of 39 gaps". */
+table.dt td .prov{display:block;margin-top:2px;white-space:normal;max-width:34ch}
+/* .sev colours are defined above but only sized inside .bitem; pipeline
+   findings use the same chips outside a .bitem, so give them a base. */
+.sev{display:inline-block;font-size:9.5px;font-weight:700;letter-spacing:.06em;
+  text-transform:uppercase;padding:3px 7px;border-radius:5px}
+.tr-row{padding:11px 0;border-bottom:1px solid var(--bd-2)}
+.tr-row:last-child{border-bottom:0}
+.tr-hd{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}
+.tr-hd .lb{font-size:13.5px;font-weight:600}
+.tr-sc{font-size:10px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;
+  color:var(--tx-3);border:1px solid var(--bd);border-radius:4px;padding:1px 6px}
+.tr-dir{font-size:10.5px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;
+  padding:2px 7px;border-radius:5px;flex:none}
+.tr-dir.regression{background:var(--red-2);color:var(--red)}
+.tr-dir.recovery{background:var(--green-2);color:var(--green)}
+.tr-dir.filling{background:var(--amber-2);color:var(--amber)}
+.tr-dir.draining{background:var(--blue-2);color:var(--blue)}
+.tr-st{font-size:12.5px;color:var(--tx-2);line-height:1.5;margin-top:4px;max-width:96ch}
+.tr-st b{color:var(--tx)}
+/* Sample counts are part of the claim, not a footnote: a trend from barely
+   enough points must not look like a well-sampled one. */
+.tr-sm{font-size:11.5px;color:var(--tx-3);margin-top:4px;line-height:1.45}
+.tr-sm.thin{color:var(--amber)}
+/* The engine's own sentence for a trend, verbatim. Kept as a quieter layer
+   under our rendering of the same numbers: it carries the caveats the engine
+   attaches (observed time only, resolution limits) in its own words. */
+.tr-q{font-size:11.5px;color:var(--tx-3);line-height:1.5;margin-top:5px;max-width:96ch}
 </style>
 
 <header class="appbar">
@@ -529,6 +565,7 @@ table.dt td.n{font-variant-numeric:tabular-nums}
   <button aria-selected="false" data-v="compliance">&#128737; Compliance <span class="nb" id="nb-comp">0</span></button>
   <button aria-selected="false" data-v="brief">&#10024; AI Brief</button>
   <button aria-selected="false" data-v="insights">&#128200; Insights</button>
+  <button aria-selected="false" data-v="trends">&#8599;&#65039; Trends</button>
   <button aria-selected="false" data-v="sla">&#9201; SLA</button>
 </div></nav>
 
@@ -544,6 +581,9 @@ table.dt td.n{font-variant-numeric:tabular-nums}
   </div>
 
   <div id="staleness"></div>
+  <!-- Our own collector's health. Separate container from #staleness because the
+       freshness banner re-renders every 15s and would otherwise wipe it. -->
+  <div id="pipebanner"></div>
 
   <!-- ============ OVERVIEW ============ -->
   <section id="v-overview">
@@ -560,6 +600,13 @@ table.dt td.n{font-variant-numeric:tabular-nums}
         <div class="whd"><h3>&#128680; Active alerts <span class="nb hot" id="wacount">0</span></h3>
           <div class="wr"><button class="btn sm" data-goto="alerts">View all &#8594;</button></div></div>
         <div id="walerts"></div>
+      </div>
+      <div class="w w-12">
+        <div class="whd"><h3>&#128268; Our collection pipeline
+          <span class="prov">&#8212; VFI's own collector, not the screens</span></h3>
+          <div class="wr"><span class="prov" id="wpipesub"></span></div></div>
+        <div class="pills" id="wpipepills" style="border-bottom:0;padding:12px 15px 0"></div>
+        <div class="wbody" id="wpipeline"></div>
       </div>
       <div class="w w-5">
         <div class="whd"><h3>&#128230; Firmware</h3>
@@ -647,6 +694,20 @@ table.dt td.n{font-variant-numeric:tabular-nums}
       <div class="chd"><h2>&#9201; SLA measurement confidence</h2></div>
       <div class="wbody" id="slabody"></div>
     </div>
+  </section>
+
+  <!-- ============ TRENDS (change over time) ============ -->
+  <section id="v-trends" class="hide">
+    <div class="card" style="margin-bottom:16px">
+      <div class="chd"><h2>&#8599;&#65039; Change over time</h2>
+        <div class="r"><span class="prov" id="trmeta"></span></div></div>
+      <div class="wbody">
+        <div class="segs" id="trwin"></div>
+        <div class="prov" id="trwinnote"></div>
+        <div class="note na" id="trbasis"></div>
+      </div>
+    </div>
+    <div id="trbody"></div>
   </section>
 
   <!-- ============ ACTIONS (self-heal recommendations) ============ -->
@@ -762,7 +823,11 @@ function dur(sec) {
 /* ---- state ------------------------------------------------------- */
 const S = { summary: null, alerts: [], devices: [], compliance: [], pipeline: null,
             fresh: null, sev: "all", cls: "all", q: "", dev: null, dtab: "overview",
-            sort: { key: "status", dir: 1 }, loading: false, brief: null, sla: null };
+            sort: { key: "status", dir: 1 }, loading: false, brief: null, sla: null,
+            // Our own collector's health, and the lane-status filter for it.
+            pipe: null, plane: "all",
+            // Trends: the window is state because every figure is labelled with it.
+            trends: null, trwin: 7, trloading: false, trdir: "all" };
 
 /* ===================================================================
    Freshness. This is the first thing rendered and the loudest thing on
@@ -780,6 +845,7 @@ const PAGES = {
   brief:      ["AI Fleet Brief", "Generated from the live fleet, with its own coverage gaps declared"],
   insights:   ["Analytics & Insights", "Derived from the live fleet; impossible modules stay visible"],
   sla:        ["SLA Measurement", "What can honestly be claimed, and what cannot be measured"],
+  trends:     ["Change Over Time", "Measured against the time we actually observed — with a stated refusal where we did not observe enough"],
 };
 
 function renderFreshness() {
@@ -2970,6 +3036,532 @@ function renderSla() {
 }
 
 /* ===================================================================
+   OUR COLLECTION PIPELINE — GET /api/pipeline/health.
+   Every finding here carries scope "vfi-pipeline", and that separation is the
+   whole point: an operator who reads "screen-verify is failing" as "the screens
+   are broken" chases the wrong fault. So the wording is always about US, and
+   the claim we lead with is that DEVICE DATA IS STALE — silence from our own
+   collector is not fleet health.
+   =================================================================== */
+
+/* Lane status is its own 8-value scale. It must never be indexed with SEV_COLOR
+   (whose scale ends in `low`) nor with the .sev severity chips. `unknown` and
+   `disabled` are grey on purpose: an opt-in lane that has never run cannot be
+   judged, and a self-check that renders "cannot judge" as a fault is a
+   self-check that gets ignored. */
+const LANE_DOT = { healthy: "grn", overdue: "amb", stalled: "red", failing: "red",
+                   collapsed: "red", unknown: "gry", "never-ran": "red", disabled: "gry" };
+const LANE_WORD = { healthy: "delivering", overdue: "overdue", stalled: "stalled",
+                    failing: "failing every batch", collapsed: "zero yield",
+                    unknown: "cannot judge", "never-ran": "never ran",
+                    disabled: "off by choice" };
+/* Statuses that are an absence of evidence, not evidence of a fault. */
+const LANE_UNJUDGED = new Set(["unknown", "disabled"]);
+/* The failure shapes, spelled out. Stalled, failing-every-batch and zero-yield
+   are indistinguishable on a freshness clock and mean different things. */
+const LANE_SHAPE = {
+  "lane-stalled": "Stalled — no run for far longer than this lane's own cadence",
+  "lane-overdue": "Overdue — a run is late against this lane's own cadence",
+  "lane-all-batches-failing": "Failing — the lane runs on schedule and every batch errors",
+  "lane-yield-collapsed": "Zero yield — the lane runs, succeeds, and writes nothing",
+  "lane-never-ran": "Never ran — no run of this lane has ever been recorded",
+};
+
+/**
+ * Split the report into faults and not-yet-judgeable.
+ *
+ * Keyed on the LANE's status, never on finding severity: `lane-overdue` is
+ * emitted at severity "info" but is a real (mild) condition, while a
+ * never-ran opt-in lane is "unknown". Filtering on severity would swap the two.
+ */
+function pipeSplit() {
+  const p = S.pipe;
+  if (!p) return null;
+  const lanes = p.lanes || [];
+  const status = new Map(lanes.map((l) => [l.lane, l.status]));
+  const unjudged = (f) => LANE_UNJUDGED.has(status.get(f.lane));
+  return {
+    lanes,
+    faults: (p.findings || []).filter((f) => !unjudged(f)),
+    unknowns: (p.findings || []).filter(unjudged),
+    faultLanes: lanes.filter((l) => l.status !== "healthy" && !LANE_UNJUDGED.has(l.status)),
+  };
+}
+
+function renderPipelineBanner() {
+  const el = $("#pipebanner");
+  if (!el) return;
+  const p = S.pipe;
+  if (!p) {
+    el.innerHTML =
+      `<div class="banner warn"><span>&#128268;</span>
+        <span><b>Our collector's own health is unavailable.</b>
+        /api/pipeline/health did not respond, so we cannot say whether the device
+        data below is still being refreshed. Unknown, not fine.</span></div>`;
+    return;
+  }
+  const sp = pipeSplit();
+  if (sp.faults.length === 0) { el.innerHTML = ""; return; }
+  const hard = p.deviceDataAtRisk
+    || sp.faults.some((f) => f.severity === "critical" || f.severity === "high");
+  // Count the lanes these findings are actually about, not the finding count.
+  const n = new Set(sp.faults.map((f) => f.lane)).size;
+  el.innerHTML =
+    `<div class="banner ${hard ? "bad" : "warn"}"><span>&#128268;</span>
+      <span><b>${p.deviceDataAtRisk
+        ? "Device data is going stale &#8212; one of our collection lanes has stalled."
+        : "Our collector is degraded &#8212; some device data is not being refreshed."}</b>
+      ${n} of ${sp.lanes.length} lanes in <em>VFI's own pipeline</em> ${n === 1 ? "is" : "are"}
+      not delivering. This is our health, not the fleet's: the screens can be
+      perfectly fine while we are blind to them.
+      <ul>${sp.faults.map((f) =>
+        `<li><b>${esc(f.lane)}</b> &#8212; ${esc(f.headline)}. ${esc(f.dataImpact)}</li>`).join("")}</ul>
+      <button class="glink" id="pipejump">see all ${sp.lanes.length} lanes &#8595;</button>
+      </span></div>`;
+  const jump = $("#pipejump");
+  if (jump) jump.addEventListener("click", () => {
+    switchTab("overview");
+    setTimeout(() => $("#wpipeline").scrollIntoView({ behavior: "smooth", block: "center" }), 60);
+  });
+}
+
+function renderPipelineWidget() {
+  const el = $("#wpipeline"), pills = $("#wpipepills"), sub = $("#wpipesub");
+  if (!el) return;
+  const p = S.pipe;
+  if (!p) {
+    pills.innerHTML = "";
+    sub.textContent = "self-check unavailable";
+    el.innerHTML = `<div class="na">Our collector's self-check did not respond. Lane
+      health is unknown &#8212; which is not the same as healthy, so nothing is
+      shown as delivering.</div>`;
+    return;
+  }
+  const sp = pipeSplit();
+  const lanes = sp.lanes;
+
+  // Pills are derived from the statuses present in the data, never a fixed list,
+  // and each counts the LANE ROWS below it that it filters — not the server-side
+  // summary string, which is computed on a different cadence and would drift.
+  const by = {};
+  for (const l of lanes) by[l.status] = (by[l.status] || 0) + 1;
+  const order = Object.keys(by).sort((a, b) => (by[b] - by[a]) || a.localeCompare(b));
+  if (!(S.plane === "all" || by[S.plane])) S.plane = "all";
+  pills.innerHTML =
+    `<button class="fp" data-st="all" aria-pressed="${S.plane === "all"}">
+       <b>${lanes.length}</b> lanes</button>` +
+    order.map((k) => `<button class="fp" data-st="${esc(k)}" aria-pressed="${S.plane === k}">
+       <span class="d ${LANE_DOT[k] || "gry"}"></span><b>${by[k]}</b>
+       ${esc(LANE_WORD[k] || k)}</button>`).join("");
+  pills.querySelectorAll(".fp").forEach((b) => b.addEventListener("click", () => {
+    S.plane = b.dataset.st;
+    renderPipelineWidget();
+  }));
+
+  const healthy = by.healthy || 0;
+  sub.textContent =
+    `${healthy} of ${lanes.length} lanes delivering · worst: ` +
+    `${LANE_WORD[p.worstStatus] || p.worstStatus} · self-checked ${ago(p.generatedAt)}`;
+
+  const rows = lanes.filter((l) => S.plane === "all" || l.status === S.plane);
+  const cell = (v, why) => v == null
+    ? `<span class="v na">&#8212;</span>${why ? `<span class="prov">${esc(why)}</span>` : ""}`
+    : v;
+  const table =
+    `<div class="tblwrap"><table class="dt"><thead><tr>
+      <th>Lane</th><th>Our status</th><th>Last run</th><th>Usual cadence</th>
+      <th>Rows written</th><th>Yield</th><th>Runs seen</th></tr></thead><tbody>` +
+    rows.map((l) => `<tr>
+      <td><b>${esc(l.lane)}</b></td>
+      <td><span class="d ${LANE_DOT[l.status] || "gry"}"></span>
+          ${esc(LANE_WORD[l.status] || l.status)}</td>
+      <td class="n">${cell(l.lastRunAt ? ago(l.lastRunAt) : null, "no run ever recorded")}</td>
+      <td class="n">${cell(l.cadence && l.cadence.seconds != null
+          ? `every ${dur(l.cadence.seconds)}<span class="prov">${esc(l.cadence.confidence)} &#183; ${esc(l.cadence.basis)}</span>`
+          : null, (l.cadence && l.cadence.basis) || "no cadence measured")}</td>
+      <td class="n">${cell(l.lastRowsWritten == null ? null : l.lastRowsWritten.toLocaleString(),
+          "never ran, so nothing was written")}</td>
+      <td class="n">${cell(l.lastYield == null ? null : Math.round(l.lastYield * 100) + "%",
+          "this lane reports no yield ratio")}</td>
+      <td class="n">${l.runsConsidered}</td></tr>`).join("") +
+    `</tbody></table></div>` +
+    (rows.length === 0 ? `<div class="empty">No lane has that status.</div>` : "");
+
+  const finding = (f) => `<div class="tr-row">
+    <div class="tr-hd"><span class="sev ${esc(f.severity)}">${esc(f.severity)}</span>
+      <span class="lb">${esc(f.headline)}</span>
+      <span class="tr-sc">${esc(f.lane)}</span>
+      <span class="tr-sc">${esc(f.scope)}</span></div>
+    <div class="tr-st"><b>${esc(LANE_SHAPE[f.kind] || f.kind)}.</b> ${esc(f.detail)}</div>
+    <div class="tr-st"><b>What this does to the device data:</b> ${esc(f.dataImpact)}</div>
+    <div class="tr-sm">${f.since
+      ? `Since ${esc(f.since)} (${ago(f.since)})`
+      : "No dateable start &#8212; there is no first run to measure from"}</div>
+  </div>`;
+
+  el.innerHTML = table +
+    (sp.faults.length
+      ? `<div class="grp" style="margin-top:16px"><p class="glb">
+           &#9888;&#65039; Our pipeline &#8212; ${sp.faults.length} finding${sp.faults.length === 1 ? "" : "s"}
+           about US, not the fleet</p>${sp.faults.map(finding).join("")}</div>`
+      : `<div class="note na" style="margin-top:14px"><b>No fault in our own
+           collection right now.</b> That is a statement about VFI's pipeline only
+           &#8212; device health is the rest of this page.</div>`) +
+    (sp.unknowns.length
+      ? `<div class="grp" style="margin-top:16px"><p class="glb">
+           &#8212; Cannot judge (${sp.unknowns.length}) &#8212; opt-in and never run,
+           which is not a fault</p>${sp.unknowns.map(finding).join("")}</div>`
+      : "") +
+    `<div class="prov" style="margin-top:10px">${esc(p.summary || "")}</div>` +
+    `<div class="kv" style="margin-top:8px"><span class="k">Device data at risk
+       <span class="prov">true only when a lane has stalled outright; a lane that
+       runs and fails still leaves its own feed stale</span></span>
+       <span class="v ${p.deviceDataAtRisk ? "bd" : "ok"}">${p.deviceDataAtRisk ? "yes" : "no"}</span></div>`;
+}
+
+/* ===================================================================
+   TRENDS — GET /api/trends. Change over time, computed over the time we
+   actually observed, and a stated refusal where we did not observe enough.
+   The refusal is the DEFAULT state at 7 days, so it is designed first: a
+   reason in words, no chart, and no zero. A window control is offered
+   because shorter windows can qualify, and every figure names its window
+   in words — a bare percentage here would be uninterpretable.
+   =================================================================== */
+const TR_WINDOWS = [1, 3, 7, 14, 30];
+/* A measured 0.2% must not print as "0%" next to a rule about honest zeros —
+   a true zero (a device online for none of the window) still prints 0%. */
+const pctW = (v) => v == null ? "&#8212;"
+  : v > 0 && v < 0.005 ? "&lt;1%" : Math.round(v * 100) + "%";
+
+async function loadTrends(days) {
+  S.trwin = days;
+  S.trloading = true;
+  S.trdir = "all";
+  renderTrends();
+  const res = await api(`/api/trends?windowDays=${days}`).catch(() => null);
+  // A slower earlier request must not overwrite a newer window's answer.
+  if (S.trwin !== days) return;
+  S.trends = res && res.data;
+  S.trloading = false;
+  renderTrends();
+}
+
+/** Window labels come from the payload where it has them, so the words on
+ *  screen are the ones the engine actually compared. */
+function trWinLabels(t) {
+  const w = t && t.availability && t.availability.windows;
+  return {
+    recent: (w && w.recent && w.recent.label)
+      || (S.trwin === 1 ? "the last day" : `the last ${S.trwin} days`),
+    prior: (w && w.prior && w.prior.label)
+      || (S.trwin === 1 ? "the day before" : `the previous ${S.trwin} days`),
+  };
+}
+
+function trSuppressed(sup, what) {
+  if (!sup || !sup.total) return "";
+  const reasons = Object.entries(sup.byReason || {})
+    .map(([k, n]) => `${n} ${k.replace(/-/g, " ")}`).join(", ");
+  return `<div class="grp" style="margin-top:14px"><p class="glb">
+      Not claimed (${sup.total}) &#8212; below the stated minimum</p>
+    <div class="prov" style="margin-bottom:6px">${sup.total} ${esc(what)} produced no
+      trend at all rather than a low-confidence one${reasons ? `: ${esc(reasons)}` : ""}.</div>
+    ${(sup.examples || []).map((e) => `<div class="gaprow"><span class="gd"></span>
+      <span><span class="gn">${esc(e.label || e.key)}</span>
+      <span class="gw">${esc(e.detail)}</span></span></div>`).join("")}
+    ${(sup.examples || []).length < sup.total
+      ? `<div class="prov">${sup.total - (sup.examples || []).length} more not listed.</div>` : ""}
+  </div>`;
+}
+
+function trAvailCard(t) {
+  const a = t.availability;
+  const L = trWinLabels(t);
+  if (!a) {
+    return `<div class="card" style="margin-bottom:16px">
+      <div class="chd"><h2>&#128246; Availability</h2></div>
+      <div class="wbody"><div class="na">This payload carried no availability
+        section, so nothing is claimed about it.</div></div></div>`;
+  }
+  const w = a.windows || {};
+  const g = a.gates || {};
+  const facts = `<div class="grp"><p class="glb">What we actually observed</p>
+      ${w.recent ? kv(`Recent window &#8212; ${esc(w.recent.label)}`,
+        `${w.recent.fleetObservedBuckets.toLocaleString()} observed buckets · ${pctW(w.recent.collectorCoverage)} of the window`) : ""}
+      ${w.prior ? kv(`Prior window &#8212; ${esc(w.prior.label)}`,
+        `${w.prior.fleetObservedBuckets.toLocaleString()} observed buckets · ${pctW(w.prior.collectorCoverage)} of the window`,
+        a.available ? "" : "bd") : ""}
+      ${g.minFleetBuckets != null ? kv("Minimum to compare at all",
+        `${g.minFleetBuckets} observed buckets per window`) : ""}
+      ${w.recent ? kv("Bucket size", dur(w.recent.bucketSeconds)) : ""}
+    </div>`;
+
+  if (!a.available) {
+    // The honest-refusal case. No chart, no 0% — an unobserved window is not a
+    // window in which the fleet was down.
+    return `<div class="card" style="margin-bottom:16px">
+      <div class="chd"><h2>&#128246; Availability &#8212; ${esc(L.recent)} vs ${esc(L.prior)}</h2>
+        <div class="r"><span class="prov">not claimable for this window</span></div></div>
+      <div class="wbody">
+        <div class="note"><b>No availability trend is reported for ${esc(L.recent)}.</b>
+          ${esc(a.reason || "The engine refused this window and gave no reason.")}
+          <span class="prov">Nothing is charted and nothing is shown as 0%: a window
+          we barely watched is not a window in which the fleet was down. Use the
+          window control above &#8212; a shorter comparison may clear the minimum.</span></div>
+        <div class="two" style="margin-top:14px"><div>${facts}</div><div>
+          ${kv("Sites steady", (a.steady && a.steady.sites) != null ? a.steady.sites : "&#8212;")}
+          ${kv("Devices steady", (a.steady && a.steady.devices) != null ? a.steady.devices : "&#8212;")}
+          <div class="prov">"Steady" counts what was compared and moved less than
+            the ${g.minDeltaPoints != null ? g.minDeltaPoints : "stated"}-point
+            threshold. With the comparison refused, these are zero because nothing
+            was compared &#8212; not because nothing moved.</div>
+        </div></div>
+      </div></div>`;
+  }
+
+  const trends = a.trends || [];
+  const regressions = trends.filter((x) => x.direction === "regression");
+  const recoveries = trends.filter((x) => x.direction === "recovery");
+  const shown = S.trdir === "all" ? trends
+    : trends.filter((x) => x.direction === S.trdir);
+  return `<div class="card" style="margin-bottom:16px">
+    <div class="chd"><h2>&#128246; Availability &#8212; ${esc(L.recent)} vs ${esc(L.prior)}</h2>
+      <div class="r"><span class="prov">${trends.length} trend${trends.length === 1 ? "" : "s"} clear the minimum</span></div></div>
+    <div class="pills" id="trpills">
+      <button class="fp" data-dir="all" aria-pressed="${S.trdir === "all"}"><b>${trends.length}</b> all</button>
+      <button class="fp" data-dir="regression" aria-pressed="${S.trdir === "regression"}">
+        <span class="d red"></span><b>${regressions.length}</b> regressions</button>
+      <button class="fp" data-dir="recovery" aria-pressed="${S.trdir === "recovery"}">
+        <span class="d grn"></span><b>${recoveries.length}</b> recoveries</button>
+    </div>
+    <div class="wbody">
+      ${shown.length
+        ? shown.map((x) => trAvailRow(x, L, g)).join("")
+        : `<div class="empty">No trend in that direction over ${esc(L.recent)}.</div>`}
+      <div class="two" style="margin-top:16px"><div>${facts}</div><div>
+        <div class="grp"><p class="glb">Compared and unchanged</p>
+          ${kv("Sites steady", a.steady ? a.steady.sites : "&#8212;")}
+          ${kv("Devices steady", a.steady ? a.steady.devices : "&#8212;")}
+          <div class="prov">Compared over both windows and moved less than
+            ${g.minDeltaPoints != null ? g.minDeltaPoints : "the stated"} points.</div>
+        </div>
+      </div></div>
+      ${trSuppressed(a.suppressed, "site(s) and device(s)")}
+    </div></div>`;
+}
+
+function trAvailRow(x, L, g) {
+  const gate = x.scope === "device" ? g.minDeviceBuckets : g.minFleetBuckets;
+  const minObs = Math.min(x.recent.observedBuckets, x.prior.observedBuckets);
+  const ratio = gate ? minObs / gate : null;
+  const thin = ratio !== null && ratio < 3;
+  const dirWord = x.direction === "regression" ? "fell" : "rose";
+  return `<div class="tr-row">
+    <div class="tr-hd">
+      <span class="tr-dir ${esc(x.direction)}">${x.direction === "regression" ? "&#9660;" : "&#9650;"} ${esc(x.direction)}</span>
+      <span class="lb">${esc(x.label)}</span>
+      <span class="tr-sc">${esc(x.scope)}</span>
+    </div>
+    <div class="tr-st">Availability ${dirWord} from <b>${pctW(x.prior.availability)} in ${esc(L.prior)}</b>
+      to <b>${pctW(x.recent.availability)} in ${esc(L.recent)}</b>
+      &#8212; a change of ${x.deltaPoints > 0 ? "+" : ""}${x.deltaPoints} points.</div>
+    <div class="tr-sm ${thin ? "thin" : ""}">Sampled over
+      ${x.recent.observedBuckets.toLocaleString()} observed buckets in ${esc(L.recent)}
+      and ${x.prior.observedBuckets.toLocaleString()} in ${esc(L.prior)}${x.scope === "site"
+        ? `, across ${x.recent.devices} device${x.recent.devices === 1 ? "" : "s"}` : ""}${gate
+        ? ` &#8212; ${ratio.toFixed(1)}&#215; the ${gate}-bucket minimum${thin ? ", so read this as directional only" : ""}` : ""}.</div>
+    <div class="tr-q">${esc(x.statement)}</div>
+  </div>`;
+}
+
+function trStorageCard(t) {
+  const s = t.storage;
+  if (!s) return "";
+  const g = s.gates || {};
+  const win = `the last ${s.windowDays} days of telemetry readings`;
+  if (!s.available) {
+    return `<div class="card" style="margin-bottom:16px">
+      <div class="chd"><h2>&#128190; Storage fill &#8212; ${esc(win)}</h2></div>
+      <div class="wbody"><div class="note"><b>No storage trend is reported.</b>
+        ${esc(s.reason || "The engine refused this section and gave no reason.")}</div></div></div>`;
+  }
+  const trends = s.trends || [];
+  return `<div class="card" style="margin-bottom:16px">
+    <div class="chd"><h2>&#128190; Storage fill &#8212; ${esc(win)}</h2>
+      <div class="r"><span class="prov">${trends.length} device${trends.length === 1 ? "" : "s"} moving · ${s.flat} flat</span></div></div>
+    <div class="wbody">
+      ${trends.length ? trends.map((x) => {
+        const thin = (x.points < (g.minPoints || 0) * 2)
+          || (g.minDistinctDays != null && x.distinctDays <= g.minDistinctDays)
+          || (g.maxGapHours != null && x.largestGapHours > g.maxGapHours / 2);
+        return `<div class="tr-row">
+          <div class="tr-hd">
+            <span class="tr-dir ${esc(x.direction)}">${esc(x.direction)}</span>
+            <span class="lb">${esc(x.label || x.deviceId)}</span>
+            <span class="tr-sc">device ${esc(x.deviceId)}</span></div>
+          <div class="tr-st">Storage used went from <b>${x.firstPercent}%</b> to
+            <b>${x.latestPercent}%</b> across ${(x.spanHours / 24).toFixed(1)} days of
+            readings inside ${esc(win)}
+            (first reading ${ago(x.firstObservedAt)}, latest ${ago(x.latestObservedAt)})
+            &#8212; ${x.slopePctPerDay > 0 ? "+" : ""}${x.slopePctPerDay} points/day.
+            ${x.daysToFull != null
+              ? `At that rate it reaches 100% in about ${x.daysToFull} day(s).`
+              : `<span class="na">Days to full: &#8212; ${esc(x.projectionNote || "not projected")}</span>`}</div>
+          <div class="tr-sm ${thin ? "thin" : ""}">${x.points} reading(s) on ${x.distinctDays}
+            distinct day(s) spanning ${x.spanHours}h, largest gap ${x.largestGapHours}h
+            (minimum ${g.minPoints} readings / ${g.minSpanHours}h / ${g.minDistinctDays} days,
+            gaps over ${g.maxGapHours}h disqualify)${thin ? " &#8212; barely above the minimum, so read it as directional only" : ""}.</div>
+          <div class="tr-q">${esc(x.statement)}</div>
+        </div>`; }).join("")
+        : `<div class="note na"><b>No device is filling or draining fast enough to
+             report.</b> ${s.flat} device(s) had usable readings and moved less than
+             ${g.minSlopePctPerDay} points/day &#8212; measured and flat, which is not
+             the same as unmeasured.</div>`}
+      ${trends.length ? `<div class="prov" style="margin-top:10px">${s.flat} further
+        device(s) had usable readings over ${esc(win)} and moved less than
+        ${g.minSlopePctPerDay} points/day.</div>` : ""}
+      ${s.discardedReadings ? `<div class="prov">${s.discardedReadings} reading(s) were
+        discarded as unusable rather than counted.</div>` : ""}
+      ${trSuppressed(s.suppressed, "device(s)")}
+    </div></div>`;
+}
+
+function trSilenceCard(t) {
+  const s = t.transmissionSilence;
+  if (!s) return "";
+  const g = s.gates || {};
+  if (!s.available) {
+    return `<div class="card" style="margin-bottom:16px">
+      <div class="chd"><h2>&#128225; Transmission silence</h2></div>
+      <div class="wbody"><div class="note"><b>No transmission-silence trend is reported.</b>
+        ${esc(s.reason || "The engine refused this section and gave no reason.")}</div></div></div>`;
+  }
+  const recent = (s.recentDaysExamined || []).length;
+  const base = (s.baselineDaysExamined || []).length;
+  const trends = s.trends || [];
+  const win = `the ${recent} most recent day(s) the usage feed reported, ending ${s.feedThroughDate}`;
+  return `<div class="card" style="margin-bottom:16px">
+    <div class="chd"><h2>&#128225; Transmission silence &#8212; ${esc(win)}</h2>
+      <div class="r"><span class="prov">${trends.length} gone quiet · ${s.transmitting} transmitting</span></div></div>
+    <div class="wbody">
+      ${trends.length ? trends.map((x) => {
+        const thin = base < (g.baselineDays || 0);
+        return `<div class="tr-row">
+          <div class="tr-hd"><span class="tr-dir regression">silent</span>
+            <span class="lb">${esc(x.label || x.deviceId)}</span>
+            <span class="tr-sc">device ${esc(x.deviceId)}</span></div>
+          <div class="tr-st">Sent nothing on ${x.silentDays} of the ${recent} recent day(s)
+            examined, after transmitting on ${x.baselineActiveDays} of ${x.baselineDaysExamined}
+            baseline day(s). Last transmission
+            ${x.lastTransmissionDate ? `${esc(x.lastTransmissionDate)}` : "&#8212; never observed"}${
+              x.lastTransmissionBytes != null
+                ? ` (${x.lastTransmissionBytes.toLocaleString()} bytes that day)`
+                : `<span class="na"> (byte total &#8212; not reported)</span>`}.</div>
+          <div class="tr-sm ${thin ? "thin" : ""}">${x.baselineDaysExamined} healthy baseline
+            day(s) examined of ${g.baselineDays} in the window; a habit needs
+            ${Math.round((g.minBaselineActiveFraction || 0) * 100)}% of them${thin
+              ? " &#8212; fewer baseline days than the window allows, so read it as directional only" : ""}.</div>
+          <div class="tr-q">${esc(x.statement)}</div>
+        </div>`; }).join("")
+        : `<div class="note na"><b>No device with a transmission habit has gone
+             quiet.</b> ${s.transmitting} device(s) transmitted within ${esc(win)}. This
+             is not a zero: devices without a baseline habit are excluded below
+             rather than counted as silent.</div>`}
+      <div class="two" style="margin-top:16px"><div>
+        <div class="grp"><p class="glb">The feed this is measured against</p>
+          ${kv("Feed's newest reported day", esc(s.feedThroughDate))}
+          ${kv("Feed lag behind now", `${s.feedLagDays} day(s)`, s.feedLagDays > 2 ? "wn" : "")}
+          ${kv("Recent days examined", `${recent} (minimum ${g.minRecentDays})`)}
+          ${kv("Healthy baseline days examined", `${base} of ${g.baselineDays} (minimum ${g.minBaselineDays})`,
+            base < (g.baselineDays || 0) ? "wn" : "")}
+          ${(s.feedGapDates || []).length
+            ? kv("Days excluded as our blind days", esc((s.feedGapDates).join(", ")), "wn")
+            : kv("Days excluded as our blind days", "none")}
+        </div>
+      </div><div>
+        <div class="note na">Silence is measured against the usage feed's own newest
+          day, not today. Measuring against now would report the feed's
+          ${s.feedLagDays}-day lag as fleet-wide silence.</div>
+        ${s.discardedRows ? `<div class="prov">${s.discardedRows} usage row(s) were
+          discarded as unusable rather than counted.</div>` : ""}
+      </div></div>
+      ${trSuppressed(s.suppressed, "device(s)")}
+    </div></div>`;
+}
+
+function trSitesCard(t) {
+  const s = t.sites;
+  if (!s) return "";
+  return `<div class="card" style="margin-bottom:16px">
+    <div class="chd"><h2>&#127970; Site attribution behind these trends</h2></div>
+    <div class="wbody"><div class="two"><div>
+      ${s.available
+        ? kv("Devices resolved to a site", `${s.resolved} of ${s.devices}`,
+            s.resolved === s.devices ? "ok" : "wn")
+        : na("Devices resolved to a site", s.reason || "site hierarchy unavailable")}
+      ${kv("Groups read", s.groupsRead != null ? s.groupsRead : "&#8212;")}
+      ${kv("Hierarchy age", dur(s.hierarchyAgeSeconds))}
+    </div><div>
+      <div class="prov">Site-level trends are only as good as this mapping: a device
+        we cannot place in a site is excluded from site figures rather than pooled
+        into a fake "unassigned" site.</div>
+    </div></div></div></div>`;
+}
+
+function renderTrends() {
+  const body = $("#trbody");
+  if (!body) return;
+  // The window control is rendered from state every time, so the pressed pill
+  // always matches the window the numbers below were computed for.
+  $("#trwin").innerHTML = TR_WINDOWS.map((d) =>
+    `<button data-d="${d}" aria-pressed="${S.trwin === d}"${S.trloading ? " disabled" : ""}>
+       ${d} day${d === 1 ? "" : "s"}</button>`).join("");
+  $("#trwin").querySelectorAll("button").forEach((b) =>
+    b.addEventListener("click", () => loadTrends(Number(b.dataset.d))));
+  const winWords = S.trwin === 1 ? ["the last day", "the day before"]
+    : [`the last ${S.trwin} days`, `the previous ${S.trwin} days`];
+  $("#trwinnote").innerHTML =
+    `The window drives the availability comparison: <b>${winWords[0]}</b>
+     against <b>${winWords[1]}</b>. Storage fill and transmission
+     silence carry their own windows, stated on each card.`;
+
+  if (S.trloading) {
+    $("#trmeta").textContent = `computing the last ${S.trwin} days…`;
+    $("#trbasis").textContent = "";
+    body.innerHTML = `<div class="card"><div class="skel"><span class="sk wide"></span>
+      <span class="sk line"></span><span class="sk row"></span><span class="sk row"></span></div></div>`;
+    return;
+  }
+  const t = S.trends;
+  if (!t) {
+    $("#trmeta").textContent = "unavailable";
+    $("#trbasis").textContent = "";
+    body.innerHTML = `<div class="card"><div class="wbody"><div class="na">
+      Trends are unavailable &#8212; /api/trends did not respond for a
+      ${S.trwin}-day window. Nothing is shown rather than a flat line.</div></div></div>`;
+    return;
+  }
+  $("#trmeta").textContent = `computed ${ago(t.observedAt)}`;
+  $("#trbasis").innerHTML = `<b>How every figure here is computed.</b> ${esc(t.basis || "")}`;
+  body.innerHTML =
+    ((t.headlines || []).length
+      ? `<div class="card" style="margin-bottom:16px">
+          <div class="chd"><h2>&#128203; What changed, in words</h2></div>
+          <div class="wbody"><ul class="blist">${t.headlines.map((h) =>
+            `<li>${esc(h)}</li>`).join("")}</ul></div></div>`
+      : "") +
+    trAvailCard(t) + trStorageCard(t) + trSilenceCard(t) + trSitesCard(t) +
+    ((t.notes || []).length
+      ? `<div class="card"><div class="chd"><h2>&#9888;&#65039; Caveats the engine
+          declared</h2></div><div class="wbody"><ul class="blist">${t.notes.map((n) =>
+            `<li>${esc(n)}</li>`).join("")}</ul></div></div>`
+      : "");
+  const pills = $("#trpills");
+  if (pills) pills.querySelectorAll(".fp").forEach((b) =>
+    b.addEventListener("click", () => { S.trdir = b.dataset.dir; renderTrends(); }));
+}
+
+/* ===================================================================
    COMMAND PALETTE — the "one click to anything" promise made literal.
    ⌘K (or /) then type: any device by name, id, serial or city; any tab;
    refresh. No index to maintain: it searches the state already loaded.
@@ -3339,7 +3931,7 @@ addEventListener("keydown", (e) => { if (e.key === "Escape") closeDevice(); });
 $("#q").addEventListener("input", (e) => { S.q = e.target.value; renderDevices(); });
 $("#reload").addEventListener("click", () => load());
 
-const VIEWS_ALL = ["overview", "alerts", "actions", "devices", "compliance", "brief", "insights", "sla"];
+const VIEWS_ALL = ["overview", "alerts", "actions", "devices", "compliance", "brief", "insights", "sla", "trends"];
 document.querySelectorAll("#nav button").forEach((b) => b.addEventListener("click", () => {
   document.querySelectorAll("#nav button").forEach((x) =>
     x.setAttribute("aria-selected", String(x === b)));
@@ -3391,7 +3983,10 @@ async function load() {
   if (S.loading) return;
   S.loading = true;
   try {
-    const [summary, alerts, hygiene, devices, compliance, pipeline, sla, brief, shots, remediation, correlation, pop, plan] = await Promise.all([
+    // NOTE: every entry added below must also be NAMED in this destructuring
+    // array, in the same position — a missing name silently shifts every payload
+    // after it into the wrong variable.
+    const [summary, alerts, hygiene, devices, compliance, pipeline, sla, brief, shots, remediation, correlation, pop, plan, pipeHealth, trends] = await Promise.all([
       api("/api/fleet/summary"),
       apiAll("/api/alerts"),
       // Alert hygiene: which alerts are today's incidents vs a dormant band on
@@ -3414,6 +4009,11 @@ async function load() {
       api("/api/proof-of-play").catch(() => null),
       // The AI action plan — 404 until `npm run plan` has been run, a normal state.
       api("/api/action-plan").catch(() => null),
+      // OUR OWN collector's health (scope: vfi-pipeline). Allowed to fail: if it
+      // does, the banner says our health is unknown rather than implying fine.
+      api("/api/pipeline/health").catch(() => null),
+      // Trends over the default 7-day window; the view refetches on window change.
+      api("/api/trends?windowDays=7").catch(() => null),
     ]);
     S.summary = summary.data;
     S.alerts = alerts.data;
@@ -3428,6 +4028,8 @@ async function load() {
     S.correlation = correlation && correlation.data;
     S.pop = pop && pop.data;
     S.plan = plan && plan.data;
+    S.pipe = pipeHealth && pipeHealth.data;
+    S.trends = trends && trends.data;
     S.fresh = (summary.meta && summary.meta.freshness) || null;
 
     // ageSeconds is only true at fetch time; recompute from the timestamp so
@@ -3436,6 +4038,9 @@ async function load() {
       S.fresh.ageSeconds = Math.max(0, (Date.now() - new Date(S.fresh.newestSampleAt).getTime()) / 1000);
     }
     renderFreshness();
+    // Our collector's own health, rendered next to the freshness banner: "the
+    // data is 4 min old" and "we stopped collecting it" are the same question.
+    renderPipelineBanner();
     $("#nb-alerts").textContent = S.alerts.length;
     $("#nb-alerts").classList.toggle("hot", S.alerts.some((a) => a.severity === "critical"));
     $("#nb-devices").textContent = S.devices.length;
@@ -3446,6 +4051,7 @@ async function load() {
     renderDeviceFilters(); renderDevices();
     renderCompliance(); renderSla();
     renderActions();
+    renderPipelineWidget(); renderTrends();
     drawModules();
     // Fire-and-forget: the aggregator rollup is a ~14s cold fan-out, so it must
     // never block the dashboard render. It fills its Overview card when ready.

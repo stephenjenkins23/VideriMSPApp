@@ -710,11 +710,25 @@ export async function loadPipelineHealth(
   for (const lane of EXPECTED_LANES) {
     if (!lane.optInEnv) continue;
     const raw = env[lane.optInEnv];
-    if (raw === undefined) continue; // unknown stays unknown
-    // ENABLE_DATA_USAGE_POLL is the one flag that is on unless explicitly
-    // "false" (see run-poller.ts); every other flag is off unless "true".
-    optInEnabled[lane.lane] =
-      lane.optInEnv === "ENABLE_DATA_USAGE_POLL" ? raw !== "false" : raw === "true";
+    // POLARITY FIRST, then absence — the reverse order was a real bug.
+    //
+    // ENABLE_DATA_USAGE_POLL is the one DEFAULT-ON flag (see run-poller.ts:175,
+    // which schedules the lane when it is unset, and DEPLOY.md, which documents
+    // it as "on unless set false"). For that flag `undefined` means ENABLED, not
+    // unknown. Skipping on `undefined` before applying the polarity meant that
+    // on a default deployment — the flag commented out in .env.example — a
+    // data-usage lane that had NEVER RUN was reported as `unknown`/`info`
+    // ("possibly off by choice") instead of `never-ran`/`high`, and was excluded
+    // from `deviceDataAtRisk`. The self-check went quiet about precisely the
+    // starvation it was built to catch, and which we had just fixed.
+    if (lane.optInEnv === "ENABLE_DATA_USAGE_POLL") {
+      optInEnabled[lane.lane] = raw !== "false";
+      continue;
+    }
+    // Every other flag is off unless "true", so absence really is unknowable
+    // from here: it may be unset in THIS process but set for the poller.
+    if (raw === undefined) continue;
+    optInEnabled[lane.lane] = raw === "true";
   }
   return assessPipelineHealth(runs, { now, optInEnabled });
 }
