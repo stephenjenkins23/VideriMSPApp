@@ -767,12 +767,40 @@ const esc = (v) => String(v == null ? "" : v).replace(/[&<>"']/g,
 /* ---- transport ---------------------------------------------------- */
 let TOKEN = sessionStorage.getItem("vfi_token") || "";
 
+/**
+ * Single-flight token prompt.
+ *
+ * load() fires 13 requests in one Promise.all. With auth on and no stored token
+ * every one of them 401s, and an unguarded prompt would ask the operator for the
+ * same token up to 13 times on the very first authenticated page load. The first
+ * 401 opens ONE prompt; the rest await its outcome and then retry with whatever
+ * it produced.
+ */
+let AUTH_PROMPT = null;
+function askForToken() {
+  if (AUTH_PROMPT) return AUTH_PROMPT;
+  AUTH_PROMPT = new Promise((resolve) => {
+    // Deferred a tick so every concurrent 401 has joined this same promise
+    // before the modal blocks the thread.
+    setTimeout(() => {
+      const t = window.prompt("This API requires a bearer token (VFI_API_TOKEN):", "");
+      if (t && t.trim()) { TOKEN = t.trim(); sessionStorage.setItem("vfi_token", TOKEN); }
+      resolve(TOKEN || null);
+      // Cleared so a LATER 401 (a rotated or wrong token) can ask again.
+      AUTH_PROMPT = null;
+    }, 0);
+  });
+  return AUTH_PROMPT;
+}
+
 async function api(path, opts) {
   const headers = TOKEN ? { authorization: "Bearer " + TOKEN } : {};
   const res = await fetch(path, { ...(opts || {}), headers });
   if (res.status === 401) {
-    const t = window.prompt("This API requires a bearer token (VFI_API_TOKEN):", "");
-    if (t) { TOKEN = t.trim(); sessionStorage.setItem("vfi_token", TOKEN); return api(path, opts); }
+    const had = TOKEN;
+    const got = await askForToken();
+    // Retry only if the token actually changed; otherwise this would spin.
+    if (got && got !== had) return api(path, opts);
     throw new Error("Unauthorized");
   }
   // 429 (sweep rate-limit) is expected and not an error — return the body.

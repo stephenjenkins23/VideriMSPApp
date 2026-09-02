@@ -502,10 +502,33 @@ function assessLane(
   }
 
   // ── (b) every batch failing ────────────────────────────────────────────────
+  //
+  // A run is only evidence of a FAILING LANE if it attempted enough work to
+  // distinguish "the lane is broken" from "the one device it happened to pick
+  // did not answer". The screen-verify lane grades itself on whatever targets
+  // exist, and it legitimately had a single target — the only reachable panel
+  // with a black-screen claim. That one panel staying silent got the whole lane
+  // graded `failing`/high, which is a false positive about OURSELVES, and the
+  // one thing a self-check must not produce if anyone is to trust it.
+  //
+  // The gate is DEVICES ATTEMPTED, not batches. That distinction is the whole
+  // point, and the live data shows why: the screen-verify run that triggered the
+  // false positive was `devicesTargeted=1, batchesOk=0, batchesFailed=1` — one
+  // panel, which stayed silent. A `devices` run with one failed batch may have
+  // attempted a hundred devices, and that IS a lane fault. Keying on batch count
+  // conflated the two; keying on device count separates them exactly.
+  //
+  // A one-device wipeout is still recorded and still visible in the lane's runs;
+  // it simply does not condemn the lane by itself. A second consecutive one does.
+  const MIN_DEVICES_TO_CONDEMN = 2;
+  const wipeout = (r: PollerRunRow): boolean => r.batchesFailed > 0 && r.batchesOk === 0;
   let consecutiveAllFailed = 0;
-  for (const run of runs) {
-    if (run.batchesFailed > 0 && run.batchesOk === 0) consecutiveAllFailed += 1;
-    else break;
+  for (const [i, run] of runs.entries()) {
+    if (!wipeout(run)) break;
+    const tooSmallToJudge = run.devicesTargeted < MIN_DEVICES_TO_CONDEMN;
+    const nextAlsoFailed = runs[i + 1] !== undefined && wipeout(runs[i + 1]!);
+    if (tooSmallToJudge && consecutiveAllFailed === 0 && !nextAlsoFailed) break;
+    consecutiveAllFailed += 1;
   }
   if (consecutiveAllFailed > 0) {
     const oldestFailing = runs[consecutiveAllFailed - 1]!;

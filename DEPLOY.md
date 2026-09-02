@@ -88,9 +88,13 @@ enabled appear — a flag typo produces a silent skip, not an error.
   404s the dashboard.
 - **Restart the daemon after deploying.** A running poller keeps executing the
   code already in memory — ours once ran three-day-old code for days.
-- **`fleet_snapshots` is never pruned.** `pruneTimeSeries` covers samples (90d)
-  and `poller_runs` (14d) but not snapshots, so that table grows without bound.
-  Watch it, or add a retention bound before it matters.
+- **Retention is bounded, but only just.** `pruneTimeSeries` now covers
+  `health_samples` 90d, `poller_runs` 14d, resolved `alerts` 180d,
+  `device_settings`/`compliance_results` 30d, and `fleet_snapshots` 90d — the last
+  added in `fd63cc9`, since it had previously been unbounded. Note the honest
+  limit: `fleet_snapshots` currently holds ~1,100 rows spanning 2026-08-25 onward,
+  so that DELETE has never yet removed a live row and will not until roughly
+  2026-11-23. It is verified as a ceiling, not as observed behaviour.
 - **Time zones are per device.** Schedule windows are evaluated in each device's
   own zone; the host's zone does not affect correctness but does affect logs.
 
