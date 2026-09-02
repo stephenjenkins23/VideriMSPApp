@@ -581,6 +581,10 @@ table.dt td .prov{display:block;margin-top:2px;white-space:normal;max-width:34ch
   </div>
 
   <div id="staleness"></div>
+  <!-- Auth failure. Its own container for the same reason as #pipebanner: the
+       freshness banner re-renders every 15s and would otherwise wipe it, and an
+       "authentication is not going to succeed" message must not disappear. -->
+  <div id="authbanner"></div>
   <!-- Our own collector's health. Separate container from #staleness because the
        freshness banner re-renders every 15s and would otherwise wipe it. -->
   <div id="pipebanner"></div>
@@ -597,7 +601,12 @@ table.dt td .prov{display:block;margin-top:2px;white-space:normal;max-width:34ch
         <div class="wbody" id="wstatus"></div>
       </div>
       <div class="w w-5">
-        <div class="whd"><h3>&#128680; Active alerts <span class="nb hot" id="wacount">0</span></h3>
+        <div class="whd"><h3>&#128680; Active alerts <span class="nb hot" id="wacount">0</span>
+          <!-- The chips below this header filter ONE band. The header therefore
+               counts that band, and this label names it and states the other
+               half out loud -- an unlabelled 290 over chips summing to 90 is the
+               count-the-thing-you-filter trap, three times over in this file. -->
+          <span class="prov" id="wasub"></span></h3>
           <div class="wr"><button class="btn sm" data-goto="alerts">View all &#8594;</button></div></div>
         <div id="walerts"></div>
       </div>
@@ -768,41 +777,113 @@ const esc = (v) => String(v == null ? "" : v).replace(/[&<>"']/g,
 let TOKEN = sessionStorage.getItem("vfi_token") || "";
 
 /**
- * Single-flight token prompt.
+ * Single-flight token prompt, keyed on the token that was REJECTED.
  *
- * load() fires 13 requests in one Promise.all. With auth on and no stored token
+ * load() fires 15 requests in one Promise.all. With auth on and no stored token
  * every one of them 401s, and an unguarded prompt would ask the operator for the
- * same token up to 13 times on the very first authenticated page load. The first
- * 401 opens ONE prompt; the rest await its outcome and then retry with whatever
- * it produced.
+ * same token up to 15 times on the very first authenticated page load.
+ *
+ * The latch used to be a bare "a prompt is open" flag, cleared inside the same
+ * timer callback that resolved it. prompt() blocks the thread, so a 401 handler
+ * queued BEHIND the modal woke to find the flag already cleared and opened a
+ * second modal; measured, jittered arrivals raised 2—3 prompts and stranded 3—6 of
+ * 15 requests. So the latch is keyed on the token being replaced rather than on
+ * wall-clock timing: anyone who 401'd under `rejected` joins the one prompt for
+ * it, and anyone arriving after TOKEN has already moved past `rejected` needs no
+ * prompt at all and is handed the live token to retry with. Timing-independent.
  */
-let AUTH_PROMPT = null;
-function askForToken() {
+const AUTH_MAX_ATTEMPTS = 3;
+let AUTH_PROMPT = null;     // the in-flight prompt, if any
+let AUTH_REJECTED = null;   // the token value that prompt is replacing
+let AUTH_ATTEMPTS = 0;      // consecutive rejected tokens; any 2xx clears it
+let AUTH_LOCKED = null;     // set once asking again cannot help; never prompts after
+
+/** Authentication is not going to succeed. Say so where it cannot be missed:
+ *  the alternative, which QA hit, is every request hanging behind a blank page. */
+function lockAuth(reason) {
+  AUTH_LOCKED = reason;
+  const el = $("#authbanner");
+  if (el) {
+    el.innerHTML =
+      `<div class="banner bad"><span>&#128274;</span>
+         <span><b>Not authenticated — nothing below will load.</b> ${esc(reason)}
+         Set a valid <code>VFI_API_TOKEN</code> and reload this page.</span></div>`;
+  }
+}
+
+function askForToken(rejected) {
+  // Asking again cannot help: the cap is spent, or this pane cannot prompt.
+  if (AUTH_LOCKED) return Promise.resolve(null);
+  // TOKEN has already moved on since `rejected` was sent, so whoever prompted
+  // has finished AND applied it. Hand back the live token; no second modal.
+  if (TOKEN !== rejected) return Promise.resolve(TOKEN || null);
+  // A prompt is already open for this exact rejected token: join it.
   if (AUTH_PROMPT) return AUTH_PROMPT;
+  // Cap the attempts BEFORE prompting again, so every token the operator typed
+  // was actually tried and the (N+1)th ask never happens. Without a cap an
+  // operator entering a different wrong token each time is re-prompted forever
+  // — QA drove that into unbounded recursion (121 prompts) and hung the
+  // renderer for >45 s with nothing on screen to explain it.
+  if (AUTH_ATTEMPTS >= AUTH_MAX_ATTEMPTS) {
+    lockAuth(`${AUTH_MAX_ATTEMPTS} tokens in a row were rejected by the API.`);
+    return Promise.resolve(null);
+  }
+  AUTH_REJECTED = rejected;
   AUTH_PROMPT = new Promise((resolve) => {
     // Deferred a tick so every concurrent 401 has joined this same promise
     // before the modal blocks the thread.
     setTimeout(() => {
-      const t = window.prompt("This API requires a bearer token (VFI_API_TOKEN):", "");
-      if (t && t.trim()) { TOKEN = t.trim(); sessionStorage.setItem("vfi_token", TOKEN); }
-      resolve(TOKEN || null);
-      // Cleared so a LATER 401 (a rotated or wrong token) can ask again.
-      AUTH_PROMPT = null;
+      AUTH_ATTEMPTS += 1;
+      try {
+        // window.prompt is not guaranteed: an embedded webview, or a pane with
+        // dialogs suppressed, THROWS here. Unguarded, that throw skipped
+        // resolve() and left every api() awaiting forever with a blank screen.
+        if (typeof window.prompt !== "function") throw new Error("prompt() is unavailable");
+        const t = window.prompt(
+          AUTH_ATTEMPTS > 1
+            ? `That token was rejected (attempt ${AUTH_ATTEMPTS} of ${AUTH_MAX_ATTEMPTS}).\n` +
+              "Enter the bearer token (VFI_API_TOKEN):"
+            : "This API requires a bearer token (VFI_API_TOKEN):", "");
+        if (t && t.trim()) { TOKEN = t.trim(); sessionStorage.setItem("vfi_token", TOKEN); }
+        // Dismissed or blank is a decision, not a retry: stop asking.
+        else if (t === null) lockAuth("The token prompt was dismissed.");
+        else lockAuth("An empty token was entered.");
+      } catch (e) {
+        lockAuth("This browser pane cannot show a token prompt (" + esc(e.message) + ").");
+      } finally {
+        // resolve() in `finally`: whatever happened above, nobody waits forever.
+        // Clearing the latch here is safe now only because askForToken no longer
+        // trusts it alone — a late waker is caught by the TOKEN !== rejected test.
+        AUTH_PROMPT = null;
+        AUTH_REJECTED = null;
+        resolve(AUTH_LOCKED ? null : (TOKEN || null));
+      }
     }, 0);
   });
   return AUTH_PROMPT;
 }
 
 async function api(path, opts) {
-  const headers = TOKEN ? { authorization: "Bearer " + TOKEN } : {};
+  if (AUTH_LOCKED) throw new Error("Not authenticated: " + AUTH_LOCKED);
+  // Captured BEFORE the fetch, because this is the token the request actually
+  // SENT. Reading TOKEN again after the fetch resolved was the stranding bug: a
+  // request that 401'd under the old token but woke after a successful prompt
+  // compared the new token with itself, saw no change, and threw Unauthorized
+  // instead of retrying with the token that would have worked.
+  const sent = TOKEN;
+  const headers = sent ? { authorization: "Bearer " + sent } : {};
   const res = await fetch(path, { ...(opts || {}), headers });
   if (res.status === 401) {
-    const had = TOKEN;
-    const got = await askForToken();
-    // Retry only if the token actually changed; otherwise this would spin.
-    if (got && got !== had) return api(path, opts);
-    throw new Error("Unauthorized");
+    const got = await askForToken(sent);
+    // Retry whenever the live token differs from the one THIS request sent.
+    // Identical means the operator re-entered the rejected token; retrying would
+    // spin, so it fails with the attempt already counted against the cap.
+    if (got && got !== sent) return api(path, opts);
+    throw new Error(AUTH_LOCKED ? "Not authenticated: " + AUTH_LOCKED : "Unauthorized");
   }
+  // A token that works clears the strike count: the cap is on CONSECUTIVE
+  // rejections, so a later rotation still gets a full set of attempts.
+  if (res.ok) AUTH_ATTEMPTS = 0;
   // 429 (sweep rate-limit) is expected and not an error — return the body.
   if (!res.ok && res.status !== 429) throw new Error(path + " returned " + res.status);
   return res.json();
@@ -1099,19 +1180,25 @@ function renderStatusWidget() {
 
 function renderAlertWidget() {
   const el = $("#walerts");
-  const crit = S.alerts.filter((a) => a.severity === "critical").slice(0, 4);
-  $("#wacount").textContent = S.alerts.length;
-  if (S.alerts.length === 0) {
-    el.innerHTML = `<div class="empty">No alerts are open.</div>`;
+  // Count the BAND being shown: the chips below the header filter this band, so
+  // the header must report it. It previously printed S.alerts.length (290) above
+  // chips summing to 90, with nothing saying the chips were incidents-only.
+  const { band, incidents, dormant, scoped } = alertBands();
+  const other = band === "dormant"
+    ? `${incidents.length} incident${incidents.length === 1 ? "" : "s"}`
+    : `${dormant.length} dormant`;
+  $("#wacount").textContent = scoped.length;
+  $("#wasub").innerHTML = dormant.length
+    ? `${esc(band)} &#183; ${other} (not in these chips)`
+    : esc(band);
+  if (scoped.length === 0) {
+    el.innerHTML = `<div class="empty">No ${esc(band)} alerts are open.` +
+      (dormant.length ? ` ${other} are counted in the dormant band.` : "") + `</div>`;
     return;
   }
-  // Count the BAND being shown, for the same reason: the chips filter the visible
-  // list, so counting the whole set would state a total the list contradicts.
-  const dorm = dormantIdSet();
-  const inBand = (a) => dorm.has(a.deviceId);
-  const scoped = S.aband === "dormant"
-    ? S.alerts.filter(inBand)
-    : dorm.size ? S.alerts.filter((a) => !inBand(a)) : S.alerts;
+  // The listed rows come from the same split as the header and the chips, so a
+  // row can never appear under a count that excludes it.
+  const crit = scoped.filter((a) => a.severity === "critical").slice(0, 4);
   const counts = {};
   for (const a of scoped) counts[a.severity] = (counts[a.severity] || 0) + 1;
   // Clickable: a severity count an operator can see is a filter they will try to
@@ -1122,7 +1209,7 @@ function renderAlertWidget() {
   el.innerHTML =
     `<div class="pills">${pills}</div>` +
     (crit.length ? `<div class="sechd">&#128308; Critical &#8212; requires action</div>` : "") +
-    (crit.length ? crit : S.alerts.slice(0, 4)).map((a) => `
+    (crit.length ? crit : scoped.slice(0, 4)).map((a) => `
       <button class="arow" data-id="${esc(a.deviceId)}">
         <span class="thumb">${thumbFor(a)}</span>
         <span><span class="ti">${esc(a.title)}</span>
@@ -1348,20 +1435,19 @@ function renderAlertFilters() {
   // rows and the chip would claim a count the list below it contradicts (the same
   // trap already fixed for the device status chips).
   const counts = {};
-  // Scoped to the BAND on screen. These chips filter the visible list, so
-  // counting every open alert would print a total the list contradicts — the
-  // same invariant that broke once on the device status chips.
-  const dormIds = dormantIdSet();
-  const inDormBand = (a) => dormIds.has(a.deviceId);
-  const banded = S.aband === "dormant"
-    ? S.alerts.filter(inDormBand)
-    : dormIds.size ? S.alerts.filter((a) => !inDormBand(a)) : S.alerts;
-  for (const a of banded) counts[a.severity] = (counts[a.severity] || 0) + 1;
+  // Scoped to the BAND on screen, from the one shared split — these chips filter
+  // the visible list, so counting every open alert would print a total the list
+  // contradicts (the same invariant that broke on the device status chips).
+  const { scoped } = alertBands();
+  for (const a of scoped) counts[a.severity] = (counts[a.severity] || 0) + 1;
   const wrap = $("#fp");
   wrap.innerHTML = "";
   for (const [sev, dot] of SEV) {
     const n = counts[sev] || 0;
-    if (n === 0 && sev !== "critical") continue;
+    // critical AND high are always shown, even at zero: they are the two halves
+    // of the never-absorbed safety valve, so "0 critical" without "0 high" only
+    // proves half of it. Every other severity is hidden when empty.
+    if (n === 0 && !NEVER_ABSORBED.has(sev)) continue;
     const b = document.createElement("button");
     b.className = "fp";
     b.innerHTML = `<span class="d ${dot}"></span><b>${n}</b> ${sev}`;
@@ -1400,6 +1486,47 @@ function dormantIdSet() {
 }
 
 /**
+ * The server's safety valve, restated client-side.
+ *
+ * The server classifies per ALERT, not per device: NEVER_ABSORBED = {critical,
+ * high} keeps a critical or high in the INCIDENT list even when its device is
+ * dormant, records it in `heldBack`, and emits a note. `hyg.dormant.deviceIds`
+ * is the dormant DEVICE set and INCLUDES those held-back devices, so banding by
+ * device id alone would sweep the first dormant critical straight into the
+ * dormant band -- defeating the valve, and making the band pills (server counts)
+ * contradict the rows (client filter). Zero occurrences so far is luck, not
+ * design: hyg.dormant.bySeverity.critical is 0 today.
+ *
+ * The payload does not expose `heldBack` or a per-alert band, so this is the
+ * client-side equivalent of the server's rule, deliberately spelled the same way.
+ */
+const NEVER_ABSORBED = new Set(["critical", "high"]);
+const isDormantAlert = (a, dormIds) =>
+  dormIds.has(a.deviceId) && !NEVER_ABSORBED.has(a.severity);
+
+/**
+ * Split the open alerts into the two bands ONCE, and hand the same split to
+ * every renderer.
+ *
+ * The count-the-thing-you-filter invariant broke three separate times in this
+ * file because the header, the chips and the rows each re-derived the visible
+ * set. They no longer can: whatever `scoped` holds is what the rows show, what
+ * the chips count, and what the header reports.
+ *
+ * With hygiene unavailable the dormant id set is empty, so everything lands in
+ * `incidents` and the view degrades to the old single list, not to a blank one.
+ */
+function alertBands() {
+  const dormIds = dormantIdSet();
+  const incidents = [];
+  const dormant = [];
+  for (const a of S.alerts) (isDormantAlert(a, dormIds) ? dormant : incidents).push(a);
+  const band = S.aband === "dormant" ? "dormant" : "incidents";
+  return { band, dormIds, incidents, dormant,
+           scoped: band === "dormant" ? dormant : incidents };
+}
+
+/**
  * The dormant rollup card and the band toggle. The card states the estate share
  * and the darkness distribution, because "104 devices are dark" and "104 devices
  * have been dark between a month and three years" are different facts, and the
@@ -1410,9 +1537,23 @@ function renderAlertBands() {
   if (!host) return;
   const h = S.hyg;
   if (!h || !h.dormant || !h.dormant.total) { host.innerHTML = ""; return; }
-  const inc = (h.incidents && h.incidents.total) || 0;
-  const dor = h.dormant.total;
+  // Counted from the SAME split that renders the rows, not from h.incidents /
+  // h.dormant. The server counts per alert (a dormant device's critical is held
+  // back into incidents) while these ids are per device; taking the pill numbers
+  // from the snapshot and the rows from the filter is how a pill ends up
+  // contradicting the list directly beneath it.
+  const { incidents, dormant } = alertBands();
+  const inc = incidents.length;
+  const dor = dormant.length;
   const r = h.rollup;
+  // The payload carries a COUNT (rollup.neverSeenDevices) and no ids, so naming
+  // these canvases means deriving the set here: one with no lastOnlineTime has
+  // never been recorded online. Named only when that derivation reproduces the
+  // server's count exactly -- otherwise the honest line is that they are
+  // counted, because publishing a list we cannot reconcile with the count is
+  // worse than admitting we only have the number.
+  const neverSeen = S.devices.filter((d) => !d.lastOnlineTime);
+  const canName = !!r && neverSeen.length === r.neverSeenDevices;
   const tab = (key, label, n) =>
     `<button class="fp${(S.aband || "incidents") === key ? " on" : ""}" data-aband="${key}">
        <b>${n}</b> ${label}</button>`;
@@ -1434,8 +1575,15 @@ function renderAlertBands() {
            </div>
            ${r.neverSeenDevices
              ? `<div class="note">${r.neverSeenDevices} canvas(es) have never been recorded online by Videri at all,
-                  so no outage can be dated for them and no offline alert can fire. They are named here rather than
-                  counted as healthy.</div>`
+                  so no outage can be dated for them and no offline alert can fire. ${canName
+                    ? "They are named below rather than counted as healthy."
+                    : `They are counted here rather than counted as healthy &#8212; the payload carries the
+                       number and no ids, so this console cannot name them.`}</div>
+                ${canName
+                  ? `<div class="pills">${neverSeen.map((d) =>
+                      `<button class="fp" data-neverseen="${esc(d.id)}"
+                         title="Never recorded online &#8212; open this canvas">${esc(d.name || d.id)}</button>`).join("")}</div>`
+                  : ""}`
              : ""}
            <div class="prov">These stay open and stay counted; they are moved out of the incident queue, not suppressed.
              Critical and high are never moved.</div>
@@ -1447,18 +1595,17 @@ function renderAlertBands() {
       renderAlertFilters();
       renderAlerts();
     }));
+  host.querySelectorAll("[data-neverseen]").forEach((b) =>
+    b.addEventListener("click", () => openDevice(b.dataset.neverseen)));
 }
 
 function renderAlerts() {
   const L = $("#alist");
   L.className = "";
-  const dorm = dormantIdSet();
-  // When hygiene is unavailable the set is empty and this degrades to the old
-  // behaviour — the full list — rather than an empty screen.
-  const inBand = (a) => dorm.has(a.deviceId);
-  const scoped = S.aband === "dormant"
-    ? S.alerts.filter(inBand)
-    : dorm.size ? S.alerts.filter((a) => !inBand(a)) : S.alerts;
+  // The one shared split. When hygiene is unavailable the dormant id set is
+  // empty and this degrades to the old behaviour — the full list — rather than
+  // an empty screen.
+  const { scoped } = alertBands();
   const rows = scoped.filter((a) => S.sev === "all" || a.severity === S.sev);
   $("#acount").textContent = scoped.length;
   renderAlertBands();
@@ -1861,15 +2008,9 @@ function paintDevice() {
       ntpOffsetMs: null, ntpServer: null, offline: true };
   }
   const tm = S.dev._telemetry;
-  // WHY a tile is empty matters, and there are three different reasons. Saying
-  // "this hardware does not report it" when the truth is "the screen is offline"
-  // blames the platform for our own unreachability — so the reason is chosen from
-  // what actually happened: offline, answered-nothing, or answered-without-this-field.
-  const answeredNothing = tm && Array.isArray(tm.read) && tm.read.length === 0;
-  const whyEmpty = (field) =>
-    !isOnline ? "The screen is offline, so it cannot be asked"
-    : answeredNothing ? "The screen did not answer the request"
-    : field;
+  // WHY a tile is empty, from the shared decision (whyNoReading) so the Network
+  // subtab cannot disagree with these tiles about the same device.
+  const whyEmpty = (field) => (isOnline ? whyNoReading(tm, field) : OFFLINE_UNASKED);
   tiles.push(runtimeTile("CPU load", tm ? (tm.cpuPercent == null ? "na" : "ok") : "loading",
     tm && tm.cpuPercent != null ? tm.cpuPercent + "%" : null, tm && tm.cpuPercent,
     whyEmpty("This model does not report CPU load")));
@@ -2122,6 +2263,27 @@ const kv = (k, v, cls) =>
 const na = (k, why) =>
   `<div class="kv"><span class="k">${k}</span><span class="v na">${why || "Not reported"}</span></div>`;
 
+/**
+ * WHY a live-read field is empty — one answer, shared by every part of the drawer.
+ *
+ * There are three different reasons and they are not interchangeable: saying
+ * "this hardware does not report it" when the truth is "the screen is offline"
+ * blames the platform for our own unreachability, and saying "the screen did not
+ * answer" about a screen we never asked invents a request. The Network subtab
+ * had its own copy of this decision that consulted neither, and told 137 offline
+ * canvases that they had declined to answer a signal request nobody sent.
+ *
+ * `tm.offline` is set by paintDevice for a device we resolved as unreachable and
+ * therefore never commanded; an empty `tm.read` means we did ask and got nothing.
+ */
+const OFFLINE_UNASKED = "The screen is offline, so it cannot be asked";
+function whyNoReading(tm, field) {
+  if (!tm) return field;                 // still reading; callers show "reading..."
+  if (tm.offline) return OFFLINE_UNASKED;
+  if (Array.isArray(tm.read) && tm.read.length === 0) return "The screen did not answer the request";
+  return field;
+}
+
 function tabOverview(d) {
   const l = d.latest || {};
   const alerts = d._alerts || [];
@@ -2341,10 +2503,16 @@ function tabNetwork(d) {
   const n = networkDerived(d._health);
   const tm = d._telemetry;
   // Live signal/NTP read from the device (demo_command). undefined = still loading.
+  // An OFFLINE device was never asked: loadNetwork/loadTelemetry are both gated
+  // behind reachability, and paintDevice pre-fills _telemetry with offline:true.
+  // So the empty reason comes from whyNoReading &#8212; the same decision the Overview
+  // tiles use &#8212; instead of the old fixed strings, which reported a refusal from a
+  // screen no request ever reached and (worse) blamed its clock reporting.
+  const unasked = !!(tm && tm.offline);
   const signalRow = tm === undefined
     ? kv("Signal (RSSI)", "reading&#8230;")
     : (tm.rssiDbm == null
-        ? na("Signal (RSSI)", "the screen did not answer the signal request")
+        ? na("Signal (RSSI)", whyNoReading(tm, "the screen did not answer the signal request"))
         : tm.rssiDbm <= -110
           ? kv("Signal (RSSI)", `${tm.rssiDbm} dBm — no wireless link (Ethernet or radio off)`, "na")
           : kv("Signal (RSSI)", `${tm.rssiDbm} dBm`,
@@ -2352,7 +2520,7 @@ function tabNetwork(d) {
   const ntpRow = tm === undefined
     ? kv("NTP offset", "reading&#8230;")
     : (tm.ntpOffsetMs == null
-        ? na("NTP offset", "this screen does not report clock sync")
+        ? na("NTP offset", whyNoReading(tm, "this screen does not report clock sync"))
         : kv("NTP offset", `${tm.ntpOffsetMs} ms${tm.ntpServer ? ` · ${esc(tm.ntpServer)}` : ""}`,
              Math.abs(tm.ntpOffsetMs) < 100 ? "ok" : "wn"));
   return `<div class="two"><div>
@@ -2374,9 +2542,13 @@ function tabNetwork(d) {
           ? kv("Longest unobserved gap", `${n.longestGapH} h`, "wn")
           : kv("Gaps", "none", "ok")}
         <div class="prov">Availability and drops are derived from our own presence
-          history, not from a platform field. Signal and NTP above ARE read from the
-          screen itself, one request at a time &#8212; packet loss and jitter are the
-          ones nothing reports. Availability is a share of the hours we
+          history, not from a platform field. ${unasked
+            ? `Signal and NTP above would be read from the screen itself, one request at
+               a time, but this screen is offline &#8212; nothing was asked and nothing
+               above is a reading from it.`
+            : `Signal and NTP above ARE read from the screen itself, one request at a
+               time &#8212; packet loss and jitter are the ones nothing reports.`}
+          Availability is a share of the hours we
           <em>observed</em>, so read it next to the observed count &#8212; 100% of a
           handful of hours is not 100% of a day.</div>
       </div>
@@ -2472,19 +2644,31 @@ function tabNetwork(d) {
           .map(([n, why]) => `<div class="gaprow"><span class="gd"></span>
             <span><span class="gn">${n}</span><span class="gw">${why}</span></span></div>`).join("")}
       </div>
-      <div class="note"><b>Signal and NTP are read live from the device</b> (top-left),
-        which means a venue network fault can now be told from a device fault: RSSI,
-        NTP offset and reachability are all readable per device. This is the slow lane
-        &#8212; one command each &#8212; not a dashboard-cadence feed.</div>
+      ${unasked
+        ? `<div class="note na"><b>Nothing on this tab was read from this screen.</b>
+             It is offline, so the live signal / NTP / addressing commands were never
+             sent. Everything above comes from our own stored presence history and the
+             platform's last snapshot &#8212; reconnect the screen to read it directly.</div>`
+        : `<div class="note"><b>Signal and NTP are read live from the device</b> (top-left),
+             which means a venue network fault can now be told from a device fault: RSSI,
+             NTP offset and reachability are all readable per device. This is the slow lane
+             &#8212; one command each &#8212; not a dashboard-cadence feed.</div>`}
     </div></div>`;
 }
 
 function tabDisplay(d) {
   const st = d.settings || {};
   const has = (k) => k in st && st[k] !== null && st[k] !== "unavailable";
+  // Every control on this tab is a device WRITE, and a write needs a device that
+  // answers. Overview and Network both say this screen is offline; offering an
+  // enabled Live toggle beside them, captioned "writes to the device as you
+  // drag", promised an action that cannot happen.
+  const isOnline = isReachable(d);
+  const offReason = "This screen is offline, so nothing can be written to it";
   const slider = (label, id, val, min, max, note) =>
     `<div class="sld"><div class="row"><label>${label}</label>
-       <input type="range" min="${min}" max="${max}" value="${val}" data-o="${id}">
+       <input type="range" min="${min}" max="${max}" value="${val}" data-o="${id}"
+         ${isOnline ? "" : `disabled title="${offReason}"`}>
        <span class="n" id="n-${id}">${val}</span></div>
        ${note ? `<div class="prov">${note}</div>` : ""}</div>`;
 
@@ -2505,13 +2689,22 @@ function tabDisplay(d) {
 
   return `<div class="two"><div>
       <div class="grp"><p class="glb">&#9728;&#65039; Brightness
-        <button class="btn sm" id="brightLive" style="margin-left:auto;font-weight:600">&#9210; Live</button>
+        <button class="btn sm" id="brightLive" style="margin-left:auto;font-weight:600"
+          ${isOnline ? "" : `disabled title="${offReason}"`}>&#9210; Live</button>
       </p>
+        ${isOnline ? "" : `<div class="note na"><b>${offReason}.</b>
+          Brightness, colour and Live are read-only here: the values shown are the last
+          snapshot this canvas reported, not what it holds now. Reconnect the screen to
+          change it.</div>`}
         ${has("brightness")
           ? slider("Brightness %", "b", Math.max(1, Math.round((Number(st.brightness) / 255) * 100)), 1, 100,
-              "Drag to set. In <b>Live</b> mode it writes to the device as you drag " +
-              "and shows the value the device reports back &#8212; like the native Videri UI. " +
-              "Off Live, use Apply for the safe verify-and-rollback write.")
+              isOnline
+                ? "Drag to set. In <b>Live</b> mode it writes to the device as you drag " +
+                  "and shows the value the device reports back &#8212; like the native Videri UI. " +
+                  "Off Live, use Apply for the safe verify-and-rollback write."
+                : "Disabled &#8212; the screen is offline. Live mode would write to the device " +
+                  "as you drag, and Apply performs the verify-and-rollback write; both need a " +
+                  "device that answers.")
           : na("Brightness")}
         <div class="kv"><span class="k">On device now</span>
           <span class="v" id="brightActual">${has("brightness")
@@ -2574,8 +2767,10 @@ function tabDisplay(d) {
         ${has("timezone") ? kv("Timezone", esc(st.timezone)) : na("Timezone")}
       </div>
       <div class="grp" style="margin-top:6px">
-        <button class="btn pri" id="applybtn" disabled>No changes to apply</button>
-        <button class="btn sm" id="revertbtn" style="margin-left:7px">Reset sliders</button>
+        <button class="btn pri" id="applybtn" disabled>${isOnline
+          ? "No changes to apply" : "Offline &#8212; cannot write"}</button>
+        <button class="btn sm" id="revertbtn" style="margin-left:7px"
+          ${isOnline ? "" : "disabled"}>Reset sliders</button>
         <div class="prov" style="margin-top:8px">Brightness and saturation are
           writable. <code>ops_set_settings</code> is undocumented &#8212; the spec types
           <code>command_params</code> as a free-form object whose only examples are asset
@@ -2666,11 +2861,16 @@ function wireSliders() {
   const pending = {};
   const original = {};
   BRIGHT.live = false; // fresh per drawer open
+  // Belt and braces: the markup disables these controls when the device is
+  // unreachable, and the handlers refuse to fire a write for one regardless.
+  // A write is the one thing in this console that cannot be taken back.
+  const writable = isReachable(S.dev);
+  if (!writable && apply) apply.disabled = true;
 
   /** One live write: fast set + read-back; update the "on device now" readout. */
   async function liveWrite(pct) {
     const id = S.dev && S.dev.id;
-    if (id == null) return;
+    if (id == null || !writable) return;
     if (BRIGHT.inflight) { BRIGHT.queued = pct; return; } // coalesce
     BRIGHT.inflight = true;
     try {
@@ -2696,6 +2896,7 @@ function wireSliders() {
 
   if (liveBtn) {
     liveBtn.addEventListener("click", () => {
+      if (!writable) return;
       if (!BRIGHT.live) {
         const name = (S.dev && (S.dev.name || S.dev.id)) || "this device";
         if (!window.confirm(
@@ -2756,7 +2957,7 @@ function wireSliders() {
       const id = S.dev && S.dev.id;
       const name = (S.dev && (S.dev.name || S.dev.id)) || "this device";
       const pct = pending.brightnessPercent;
-      if (id == null || pct == null) return;
+      if (id == null || pct == null || !writable) return;
       const ok = window.confirm(
         'Set brightness on "' + name + '" to ' + pct + '%?\n\n' +
         "The write is bracketed: we read the current value, write, read back, and " +
