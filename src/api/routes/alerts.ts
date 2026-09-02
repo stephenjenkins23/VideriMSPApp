@@ -11,6 +11,23 @@ const ListQuery = z.object({
   severity: z.enum(["critical", "high", "medium", "info"]).optional(),
   state: z.enum(["open", "resolved", "all"]).default("open"),
   deviceId: z.string().min(1).max(100).optional(),
+  /**
+   * Comma-separated device ids. The dormant rollup in /api/alerts/hygiene hands
+   * back 104 ids as its drilldown; `deviceId` takes exactly one, so without
+   * this the rollup can say "104 devices" and then not list them — a count you
+   * cannot open is barely better than a count you cannot see.
+   * Capped so a caller cannot smuggle an unbounded IN list through.
+   */
+  deviceIds: z
+    .string()
+    .min(1)
+    .max(4000)
+    .optional()
+    .transform((v) =>
+      v === undefined
+        ? undefined
+        : Array.from(new Set(v.split(",").map((x) => x.trim()).filter(Boolean))).slice(0, 500),
+    ),
 });
 
 const AcknowledgeBody = z.object({

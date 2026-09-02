@@ -448,6 +448,8 @@ export class ReadQueries {
     severity?: string | undefined;
     state: "open" | "resolved" | "all";
     deviceId?: string | undefined;
+    /** Many-device filter, used by the dormant rollup drilldown. */
+    deviceIds?: string[] | undefined;
   }): Promise<{ items: Array<Record<string, unknown>>; totalItems: number }> {
     const where: string[] = [
       // A retired device's alerts must appear in neither the list nor the count.
@@ -466,6 +468,12 @@ export class ReadQueries {
     if (filters.severity) {
       params.push(filters.severity);
       where.push(`a.severity = $${params.length}`);
+    }
+    // Same NOT-EXISTS discipline as above: this predicate must work in the
+    // COUNT query, which has no devices join.
+    if (filters.deviceIds && filters.deviceIds.length > 0) {
+      params.push(filters.deviceIds);
+      where.push(`a.device_id = ANY($${params.length}::text[])`);
     }
     if (filters.deviceId) {
       params.push(filters.deviceId);
