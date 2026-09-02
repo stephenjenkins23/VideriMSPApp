@@ -605,6 +605,7 @@ table.dt td.n{font-variant-numeric:tabular-nums}
         <h2>&#128276; Active alerts <span class="cnt" id="acount">&#8212;</span></h2>
         <div class="r"><button class="btn" id="reload">&#8635; Refresh</button></div>
       </div>
+      <div id="abands"></div>
       <div class="pills" id="fp"></div>
       <div id="alist"><div class="skel"><span class="sk row"></span><span class="sk row"></span>
         <span class="sk row"></span></div></div>
@@ -1010,8 +1011,15 @@ function renderAlertWidget() {
     el.innerHTML = `<div class="empty">No alerts are open.</div>`;
     return;
   }
+  // Count the BAND being shown, for the same reason: the chips filter the visible
+  // list, so counting the whole set would state a total the list contradicts.
+  const dorm = dormantIdSet();
+  const inBand = (a) => dorm.has(a.deviceId);
+  const scoped = S.aband === "dormant"
+    ? S.alerts.filter(inBand)
+    : dorm.size ? S.alerts.filter((a) => !inBand(a)) : S.alerts;
   const counts = {};
-  for (const a of S.alerts) counts[a.severity] = (counts[a.severity] || 0) + 1;
+  for (const a of scoped) counts[a.severity] = (counts[a.severity] || 0) + 1;
   // Clickable: a severity count an operator can see is a filter they will try to
   // press. Each jumps to Alerts already filtered to that severity.
   const pills = SEV.filter(([s]) => counts[s]).map(([s, dot]) =>
@@ -1246,7 +1254,15 @@ function renderAlertFilters() {
   // rows and the chip would claim a count the list below it contradicts (the same
   // trap already fixed for the device status chips).
   const counts = {};
-  for (const a of S.alerts) counts[a.severity] = (counts[a.severity] || 0) + 1;
+  // Scoped to the BAND on screen. These chips filter the visible list, so
+  // counting every open alert would print a total the list contradicts — the
+  // same invariant that broke once on the device status chips.
+  const dormIds = dormantIdSet();
+  const inDormBand = (a) => dormIds.has(a.deviceId);
+  const banded = S.aband === "dormant"
+    ? S.alerts.filter(inDormBand)
+    : dormIds.size ? S.alerts.filter((a) => !inDormBand(a)) : S.alerts;
+  for (const a of banded) counts[a.severity] = (counts[a.severity] || 0) + 1;
   const wrap = $("#fp");
   wrap.innerHTML = "";
   for (const [sev, dot] of SEV) {
@@ -1275,11 +1291,83 @@ function thumbFor(a) {
   return "CFG";
 }
 
+/**
+ * Which alerts belong in today's queue.
+ *
+ * 200 of ~295 open alerts sit on canvases dark for 30+ days — one has been dark
+ * 923 days. Showing them inline trained anyone reading this list to scroll past
+ * it, which is how a real critical becomes invisible. So the default list is
+ * INCIDENTS, and the dormant band is one card plus an explicit toggle. Nothing
+ * is hidden: the count is always on screen and one click lists every row.
+ */
+function dormantIdSet() {
+  const ids = (S.hyg && S.hyg.dormant && S.hyg.dormant.deviceIds) || [];
+  return new Set(ids);
+}
+
+/**
+ * The dormant rollup card and the band toggle. The card states the estate share
+ * and the darkness distribution, because "104 devices are dark" and "104 devices
+ * have been dark between a month and three years" are different facts, and the
+ * second is the one that says this is an asset problem rather than an outage.
+ */
+function renderAlertBands() {
+  const host = $("#abands");
+  if (!host) return;
+  const h = S.hyg;
+  if (!h || !h.dormant || !h.dormant.total) { host.innerHTML = ""; return; }
+  const inc = (h.incidents && h.incidents.total) || 0;
+  const dor = h.dormant.total;
+  const r = h.rollup;
+  const tab = (key, label, n) =>
+    `<button class="fp${(S.aband || "incidents") === key ? " on" : ""}" data-aband="${key}">
+       <b>${n}</b> ${label}</button>`;
+  const days = (secs) => Math.floor((secs || 0) / 86400);
+  host.innerHTML =
+    `<div class="pills" style="margin-bottom:10px">
+       ${tab("incidents", "incidents", inc)}${tab("dormant", "dormant", dor)}
+     </div>` +
+    (r
+      ? `<div class="card" style="margin-bottom:14px"><div class="wbody">
+           <div style="display:flex;gap:10px;align-items:baseline;flex-wrap:wrap">
+             <span class="d ${r.severity === "critical" ? "bd" : "wn"}"></span>
+             <b>${esc(r.title)}</b>
+             <span class="na" style="font-size:12px">${Math.round((r.estateShare || 0) * 100)}% of the estate
+               &#183; ${r.alertCount} alert(s) &#183; longest dark ${days(r.longestDarkSeconds)} days</span>
+           </div>
+           <div class="pills" style="margin-top:8px">
+             ${(r.darkness || []).map((b) => `<span class="fp" style="cursor:default"><b>${b.devices}</b> ${esc(b.label)}</span>`).join("")}
+           </div>
+           ${r.neverSeenDevices
+             ? `<div class="note">${r.neverSeenDevices} canvas(es) have never been recorded online by Videri at all,
+                  so no outage can be dated for them and no offline alert can fire. They are named here rather than
+                  counted as healthy.</div>`
+             : ""}
+           <div class="prov">These stay open and stay counted; they are moved out of the incident queue, not suppressed.
+             Critical and high are never moved.</div>
+         </div></div>`
+      : "");
+  host.querySelectorAll("[data-aband]").forEach((b) =>
+    b.addEventListener("click", () => {
+      S.aband = b.dataset.aband;
+      renderAlertFilters();
+      renderAlerts();
+    }));
+}
+
 function renderAlerts() {
   const L = $("#alist");
   L.className = "";
-  const rows = S.alerts.filter((a) => S.sev === "all" || a.severity === S.sev);
-  $("#acount").textContent = S.alerts.length;
+  const dorm = dormantIdSet();
+  // When hygiene is unavailable the set is empty and this degrades to the old
+  // behaviour — the full list — rather than an empty screen.
+  const inBand = (a) => dorm.has(a.deviceId);
+  const scoped = S.aband === "dormant"
+    ? S.alerts.filter(inBand)
+    : dorm.size ? S.alerts.filter((a) => !inBand(a)) : S.alerts;
+  const rows = scoped.filter((a) => S.sev === "all" || a.severity === S.sev);
+  $("#acount").textContent = scoped.length;
+  renderAlertBands();
   if (rows.length === 0) {
     L.innerHTML = `<div class="empty">No ${S.sev === "all" ? "" : esc(S.sev) + " "}alerts are open.</div>`;
     return;
@@ -3303,9 +3391,12 @@ async function load() {
   if (S.loading) return;
   S.loading = true;
   try {
-    const [summary, alerts, devices, compliance, pipeline, sla, brief, shots, remediation, correlation, pop, plan] = await Promise.all([
+    const [summary, alerts, hygiene, devices, compliance, pipeline, sla, brief, shots, remediation, correlation, pop, plan] = await Promise.all([
       api("/api/fleet/summary"),
       apiAll("/api/alerts"),
+      // Alert hygiene: which alerts are today's incidents vs a dormant band on
+      // long-dead canvases. Allowed to fail — the raw list still renders.
+      api("/api/alerts/hygiene").catch(() => null),
       apiAll("/api/devices"),
       apiAll("/api/compliance"),
       api("/api/pipeline/status"),
@@ -3326,6 +3417,7 @@ async function load() {
     ]);
     S.summary = summary.data;
     S.alerts = alerts.data;
+    S.hyg = hygiene && hygiene.data;
     S.devices = devices.data;
     S.compliance = compliance.data;
     S.pipeline = pipeline.data;
