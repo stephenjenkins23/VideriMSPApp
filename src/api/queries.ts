@@ -673,7 +673,22 @@ export class ReadQueries {
         // resolved", which the engine treats as "site unknown" either way.
         site: null,
         firmwareCurrent: current,
-        firmwareBehind: Boolean(current && latest && current !== latest),
+        // `behind` means only that the two STRINGS DIFFER. Verified 2026-09-02:
+      // `firmware_latest` holds exactly ONE distinct value across the whole fleet
+      // (7.0.14-release-1712-587ccc82) spanning six device classes — canvas 191,
+      // spark-bridge 33, unknown 9, allsee 7, tcl 5, allsee-shelf 4. A TCL panel
+      // and an AllSee shelf label do not share a firmware build with a Videri
+      // Canvas, so this reads as one tenant-wide value rather than a per-model
+      // target. 36 of the 130 devices we flag behind (28%) are non-canvas, and
+      // ALL 5 TCL devices are flagged behind — almost certainly an artefact
+      // rather than five upgrade opportunities.
+      // So the flag is literally true and the INFERENCE ("an upgrade exists for
+      // this device") is not safe off-Canvas. Do not build an upgrade action on
+      // it without confirming per-model semantics — docs/14 B15, docs/22 Ask 8.
+      // NOTE the firmware-cohort correlation is NOT affected: it keys on the
+      // CURRENT version ("devices running build X are failing"), which stands
+      // whatever `latest` says.
+      firmwareBehind: Boolean(current && latest && current !== latest),
         screen: {
           isBlackScreen: (r["is_black_screen"] as boolean | null) ?? null,
           showingLogo: (r["showing_logo"] as boolean | null) ?? null,
@@ -1180,6 +1195,21 @@ export class ReadQueries {
       lastOnlineTime: (r["last_online_time"] as Date | null)?.toISOString() ?? null,
       firmwareCurrent: current,
       firmwareLatest: latest,
+      // `behind` means only that the two STRINGS DIFFER. Verified 2026-09-02:
+      // `firmware_latest` holds exactly ONE distinct value across the whole fleet
+      // (7.0.14-release-1712-587ccc82) spanning six device classes — canvas 191,
+      // spark-bridge 33, unknown 9, allsee 7, tcl 5, allsee-shelf 4. A TCL panel
+      // and an AllSee shelf label do not share a firmware build with a Videri
+      // Canvas, so this reads as one tenant-wide value rather than a per-model
+      // target. 36 of the 130 devices we flag behind (28%) are non-canvas, and
+      // ALL 5 TCL devices are flagged behind — almost certainly an artefact
+      // rather than five upgrade opportunities.
+      // So the flag is literally true and the INFERENCE ("an upgrade exists for
+      // this device") is not safe off-Canvas. Do not build an upgrade action on
+      // it without confirming per-model semantics — docs/14 B15, docs/22 Ask 8.
+      // NOTE the firmware-cohort correlation is NOT affected: it keys on the
+      // CURRENT version ("devices running build X are failing"), which stands
+      // whatever `latest` says.
       firmwareBehind: Boolean(current && latest && current !== latest),
       openAlerts: {
         critical: Number(r["critical"] ?? 0),
