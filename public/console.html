@@ -511,6 +511,21 @@ table.dt td.n{font-variant-numeric:tabular-nums}
 /* Same trap as `.kv .k .prov` above: inline, a table-cell sublabel concatenates
    into the value — "every 8 minmeasured · median of 39 gaps". */
 table.dt td .prov{display:block;margin-top:2px;white-space:normal;max-width:34ch}
+/* An unresolved site is a FACT WITH A REASON, not a blank cell. `.na` alone is
+   not enough here: it is only ever styled in context (`.kv .v.na`, `.met.na`,
+   `.note.na`), so a bare `<span class="na">` inside a table cell computes to
+   full body colour — i.e. an unreadable value rendered as if it were a real one.
+   Muted AND italic, so the 16 devices the hierarchy could not place read as
+   unplaced at a glance instead of disappearing into the column. */
+.unres{color:var(--tx-3);font-style:italic;font-size:11.5px;white-space:normal;
+  display:inline-block;max-width:34ch;line-height:1.35}
+/* The correlated-finding drilldown: the device list a finding expands into.
+   Indented under the finding it belongs to so 43 rows cannot be mistaken for
+   43 findings. */
+.fdrill{padding:0 16px 12px 73px;background:var(--card-2);border-top:1px solid var(--bd-2)}
+.fdrill .fdr{display:flex;gap:9px;align-items:baseline;padding:5px 0;font-size:12px}
+.fdrill .fdr .fdn{font-weight:600;min-width:0}
+.fdrill .fdr .fds{color:var(--tx-3);font-size:11px}
 /* .sev colours are defined above but only sized inside .bitem; pipeline
    findings use the same chips outside a .bitem, so give them a base. */
 .sev{display:inline-block;font-size:9.5px;font-weight:700;letter-spacing:.06em;
@@ -698,12 +713,17 @@ table.dt td .prov{display:block;margin-top:2px;white-space:normal;max-width:34ch
     <div class="card">
       <div class="chd">
         <h2>&#128421; Devices <span class="cnt" id="dcount">&#8212;</span></h2>
+        <div class="r"><span class="prov" id="dsub"></span></div>
       </div>
       <div class="srch">
-        <input id="q" type="search" placeholder="Search by name, location, serial or id&#8230;"
+        <input id="q" type="search" placeholder="Search by name, site, location, serial or id&#8230;"
                aria-label="Search devices">
       </div>
       <div class="tbar" id="dfilters"></div>
+      <!-- Site filter and the drilldown banner. Deliberately NOT inside
+           #dfilters: those children are the status chips, and every one of them
+           is asserted to read "<b>N</b> label" by the console invariants. -->
+      <div class="tbar" id="dctl"></div>
       <div id="dtable"><div class="skel"><span class="sk line"></span><span class="sk row"></span>
         <span class="sk row"></span><span class="sk row"></span></div></div>
       <div id="dtrunc"></div>
@@ -1002,6 +1022,13 @@ function dur(sec) {
 }
 
 /* ---- state ------------------------------------------------------- */
+/** Trend windows offered, SHORTEST FIRST — the order is load-bearing, because
+ *  trendsAutoWindow() walks it and opens the tab on the first window whose own
+ *  gates clear. Declared up here rather than beside the Trends renderers only
+ *  because S's initialiser reads TR_WINDOWS[0], and a `const` read from above
+ *  its declaration is a TDZ ReferenceError that kills the whole script. */
+const TR_WINDOWS = [1, 3, 7, 14, 30];
+
 const S = { summary: null, alerts: [], devices: [], compliance: [], pipeline: null,
             fresh: null, sev: "all", cls: "all", q: "", dev: null, dtab: "overview",
             sort: { key: "status", dir: 1 }, loading: false, brief: null, sla: null,
@@ -1015,7 +1042,20 @@ const S = { summary: null, alerts: [], devices: [], compliance: [], pipeline: nu
             // Our own collector's health, and the lane-status filter for it.
             pipe: null, plane: "all",
             // Trends: the window is state because every figure is labelled with it.
-            trends: null, trwin: 7, trloading: false, trdir: "all" };
+            // `trwin` opens at the shortest candidate window rather than a fixed
+            // 7 days, which refuses on this tenant; trendsAutoWindow() escalates
+            // from here and `trauto` records what it tried and why.
+            trends: null, trwin: TR_WINDOWS[0], trloading: false, trdir: "all", trauto: null,
+            // The site axis (US-8.1.2/8.1.3). `dsite` is a site id, "all", or
+            // the "unplaced" pseudo-site; `dsites` is meta.sites, which says
+            // whether the column is UNAVAILABLE as opposed to merely empty.
+            dsite: "all", dsites: null,
+            // A device-id drilldown handed over by a correlated finding or a
+            // plan item (US-8.1.4). Holds the ids AND the sentence that says
+            // where they came from, so a narrowed table always explains itself.
+            dids: null,
+            // Which correlated finding is expanded into its device list.
+            cfind: null };
 
 /* ===================================================================
    Freshness. This is the first thing rendered and the loudest thing on
@@ -1342,6 +1382,11 @@ function renderStatusWidget() {
   el.querySelectorAll(".srow").forEach((b) =>
     b.addEventListener("click", () => {
       S.cls = b.dataset.status;
+      // This widget's numbers are FLEET-WIDE, so the table it opens must be
+      // too: landing on "80 offline" and seeing eight rows because a site
+      // filter was still set is the same contradiction in two clicks.
+      S.dsite = "all";
+      S.dids = null;
       switchTab("devices");
       renderDeviceFilters(); renderDevices();
     }));
@@ -2141,13 +2186,45 @@ function renderDeviceFilters() {
   // expression, and the two disagreed on screen: the pills claimed "0 warning"
   // while warning rows sat directly beneath them. A filter must be counted from
   // the thing it filters, or the dashboard contradicts itself in public.
+  //
+  // The set these chips count is the fleet AFTER the site filter, the id
+  // drilldown and the search — exactly the three predicates renderDevices()
+  // applies before the status one, so clicking a chip renders the number the
+  // chip printed. Counting the whole fleet here would put "142 offline" above
+  // eight rows, which is the 248-above-250 bug in a new costume.
+  //
+  // The predicate is spelled out in BOTH renderers on purpose. These two
+  // functions are lifted by name and run in isolation by the console-invariant
+  // tests, so a shared top-level helper would be undefined there — the same
+  // reason renderDevices() reads the truncation mark inline.
+  const q = S.q.trim().toLowerCase();
+  const ids = (S.dids && S.dids.ids) || null;
+  const inDrill = (d) => !ids || ids.has(d.id);
+  const inSearch = (d) => !q || [d.name, d.location, d.id, d.serialNo, d.deviceClass, d.city,
+                                 d.site && d.site.name, d.groupName]
+    .some((v) => v && String(v).toLowerCase().includes(q));
+  const atSite = (d) => {
+    if (!S.dsite || S.dsite === "all") return true;
+    const sid = (d.site && d.site.id) || null;
+    // "unplaced" is the 16 devices in no group. They are a real, nameable
+    // cohort, so they get a filter of their own rather than only ever being
+    // visible inside "All".
+    return S.dsite === "unplaced" ? sid === null : sid === S.dsite;
+  };
+  const atStatus = (d) => S.cls === "all" || d.status === S.cls;
+  // Two different subsets, and the difference is the point: every control's
+  // options are counted with all the OTHER controls held fixed, so the number
+  // on a control is the number of rows choosing it would render. Same contract
+  // as the Alerts tab's rule/age selects.
+  const scope = S.devices.filter((d) => inDrill(d) && inSearch(d) && atSite(d));
+  const preSite = S.devices.filter((d) => inDrill(d) && inSearch(d) && atStatus(d));
   const by = {};
-  for (const d of S.devices) by[d.status] = (by[d.status] || 0) + 1;
+  for (const d of scope) by[d.status] = (by[d.status] || 0) + 1;
   const wrap = $("#dfilters");
   wrap.innerHTML = "";
   // Same derived order as the overview widget, so a status can never exist in the
   // table without a chip to filter it — the chips must sum to All.
-  const opts = [["all", "All", S.devices.length]].concat(
+  const opts = [["all", "All", scope.length]].concat(
     statusOrder(by).map((k) => [k, k, by[k] || 0]));
   for (const [key, label, n] of opts) {
     const b = document.createElement("button");
@@ -2157,12 +2234,71 @@ function renderDeviceFilters() {
     b.addEventListener("click", () => { S.cls = key; renderDeviceFilters(); renderDevices(); });
     wrap.appendChild(b);
   }
+
+  /* ---- the site axis (US-8.1.3) --------------------------------------
+     Options come from the rows on screen, so every entry has devices behind
+     it and carries the count choosing it would render. meta.sites tells us
+     whether the whole COLUMN is unavailable, which is a different statement
+     from "every device is unplaced" and must not be collapsed into it. */
+  const ctl = $("#dctl");
+  if (!ctl) return;
+  const meta = S.dsites;
+  const siteOff = !!(meta && meta.available === false);
+  // Counted over `preSite` — the fleet with every filter EXCEPT this one
+  // applied. Counting the already-site-filtered rows left the select holding a
+  // single option, so choosing a different site meant clearing the filter first.
+  const seen = new Map();
+  let unplaced = 0;
+  for (const d of preSite) {
+    const st = d.site || null;
+    if (st && st.id && st.name) seen.set(st.id, { name: st.name, n: (seen.get(st.id) || { n: 0 }).n + 1 });
+    else unplaced++;
+  }
+  const sites = [...seen.entries()].sort((a, b) => a[1].name.localeCompare(b[1].name));
+  const filtered = S.dsite !== "all" || !!ids || !!q || S.cls !== "all";
+  ctl.innerHTML = siteOff
+    ? `<span class="unres">Site filter unavailable &#8212;
+         ${esc((meta.reason || "the group hierarchy could not be read").replace(/\.$/, ""))}.
+         The Site column says the same rather than showing every device as unplaced.</span>`
+    : `<label for="dsitesel">Site</label><select id="dsitesel">` +
+      [[`all`, `All sites`, preSite.length]]
+        .concat(sites.map(([id, v]) => [id, v.name, v.n]))
+        .concat(unplaced ? [["unplaced", "Not placed at a site", unplaced]] : [])
+        .map(([k, text, n]) => `<option value="${esc(k)}"${k === S.dsite ? " selected" : ""}>` +
+          `${esc(text)} (${n})</option>`).join("") + `</select>` +
+      `<span class="prov">${sites.length} site${sites.length === 1 ? "" : "s"} on
+         ${meta && meta.groupsRead != null ? `${meta.groupsRead} group(s) read` : "the loaded rows"}${
+         meta && meta.truncated ? ", and the hierarchy read was itself short" : ""}</span>` +
+      (S.dids
+        ? `<button class="fp" id="ddclear">&#10005; Clear the ${S.dids.ids.size}-device drilldown</button>`
+        : "") +
+      (filtered ? `<button class="fp" id="dclear">&#10005; Clear filters</button>` : "");
+  // Rebuilt every render, so handlers attach to the element now on screen.
+  const sel = $("#dsitesel");
+  if (sel) sel.addEventListener("change", () => {
+    S.dsite = sel.value;
+    renderDeviceFilters(); renderDevices();
+  });
+  const dd = $("#ddclear");
+  if (dd) dd.addEventListener("click", () => {
+    S.dids = null; renderDeviceFilters(); renderDevices();
+  });
+  const clr = $("#dclear");
+  if (clr) clr.addEventListener("click", () => {
+    S.dsite = "all"; S.cls = "all"; S.q = ""; S.dids = null;
+    const box = $("#q");
+    if (box) box.value = "";
+    renderDeviceFilters(); renderDevices();
+  });
 }
 
 /** Sort accessors. Status sorts by urgency, not alphabet — an ops table's
  *  default order should put what needs attention on top. */
 const SORTS = {
   name:    (d) => (d.name || d.id).toLowerCase(),
+  // An unresolved site sorts LAST ascending rather than first, so sorting by
+  // site does not open on sixteen rows of "no group". They are still there.
+  site:    (d) => (d.site && d.site.name ? d.site.name.toLowerCase() : "\uffff"),
   class:   (d) => d.deviceClass,
   status:  (d) => ({ offline: 0, warning: 1, unknown: 2, online: 3 }[d.status] ?? 4),
   seen:    (d) => (d.lastOnlineTime ? -new Date(d.lastOnlineTime).getTime() : 0),
@@ -2172,10 +2308,22 @@ const SORTS = {
 
 function renderDevices() {
   const q = S.q.trim().toLowerCase();
+  const ids = (S.dids && S.dids.ids) || null;
+  // The same four predicates renderDeviceFilters() counted, in the same order,
+  // written out again for the same reason it wrote them out: both functions are
+  // lifted and run in isolation by the console-invariant tests, so a shared
+  // top-level helper would be undefined there. If you change one, change both —
+  // the durable test asserts each status chip equals the rows it renders.
   const rows = S.devices.filter((d) => {
+    if (ids && !ids.has(d.id)) return false;
+    if (S.dsite && S.dsite !== "all") {
+      const sid = (d.site && d.site.id) || null;
+      if (S.dsite === "unplaced" ? sid !== null : sid !== S.dsite) return false;
+    }
     if (S.cls !== "all" && d.status !== S.cls) return false;
     if (!q) return true;
-    return [d.name, d.location, d.id, d.serialNo, d.deviceClass, d.city]
+    return [d.name, d.location, d.id, d.serialNo, d.deviceClass, d.city,
+            d.site && d.site.name, d.groupName]
       .some((v) => v && String(v).toLowerCase().includes(q));
   });
   const acc = SORTS[S.sort.key] || SORTS.status;
@@ -2188,19 +2336,53 @@ function renderDevices() {
   // run in isolation by the console-invariant tests; the sentence that explains
   // the mark belongs to renderTruncationBanner().
   const short = !!(S.trunc || {}).devices;
-  $("#dcount").textContent = String(S.devices.length) + (short ? "+" : "");
+  const mark = short ? "+" : "";
+  // The header reports the MATCHED rows, and #dsub beneath it says which filter
+  // produced that number and what it was drawn from — both written here, from
+  // this one array, so the number and the sentence can never disagree.
+  $("#dcount").textContent = String(rows.length) + mark;
+  const sub = $("#dsub");
+  if (sub) {
+    const parts = [];
+    if (S.dids) parts.push(S.dids.label);
+    if (S.dsite === "unplaced") parts.push("not placed at any site");
+    else if (S.dsite !== "all") {
+      // Named from the whole fleet, not from `rows` — a site filter matching
+      // nothing must still say WHICH site, or the empty table has no subject.
+      const named = S.devices.find((d) => d.site && d.site.id === S.dsite);
+      parts.push(named ? `site ${named.site.name}`
+        : `a site (${S.dsite}) that no loaded device belongs to`);
+    }
+    if (S.cls !== "all") parts.push(`status ${S.cls}`);
+    if (q) parts.push(`search "${S.q.trim()}"`);
+    sub.textContent = parts.length
+      ? `${rows.length}${mark} of ${S.devices.length}${mark} device(s) match: ${parts.join(" \u00b7 ")}`
+      : `${S.devices.length}${mark} device(s), no filter applied`;
+  }
   const T = $("#dtable");
   T.className = "";
-  if (rows.length === 0) { T.innerHTML = `<div class="empty">No devices match.</div>`; return; }
+  if (rows.length === 0) {
+    // Say WHY. "No devices match" over an active site filter reads as an empty
+    // fleet; it is an excluded one.
+    T.innerHTML = `<div class="empty">No device matches these filters &#8212;
+      ${S.devices.length}${mark} device(s) loaded. Clear the filters above to see them.</div>`;
+    return;
+  }
   const shown = rows.slice(0, 200);
   const th = (key, label) => {
     const active = S.sort.key === key;
     return `<th data-sort="${key}" aria-sort="${active ? (S.sort.dir === 1 ? "ascending" : "descending") : "none"}">` +
       `${label}${active ? `<span class="dir">${S.sort.dir === 1 ? "&#9650;" : "&#9660;"}</span>` : ""}</th>`;
   };
+  // Is the SITE AXIS ITSELF available? `available === false` means the group
+  // hierarchy could not be read, which is a different fact from "this device is
+  // in no group" and must not be rendered as one. A missing meta block means we
+  // were not told either way, so the per-row answer stands on its own.
+  const siteOff = !!(S.dsites && S.dsites.available === false);
+  const siteOffWhy = (S.dsites && S.dsites.reason) || "the group hierarchy could not be read";
   T.innerHTML =
     `<div class="tblwrap"><table class="dt"><thead><tr>
-       ${th("name", "Device")}${th("class", "Class")}${th("status", "Status")}${th("seen", "Last seen")}
+       ${th("name", "Device")}${th("site", "Site")}${th("class", "Class")}${th("status", "Status")}${th("seen", "Last seen")}
        ${th("fw", "Firmware")}${th("alerts", "Alerts")}<th>Now playing</th></tr></thead><tbody>` +
     shown.map((d) => {
       const l = d.latest || {};
@@ -2210,8 +2392,23 @@ function renderDevices() {
         : l.isBlackScreen ? `<span class="v wn">Black screen</span>`
         : `<span class="na">Not reported</span>`;
       const al = d.openAlerts || {};
+      /* The site cell is `site.name ?? site.reason`, and the API guarantees one
+         of the two is a non-empty string. The reason renders muted and italic
+         so the sixteen devices in no group read as UNPLACED rather than as a
+         blank we forgot to fill in. The group is shown beneath the site when it
+         differs, because the site is the tree root and the group is the leaf the
+         device actually sits in — "Videri Sales / SJ Office VQ Left". */
+      const st = d.site || null;
+      const siteCell = siteOff
+        ? `<span class="unres">unavailable &#8212; ${esc(siteOffWhy)}</span>`
+        : st && st.name
+          ? `${esc(st.name)}${d.groupName && d.groupName !== st.name
+              ? `<div class="prov">${esc(d.groupName)}</div>` : ""}`
+          : `<span class="unres">${esc((st && st.reason)
+              || "no site reported by the platform")}</span>`;
       return `<tr class="r" data-id="${esc(d.id)}">
         <td><b>${esc(d.name || d.id)}</b>${d.location ? `<div class="prov">${esc(d.location)}</div>` : ""}</td>
+        <td>${siteCell}</td>
         <td>${esc(d.deviceClass)}</td>
         <td><span class="sdot ${esc(d.status)}"></span>${esc(d.status)}</td>
         <td class="n">${ago(d.lastOnlineTime)}</td>
@@ -2455,8 +2652,29 @@ function paintDevice() {
   $("#dst").textContent = String(d.status || "").toUpperCase();
   $("#dst").className = "tag " + (d.status === "online" ? "on" : "");
   $("#dcls").textContent = d.productName || d.deviceClass || "—";
-  $("#dloc").innerHTML = d.location
-    ? `&#128205; ${esc(d.location)}` : `<span class="na">Location not reported</span>`;
+  /* Where this device IS. It read "Location not reported" on all 248 devices
+     while the API was returning a site and a group for 232 of them: `location`
+     is a free-text field the platform leaves null, and the placement actually
+     lives in the group hierarchy. So the site leads, the group follows when it
+     adds anything, and free-text `location`/`city` are extra rather than the
+     whole answer. An unplaced device shows the reason it is unplaced. */
+  const st = d.site || null;
+  const sitesOff = !!(S.dsites && S.dsites.available === false);
+  const place = sitesOff
+    ? `<span class="unres">Site unavailable &#8212; ${esc((S.dsites && S.dsites.reason)
+        || "the group hierarchy could not be read")}</span>`
+    : st && st.name
+      ? `&#127970; ${esc(st.name)}` +
+        (d.groupName && d.groupName !== st.name ? ` <span class="na">/ ${esc(d.groupName)}</span>` : "")
+      : `<span class="unres">${esc((st && st.reason) || "Not placed at a site")}</span>`;
+  const extra = [d.location, d.city].filter(Boolean).map((v) => esc(v)).join(" &#183; ");
+  $("#dloc").innerHTML = place + (extra ? ` <span class="na">&#183; &#128205; ${extra}</span>` : "") +
+    // accountName is projected honestly and is null on every device on this
+    // tenant, so it is NOT a column — 248 blank cells read as broken software.
+    // In the drawer it can carry its own reason, which is the honest place for it.
+    ` <span class="na">&#183; Account: ${d.accountName ? esc(d.accountName)
+      : `<span class="unres">not reported by the platform</span>`}</span>` +
+    ((d.tags || []).length ? ` <span class="na">&#183; ${(d.tags || []).map((t) => esc(t)).join(", ")}</span>` : "");
 
   $("#dtools").innerHTML = TOOLS.map((tool, i) =>
     tool.cmd
@@ -3965,13 +4183,17 @@ function renderPipelineWidget() {
    because shorter windows can qualify, and every figure names its window
    in words — a bare percentage here would be uninterpretable.
    =================================================================== */
-const TR_WINDOWS = [1, 3, 7, 14, 30];
 /* A measured 0.2% must not print as "0%" next to a rule about honest zeros —
    a true zero (a device online for none of the window) still prints 0%. */
 const pctW = (v) => v == null ? "&#8212;"
   : v > 0 && v < 0.005 ? "&lt;1%" : Math.round(v * 100) + "%";
 
+/** Set once the operator picks a window by hand. The auto-open walk below must
+ *  never overwrite a deliberate choice that landed while it was still probing. */
+let TR_USER_PICKED = false;
+
 async function loadTrends(days) {
+  TR_USER_PICKED = true;
   S.trwin = days;
   S.trloading = true;
   S.trdir = "all";
@@ -3981,6 +4203,70 @@ async function loadTrends(days) {
   if (S.trwin !== days) return;
   S.trends = res && res.data;
   S.trloading = false;
+  renderTrends();
+}
+
+/**
+ * GAP-6: open the tab on the shortest window that clears its OWN gates.
+ *
+ * The tab used to default to 7 days, where availability refuses (the prior
+ * window holds ~6 observed buckets against the 48 the engine requires) and
+ * storage and silence yield nothing — so the default view of the predictive tab
+ * was three refusals, and the detector that works was effectively hidden. The
+ * refusal is not the bug and is not hidden here: it still renders in full
+ * whenever the chosen window earns it, and the window control still offers
+ * every window including the ones that refuse.
+ *
+ * What changed is which window we OPEN on. TR_WINDOWS is shortest-first; this
+ * walks it and stops at the first window whose availability gate clears,
+ * recording every window it tried and the reason each was rejected so the panel
+ * can name the choice and justify it. If none clear, the shortest window's
+ * refusal stands — there is nothing else to show, and inventing a window that
+ * "works" by lowering the bar is the one thing this engine exists not to do.
+ *
+ * Cost: load() already fetched TR_WINDOWS[0], so on this tenant this costs zero
+ * extra requests. It only pays for probes when the short windows refuse.
+ */
+async function trendsAutoWindow() {
+  const tried = [];
+  for (const days of TR_WINDOWS) {
+    if (TR_USER_PICKED) return;
+    // load() already has the first candidate; do not re-fetch it.
+    let t = (S.trwin === days && S.trends) ? S.trends : null;
+    if (!t) {
+      // Move the window BEFORE the fetch so the skeleton names the window it is
+      // actually computing, and record the walk so the note can say we probed.
+      S.trwin = days;
+      S.trloading = true;
+      S.trauto = { probing: days, tried: tried.slice(), chosen: null, exhausted: false };
+      renderTrends();
+      const res = await api(`/api/trends?windowDays=${days}`).catch(() => null);
+      S.trloading = false;
+      t = res && res.data;
+    }
+    if (TR_USER_PICKED) { renderTrends(); return; }
+    const a = t && t.availability;
+    tried.push({
+      days,
+      available: !!(a && a.available),
+      reason: a ? a.reason : "the trends endpoint did not answer for this window",
+    });
+    if (a && a.available) {
+      S.trwin = days;
+      S.trends = t;
+      S.trauto = { chosen: days, tried, exhausted: false };
+      renderTrends();
+      return;
+    }
+  }
+  // Every window refused. Keep the shortest one on screen: it is the window
+  // closest to clearing, and its stated reason is the most informative.
+  S.trauto = { chosen: TR_WINDOWS[0], tried, exhausted: true };
+  if (S.trwin !== TR_WINDOWS[0]) {
+    const res = await api(`/api/trends?windowDays=${TR_WINDOWS[0]}`).catch(() => null);
+    S.trwin = TR_WINDOWS[0];
+    S.trends = res && res.data;
+  }
   renderTrends();
 }
 
@@ -4258,10 +4544,34 @@ function renderTrends() {
     b.addEventListener("click", () => loadTrends(Number(b.dataset.d))));
   const winWords = S.trwin === 1 ? ["the last day", "the day before"]
     : [`the last ${S.trwin} days`, `the previous ${S.trwin} days`];
+  /* WHICH window we opened on, and WHY (GAP-6). A default that silently lands
+     on a window is exactly as unhelpful as a default that refuses, so the walk
+     is spelled out: the window chosen, and the reason every shorter-or-equal
+     window we rejected was rejected. Only rendered while the auto-open choice
+     is still the one on screen — once the operator picks a window by hand, the
+     note stops explaining a choice they overrode. */
+  const A = S.trauto;
+  const autoNote = !A ? ""
+    : A.probing != null
+      ? `<div class="prov">Looking for the shortest window that clears the
+           engine's own minimum &#8212; trying ${A.probing === 1 ? "1 day" : A.probing + " days"}.</div>`
+      : A.chosen !== S.trwin ? ""
+      : A.exhausted
+        ? `<div class="prov"><b>Every window offered refuses on this tenant.</b>
+             Showing the shortest, ${A.chosen === 1 ? "1 day" : A.chosen + " days"}, because it is
+             the closest to clearing. ${A.tried.map((x) => `${x.days} day${x.days === 1 ? "" : "s"}: ${esc(x.reason || "refused")}`).join(" ")}</div>`
+        : `<div class="prov">Opened on <b>${A.chosen === 1 ? "1 day" : A.chosen + " days"}</b>
+             &#8212; the shortest window whose availability comparison clears the engine's own
+             minimum.${A.tried.length > 1
+               ? ` Shorter windows were tried first and refused: ${A.tried.filter((x) => !x.available)
+                   .map((x) => `${x.days} day${x.days === 1 ? "" : "s"} (${esc(x.reason || "refused")})`).join("; ")}.`
+               : ""}
+             Longer windows are still offered above and may refuse &#8212; that refusal is a
+             real answer, not an error.</div>`;
   $("#trwinnote").innerHTML =
     `The window drives the availability comparison: <b>${winWords[0]}</b>
      against <b>${winWords[1]}</b>. Storage fill and transmission
-     silence carry their own windows, stated on each card.`;
+     silence carry their own windows, stated on each card.` + autoNote;
 
   if (S.trloading) {
     $("#trmeta").textContent = `computing the last ${S.trwin} days…`;
@@ -4363,6 +4673,34 @@ function renderRollups() {
  */
 const SEV_COLOR = { critical: "var(--red)", high: "var(--amber)", medium: "var(--amber)", low: "var(--na)" };
 
+/** How many affected devices a finding lists inline before deferring to the
+ *  Devices table. A 43-row list inside a findings card stops being a finding. */
+const FDRILL_SHOWN = 40;
+
+/**
+ * Hand a named set of device ids to the Devices table and go there (US-8.1.4).
+ *
+ * The QA pass's sharpest criticism was that the product "repeatedly knows the
+ * right answer and refuses to hand it over as a list you can act on": the
+ * correlated findings named their devices in `affectedDeviceIds` and rendered
+ * with `cursor:default`. This is the handover.
+ *
+ * It CLEARS the status chip, the search box and the site filter on the way in,
+ * because a finding that says 43 devices must land on 43 rows. Leaving a stale
+ * "offline" chip set would show eight of them under a header saying 43, which
+ * is the one invariant this file has broken three times.
+ */
+function drillToDevices(ids, label) {
+  S.dids = { ids: new Set(ids), label };
+  S.dsite = "all";
+  S.cls = "all";
+  S.q = "";
+  const box = $("#q");
+  if (box) box.value = "";
+  switchTab("devices");
+  renderDeviceFilters(); renderDevices();
+}
+
 function renderActions() {
   const el = $("#actionsbody");
   const R = S.remediation;
@@ -4413,15 +4751,56 @@ function renderActions() {
   const C = S.correlation;
   const findings = (C && Array.isArray(C.findings)) ? C.findings : [];
   const cnotes = (C && Array.isArray(C.notes)) ? C.notes : [];
+  /* Every finding EXPANDS into the devices it names, and hands them to the
+     Devices table as a filter. `affectedDeviceIds` was already in the payload;
+     the row just refused to give it up. */
+  const findingRow = (f) => {
+    const ids = f.affectedDeviceIds || [];
+    const open = S.cfind === f.id;
+    const col = SEV_COLOR[f.severity] || "var(--na)";
+    const head = `<button class="arow" data-find="${esc(f.id)}" aria-expanded="${open}" style="align-items:flex-start">
+      <span class="thumb" style="background:${col}22;display:flex;align-items:center;justify-content:center;color:${col};font-weight:700;font-size:11px">${(f.severity||"?")[0].toUpperCase()}</span>
+      <span><span class="ti">${esc(f.summary||"")}</span>
+        <span class="ds">${esc(f.rationale||"")}</span>
+        <span class="mt">${ids.length} device(s) affected &#183;
+          ${open ? "listed below" : "click to list them"}</span></span>
+      <span class="btn sm">${open ? "Hide &#9652;" : `${ids.length} devices &#9662;`}</span></button>`;
+    if (!open) return head;
+    // The list. A device id we do not hold is shown AS an id with the reason,
+    // never dropped — a finding naming 43 must not quietly list 41.
+    const shown = ids.slice(0, FDRILL_SHOWN);
+    const rows = shown.map((id) => {
+      const dv = (S.devices || []).find((x) => x.id === id);
+      if (!dv) {
+        return `<div class="fdr"><span class="fdn">${esc(id)}</span>
+          <span class="unres">not in the loaded fleet list, so nothing more is known here</span></div>`;
+      }
+      const st = dv.site || null;
+      const place = st && st.name ? esc(st.name)
+        : `<span class="unres">${esc((st && st.reason) || "not placed at a site")}</span>`;
+      return `<div class="fdr"><span class="sdot ${esc(dv.status)}"></span>
+        <span class="fdn">${esc(dv.name || dv.id)}</span>
+        <span class="fds">${esc(dv.status)} &#183; ${place}</span>
+        <button class="btn sm" data-act-open="${esc(dv.id)}">Open</button></div>`;
+    }).join("");
+    return head + `<div class="fdrill">
+      <div class="fdr" style="padding-bottom:9px">
+        <button class="btn sm pri" data-find-all="${esc(f.id)}">Show these
+          ${ids.length} in the Devices table &#8594;</button>
+        <span class="fds">Filters the table to exactly these ${ids.length} device ids
+          &#8212; the status chip, the search box and the site filter are cleared,
+          so the table shows ${ids.length} rows and says why.</span></div>
+      ${rows}
+      ${ids.length > shown.length
+        ? `<div class="fdr"><span class="fds">+ ${ids.length - shown.length} more not
+             listed here &#8212; use the button above to see all ${ids.length}.</span></div>`
+        : ""}</div>`;
+  };
   const corrCard = (findings.length || cnotes.length)
-    ? `<div class="card" style="margin-bottom:16px"><div class="chd"><h2>&#128279; Correlated findings</h2>
-         <span class="na" style="font-size:12px">Root-cause patterns — many symptoms, one cause</span></div>
+    ? `<div class="card" style="margin-bottom:16px"><div class="chd" id="corrhd"><h2>&#128279; Correlated findings</h2>
+         <span class="na" style="font-size:12px">Root-cause patterns — many symptoms, one cause. Click one for its devices.</span></div>
        <div class="wbody">
-         ${findings.map((f) => `<div class="arow" style="cursor:default;align-items:flex-start">
-           <span class="thumb" style="background:${SEV_COLOR[f.severity]}22;display:flex;align-items:center;justify-content:center;color:${SEV_COLOR[f.severity]};font-weight:700;font-size:11px">${(f.severity||"?")[0].toUpperCase()}</span>
-           <span><span class="ti">${esc(f.summary||"")}</span>
-             <span class="ds">${esc(f.rationale||"")}</span>
-             <span class="mt">${(f.affectedDeviceIds||[]).length} device(s) affected</span></span></div>`).join("")}
+         ${findings.map(findingRow).join("")}
          ${cnotes.map((n) => `<div class="na" style="font-size:12px;padding:9px 4px;border-top:1px solid var(--bd-2)">&#8505;&#65039; ${esc(n.message||n.summary||"")}</div>`).join("")}
        </div></div>`
     : "";
@@ -4515,14 +4894,45 @@ function renderActions() {
        ${aiStaleBanner("plan", PL.generatedAt, PL.ageSeconds)}
        <div class="wbody">
          ${plan.focus ? `<div class="note" style="margin-bottom:10px">${esc(plan.focus)}</div>` : ""}
-         ${plan.items.map((it) => `<div class="arow" style="cursor:default;align-items:flex-start">
+         ${plan.items.map((it) => {
+           const pids = (it.deviceIds || []).filter(Boolean);
+           /* On this tenant every plan item carries `deviceIds: []` — the model
+              was given labels, not ids, and said so in notCovered. A server-side
+              fix is in flight. Until it lands we do NOT invent a drilldown: an
+              item with no ids gets the SCOPE IN PROSE it does have, plus a link
+              to the live correlated finding it cites, matched on the label
+              quoted in `source`. The finding's numbers are today's; the plan's
+              are from when it was generated, which is why both are labelled. */
+           const cited = pids.length ? null : (() => {
+             for (const m of String(it.source || "").matchAll(/'([^']+)'/g)) {
+               const f = findings.find((x) => (x.summary || "").includes(m[1])
+                 || (x.rationale || "").includes(m[1]));
+               if (f) return f;
+             }
+             return null;
+           })();
+           return `<div class="arow" style="cursor:default;align-items:flex-start">
            <span class="thumb" style="background:var(--violet)22;display:flex;align-items:center;justify-content:center;color:var(--violet);font-weight:800;font-size:13px">${it.rank}</span>
            <span><span class="ti">${esc(it.title || "")}
              ${it.kind === "auto-safe" ? `<span class="v ok" style="font-size:11px">one-click</span>` : ""}</span>
              <span class="ds">${esc(it.action || "")}</span>
              <span class="mt">${esc(it.reasoning || "")}</span>
-             ${it.expectedImpact ? `<span class="mt"><b>Impact:</b> ${esc(it.expectedImpact)}</span>` : ""}</span>
-           <span class="fp" style="cursor:default;align-self:center"><b>${it.affectedCount ?? "—"}</b></span></div>`).join("")}
+             ${it.expectedImpact ? `<span class="mt"><b>Impact:</b> ${esc(it.expectedImpact)}</span>` : ""}
+             ${it.deviceScope ? `<span class="mt"><b>Scope:</b> ${esc(it.deviceScope)}</span>` : ""}
+             ${it.source ? `<span class="mt">Cites <em>${esc(it.source)}</em></span>` : ""}
+             ${pids.length
+               ? `<span class="mt"><button class="btn sm pri" data-plan-ids="${esc(it.rank)}">Show
+                    these ${pids.length} device(s) &#8594;</button></span>`
+               : cited
+                 ? `<span class="mt"><button class="btn sm" data-plan-find="${esc(cited.id)}">Open the
+                      cited finding, which does name its devices &#8594;</button>
+                    <span class="unres">This plan item carries no device ids, so this opens the live
+                      finding it cites &#8212; today's numbers, not the plan's.</span></span>`
+                 : `<span class="mt"><span class="unres">This item carries no device ids and cites no
+                      finding we hold, so there is no list to open &#8212; the devices it names are in
+                      the text above. The plan's own notCovered says ids were never supplied.</span></span>`}</span>
+           <span class="fp" style="cursor:default;align-self:center"><b>${it.affectedCount ?? "—"}</b></span></div>`;
+         }).join("")}
          ${(plan.notCovered || []).length
            ? `<div class="sechd">&#128683; The plan could not assess</div>` +
              (plan.notCovered).map((n) => `<div class="na" style="font-size:12px;padding:7px 4px;border-top:1px solid var(--bd-2)">${esc(n)}</div>`).join("")
@@ -4551,6 +4961,41 @@ function renderActions() {
     b.addEventListener("click", () => { const id = b.dataset.actOpen; if (id) openDevice(id); }));
   el.querySelectorAll("[data-pop-open]").forEach((b) =>
     b.addEventListener("click", () => { const id = b.dataset.popOpen; if (id) openDevice(id); }));
+  // Expand / collapse a finding into its devices.
+  el.querySelectorAll("[data-find]").forEach((b) =>
+    b.addEventListener("click", () => {
+      S.cfind = S.cfind === b.dataset.find ? null : b.dataset.find;
+      const id = S.cfind;
+      renderActions();
+      // The row moved in the re-render, so scroll to the one now on screen.
+      const now = id && el.querySelector(`[data-find="${id}"]`);
+      if (now) now.scrollIntoView({ behavior: "smooth", block: "center" });
+    }));
+  // Hand a finding's devices to the Devices table.
+  el.querySelectorAll("[data-find-all]").forEach((b) =>
+    b.addEventListener("click", () => {
+      const f = findings.find((x) => x.id === b.dataset.findAll);
+      if (!f) return;
+      const ids = f.affectedDeviceIds || [];
+      drillToDevices(ids, `the ${ids.length} device(s) named by the correlated finding “${f.summary}”`);
+    }));
+  // A plan item that DOES carry ids gets the same handover.
+  el.querySelectorAll("[data-plan-ids]").forEach((b) =>
+    b.addEventListener("click", () => {
+      const it = ((plan && plan.items) || []).find((x) => String(x.rank) === b.dataset.planIds);
+      if (!it) return;
+      const ids = (it.deviceIds || []).filter(Boolean);
+      drillToDevices(ids, `the ${ids.length} device(s) named by plan item ${it.rank}: “${it.title}”`);
+    }));
+  // A plan item with no ids links to the finding it cites, rather than to a
+  // fabricated list.
+  el.querySelectorAll("[data-plan-find]").forEach((b) =>
+    b.addEventListener("click", () => {
+      S.cfind = b.dataset.planFind;
+      renderActions();
+      const now = el.querySelector(`[data-find="${S.cfind}"]`);
+      if (now) now.scrollIntoView({ behavior: "smooth", block: "center" });
+    }));
 }
 
 function palIndex() {
@@ -4684,7 +5129,13 @@ setInterval(() => { if (S.fresh) renderFreshness(); }, 15_000);
 $("#dx").addEventListener("click", closeDevice);
 $("#scrim").addEventListener("click", closeDevice);
 addEventListener("keydown", (e) => { if (e.key === "Escape") closeDevice(); });
-$("#q").addEventListener("input", (e) => { S.q = e.target.value; renderDevices(); });
+// Both renderers, for the reason the Alerts search states below: the status
+// chips, the header and the rows all count the SEARCHED set, so they have to
+// move in the same tick.
+$("#q").addEventListener("input", (e) => {
+  S.q = e.target.value;
+  renderDeviceFilters(); renderDevices();
+});
 // Both renderers, because the severity chips and the header count the searched
 // set: the chips, the header and the rows have to move in the same tick.
 $("#aq").addEventListener("input", (e) => {
@@ -4748,6 +5199,11 @@ async function load() {
   if (S.loading) return;
   S.loading = true;
   try {
+    // The window trends is fetched for, captured BEFORE the fan-out. load() runs
+    // again every two minutes; keying the refetch on a fixed 7 days meant a
+    // refresh silently replaced the window the operator had chosen with a
+    // different one while the pressed pill still claimed theirs.
+    const trwinAt = S.trwin;
     // NOTE: every entry added below must also be NAMED in this destructuring
     // array, in the same position — a missing name silently shifts every payload
     // after it into the wrong variable.
@@ -4780,8 +5236,11 @@ async function load() {
       // OUR OWN collector's health (scope: vfi-pipeline). Allowed to fail: if it
       // does, the banner says our health is unknown rather than implying fine.
       api("/api/pipeline/health").catch(() => null),
-      // Trends over the default 7-day window; the view refetches on window change.
-      api("/api/trends?windowDays=7").catch(() => null),
+      // Trends over the SHORTEST candidate window (GAP-6). 7 days used to be the
+      // default and refuses on this tenant, so the predictive tab opened on three
+      // refusals. trendsAutoWindow() escalates from here if this one refuses too,
+      // and the view refetches on any manual window change.
+      api(`/api/trends?windowDays=${trwinAt}`).catch(() => null),
     ]);
     S.summary = summary.data;
     // What each paged walk could NOT get. Recorded BEFORE anything renders, so
@@ -4799,6 +5258,10 @@ async function load() {
     S.alerts = alerts.data;
     S.hyg = hygiene && hygiene.data;
     S.devices = devices.data;
+    // The site axis's own provenance. Taken from page 1's envelope, so only the
+    // FLEET-WIDE fields are usable here: `onPage` describes one page of a walked
+    // collection and would understate the 248 rows we actually hold.
+    S.dsites = (devices.meta && devices.meta.sites) || null;
     S.compliance = compliance.data;
     S.pipeline = pipeline.data;
     S.sla = sla && sla.data;
@@ -4810,7 +5273,9 @@ async function load() {
     S.pop = pop && pop.data;
     S.plan = plan && plan.data;
     S.pipe = pipeHealth && pipeHealth.data;
-    S.trends = trends && trends.data;
+    // Only if the window has not moved under us mid-load; otherwise the pill
+    // and the numbers would disagree about which window is on screen.
+    if (S.trwin === trwinAt) S.trends = trends && trends.data;
     S.fresh = (summary.meta && summary.meta.freshness) || null;
 
     // ageSeconds is only true at fetch time; recompute from the timestamp so
@@ -4847,6 +5312,10 @@ async function load() {
     renderActions();
     renderPipelineWidget(); renderTrends();
     drawModules();
+    // Fire-and-forget, like the rollup below: if TR_WINDOWS[0] refused, walk on
+    // to the next window rather than leaving the tab open on a refusal. Costs
+    // nothing when the first window already cleared.
+    trendsAutoWindow();
     // Fire-and-forget: the aggregator rollup is a ~14s cold fan-out, so it must
     // never block the dashboard render. It fills its Overview card when ready.
     loadRollups();
