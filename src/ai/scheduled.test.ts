@@ -219,7 +219,10 @@ test("a failed plan generation does not overwrite the cached plan", async () => 
     runActionPlanJob(pool, {
       client: stubClient(null, { throws: "overloaded_error" }),
       // Keep the control plane out of the test: rollups degrade honestly anyway.
-      rollups: async () => ({ available: false, reason: "not read in this test" }),
+      rollups: async () => ({
+        rollups: { available: false, reason: "not read in this test" },
+        signals: [],
+      }),
       resolveSites: async (devices) => devices,
     }),
     /overloaded_error/,

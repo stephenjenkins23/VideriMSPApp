@@ -15,7 +15,8 @@ import { VideriAuth } from "../videri/auth.js";
 import { VideriHttp } from "../videri/http.js";
 import { AggregatorService } from "../videri/services/aggregator.js";
 import { GroupSiteCache, withSites } from "../videri/services/group-hierarchy.js";
-import { summarizeRollupsForPlan, type PlanRollups } from "./action-plan.js";
+import { summarizeRollupsForPlan } from "./action-plan.js";
+import type { PlanRollupFold } from "./jobs.js";
 import type { DeviceView } from "../intelligence/remediation.js";
 
 /**
@@ -24,17 +25,15 @@ import type { DeviceView } from "../intelligence/remediation.js";
  * failed or credential-less read leaves the plan reporting the blind spot
  * instead of inferring a fleet with no offline canvases.
  */
-export async function readPlanRollups(skipRollups = false): Promise<PlanRollups> {
+export async function readPlanRollups(skipRollups = false): Promise<PlanRollupFold> {
   if (skipRollups) {
-    return { available: false, reason: "Rollups were skipped for this run (--no-rollups)." };
+    return unavailable("Rollups were skipped for this run (--no-rollups).");
   }
   if (!config.VIDERI_PASSWORD) {
-    return {
-      available: false,
-      reason:
-        "No Videri credentials are configured, so the aggregator group-metrics could " +
+    return unavailable(
+      "No Videri credentials are configured, so the aggregator group-metrics could " +
         "not be read. Fleet count-rollups are unknown for this plan, not zero.",
-    };
+    );
   }
   try {
     const service = new AggregatorService(new VideriHttp(new VideriAuth()));
@@ -42,14 +41,19 @@ export async function readPlanRollups(skipRollups = false): Promise<PlanRollups>
     return summarizeRollupsForPlan(await service.fleetRollups(), collectedAt);
   } catch (error) {
     // Never log the error object wholesale — request context can carry credentials.
-    return {
-      available: false,
-      reason: `The aggregator group-metrics fan-out failed (${
+    return unavailable(
+      `The aggregator group-metrics fan-out failed (${
         error instanceof Error ? error.message : "unknown error"
       }), so fleet count-rollups are unknown for this plan, not zero.`,
-    };
+    );
   }
 }
+
+/** No rollup read, so no citable group refs either — an honest empty catalog. */
+const unavailable = (reason: string): PlanRollupFold => ({
+  rollups: { available: false, reason },
+  signals: [],
+});
 
 /**
  * Resolve each device's site (depth-1 group ancestor) so the plan's venue

@@ -26,10 +26,11 @@ import {
   MAX_ITEMS,
   enforcePlanInvariants,
   generateActionPlan,
+  renderActionPlan,
   summarizePersistedPop,
   summarizeRollupsForPlan,
-  type ActionItem,
-  type ActionPlan,
+  type GeneratedActionItem,
+  type GeneratedActionPlan,
   type PlanInput,
 } from "./action-plan.js";
 import { summarizeIntelligence } from "./bundle.js";
@@ -178,7 +179,7 @@ test("summarizeRollupsForPlan compacts the fan-out and keeps its partial-read ca
     meta: { groupsRead: 92, groupsFailed: 2, groupsTotal: 94, truncated: false },
   };
 
-  const rollups = summarizeRollupsForPlan(result, "2026-08-31T08:00:00.000Z", 4);
+  const { rollups, signals } = summarizeRollupsForPlan(result, "2026-08-31T08:00:00.000Z", 4);
   assert.equal(rollups.available, true);
   if (rollups.available !== true) return;
   assert.equal(rollups.fleet.offline30d, 110);
@@ -188,6 +189,14 @@ test("summarizeRollupsForPlan compacts the fan-out and keeps its partial-read ca
   assert.equal(rollups.worstGroups.length, 4, "drill-down is capped for token cost");
   assert.equal(rollups.worstGroups[0]!.offline30d, 9, "worst-offline-first order is preserved");
   assert.equal(rollups.collectedAt, "2026-08-31T08:00:00.000Z");
+  // A citable ref per drilled-down group, each honestly ID-LESS: these are the
+  // platform's CANVAS counts, not our device rows, so an item built on one says
+  // so instead of shipping an empty deviceIds that reads as "none".
+  assert.equal(signals.length, 4);
+  for (const signal of signals) {
+    assert.equal(signal.deviceIds, null, "null, never [] — the difference is the whole point");
+    assert.match(signal.reason!, /canvas counts/i);
+  }
 });
 
 // ─── prompt assembly ────────────────────────────────────────────────────────
@@ -216,7 +225,7 @@ function planInput(): PlanInput {
         meta: { groupsRead: 94, groupsFailed: 0, groupsTotal: 94, truncated: false },
       },
       "2026-08-31T08:00:00.000Z",
-    ),
+    ).rollups,
   };
 }
 
@@ -230,7 +239,7 @@ interface CapturedParams {
 }
 
 /** A stub Anthropic client: records the params, answers without a network call. */
-function stubClient(plan: Partial<ActionPlan> = {}): {
+function stubClient(plan: Partial<GeneratedActionPlan> = {}): {
   client: Anthropic;
   seen: () => CapturedParams;
 } {
@@ -293,18 +302,17 @@ test("generateActionPlan keeps the verified wiring and the guardrail prompt", as
 
 // ─── post-parse invariants ──────────────────────────────────────────────────
 
-const item = (over: Partial<ActionItem> = {}): ActionItem => ({
+const item = (over: Partial<GeneratedActionItem> = {}): GeneratedActionItem => ({
   rank: 1,
   title: "Do the thing",
   action: "Do it",
   reasoning: "Because",
   deviceScope: "the 5 canvases on 3.3.8",
-  deviceIds: [],
   affectedCount: 5,
   expectedImpact: "Fixes 5",
   kind: "manual",
   severity: "high",
-  source: "correlation.findings[0]",
+  source: "correlation.findings firmware 3.3.8",
   ...over,
 });
 
@@ -359,4 +367,85 @@ test("a refusal fails loudly rather than persisting an empty plan", async () => 
     },
   } as unknown as Anthropic;
   await assert.rejects(() => generateActionPlan(planInput(), { client }), /refused: nope/);
+});
+
+// ─── device-id resolution on the plan (see signals.test.ts for the resolver) ──
+
+test("the schema no longer ASKS for device ids — it asks which signals to join", async () => {
+  const { client, seen } = stubClient();
+  await generateActionPlan(planInput(), {
+    client,
+    signals: [
+      { ref: "correlation/venue::site::g-sales", describes: "39 at Videri Sales", deviceIds: ["a", "b"], reason: null, matchKeys: [] },
+    ],
+  });
+
+  const schema = JSON.stringify(seen().output_config.format);
+  assert.ok(!/"deviceIds"/.test(schema), "asking a model to re-type 39 uuids is not the design");
+  assert.match(schema, /sourceRefs/);
+  // The refs are an ENUM over this run's signals, so an invented ref cannot be
+  // generated at all — a constraint, not an instruction the model might miss.
+  assert.match(schema, /correlation\/venue::site::g-sales/);
+});
+
+test("a generated item gets the device set behind the ref it cited", async () => {
+  const signals = [
+    { ref: "correlation/venue::site::g-sales", describes: "39 at Videri Sales", deviceIds: ["a", "b", "c"], reason: null, matchKeys: [] },
+  ];
+  const { client } = stubClient({
+    items: [item({ sourceRefs: ["correlation/venue::site::g-sales"], affectedCount: 39 })],
+  });
+  const { plan } = await generateActionPlan(planInput(), { client, signals });
+
+  assert.deepEqual(plan.items[0]!.deviceIds, ["a", "b", "c"], "enumerable, not a paragraph");
+  assert.equal(plan.items[0]!.affectedCount, 3, "the resolved set is authoritative");
+  assert.match(plan.items[0]!.deviceIdResolution.countNote!, /RESOLVED SET IS AUTHORITATIVE/);
+});
+
+test("an item whose ids cannot be resolved is disclosed in notCovered, not left empty", async () => {
+  const { client } = stubClient({ items: [item({ rank: 1, affectedCount: 39 })], notCovered: ["temperature is unreadable"] });
+  const { plan } = await generateActionPlan(planInput(), { client, signals: [] });
+
+  assert.deepEqual(plan.items[0]!.deviceIds, []);
+  assert.ok(plan.items[0]!.deviceIdResolution.reason, "an empty list must carry its reason");
+  assert.equal(plan.items[0]!.affectedCount, 39, "the count stands; only membership is unknown");
+  assert.match(plan.notCovered[0]!, /temperature/, "the model's own note survives");
+  assert.match(plan.notCovered.join(" "), /could not be turned into a device list/);
+});
+
+test("INVARIANT on the served plan: ids present ⇒ affectedCount === deviceIds.length", async () => {
+  const signals = [
+    { ref: "s1", describes: "three", deviceIds: ["a", "b", "c"], reason: null, matchKeys: [] },
+    { ref: "s2", describes: "one", deviceIds: ["c"], reason: null, matchKeys: [] },
+    { ref: "s3", describes: "canvas counts", deviceIds: null, reason: "canvas counts, no device ids.", matchKeys: [] },
+  ];
+  const { client } = stubClient({
+    items: [
+      item({ rank: 1, sourceRefs: ["s1"], affectedCount: 3 }),
+      item({ rank: 2, sourceRefs: ["s1", "s2"], affectedCount: 4 }),
+      item({ rank: 3, sourceRefs: ["s3"], affectedCount: 77 }),
+    ],
+  });
+  const { plan } = await generateActionPlan(planInput(), { client, signals });
+
+  for (const it of plan.items) {
+    if (it.deviceIds.length > 0) {
+      assert.equal(it.affectedCount, it.deviceIds.length, `#${it.rank} disagrees with its own list`);
+    } else {
+      assert.ok(it.deviceIdResolution.reason, `#${it.rank} has an empty list and no reason`);
+    }
+  }
+  assert.deepEqual(plan.items[1]!.deviceIds, ["a", "b", "c"], "the union, deduped");
+  assert.match(plan.items[2]!.deviceIdResolution.reason!, /canvas counts/);
+});
+
+test("the plain-text render prints the list, or the reason there is none", async () => {
+  const signals = [{ ref: "s1", describes: "two", deviceIds: ["a", "b"], reason: null, matchKeys: [] }];
+  const { client } = stubClient({
+    items: [item({ rank: 1, sourceRefs: ["s1"] }), item({ rank: 2, sourceRefs: [] })],
+  });
+  const { plan } = await generateActionPlan(planInput(), { client, signals });
+  const text = renderActionPlan(plan);
+  assert.match(text, /devices \(2, cited-refs\): a b/);
+  assert.match(text, /devices: NOT ENUMERABLE — /);
 });

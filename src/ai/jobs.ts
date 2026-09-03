@@ -20,16 +20,27 @@ import Anthropic from "@anthropic-ai/sdk";
 import type { Pool } from "pg";
 import { ReadQueries } from "../api/queries.js";
 import { FleetContext } from "./context.js";
-import { assembleBundle, summarizeIntelligence, type FleetBundle } from "./bundle.js";
+import { assembleBundle, foldIntelligence, type FleetBundle } from "./bundle.js";
 import { generateFleetBrief, type FleetBrief } from "./brief.js";
 import {
+  foldPersistedPop,
   generateActionPlan,
-  summarizePersistedPop,
   type ActionPlan,
   type PlanInput,
   type PlanRollups,
 } from "./action-plan.js";
+import { describeSignals, type PlanSignal } from "./signals.js";
 import type { DeviceView } from "../intelligence/remediation.js";
+
+/**
+ * What a rollup read hands back: the block the model sees, and the citable
+ * group refs behind it. Paired for the same reason everywhere else in this
+ * layer — the payload never carries ids, the catalog never reaches the prompt.
+ */
+export interface PlanRollupFold {
+  rollups: PlanRollups;
+  signals: PlanSignal[];
+}
 
 /** Stamped into the persisted row. Kept a literal so the row records what ran. */
 const MODEL = "claude-opus-5";
@@ -92,9 +103,14 @@ export async function runBriefJob(
   pool: Pool,
   { windowHours = 24, client }: BriefJobOptions = {},
 ): Promise<AiJobOutcome<FleetBrief> & { bundle: FleetBundle }> {
-  const bundle = await assembleBundle(new FleetContext(pool), new ReadQueries(pool), windowHours);
+  const { bundle, signals } = await assembleBundle(
+    new FleetContext(pool),
+    new ReadQueries(pool),
+    windowHours,
+  );
   const { brief, usage } = await generateFleetBrief(bundle, {
     windowHours,
+    signals,
     ...(client ? { client } : {}),
   });
 
@@ -130,7 +146,7 @@ export async function runBriefJob(
  * no .env, and it also means a run with `rollups` overridden never touches the
  * control plane at all.
  */
-const defaultRollups = async (skipRollups: boolean): Promise<PlanRollups> =>
+const defaultRollups = async (skipRollups: boolean): Promise<PlanRollupFold> =>
   (await import("./plan-inputs.js")).readPlanRollups(skipRollups);
 
 const defaultResolveSites = async (devices: DeviceView[]): Promise<DeviceView[]> =>
@@ -141,7 +157,7 @@ export interface ActionPlanJobOptions {
   skipRollups?: boolean;
   client?: Anthropic;
   /** Both default to the control-plane readers above; overridden in tests. */
-  rollups?: (skipRollups: boolean) => Promise<PlanRollups>;
+  rollups?: (skipRollups: boolean) => Promise<PlanRollupFold>;
   resolveSites?: (devices: DeviceView[]) => Promise<DeviceView[]>;
 }
 
@@ -177,18 +193,29 @@ export async function runActionPlanJob(
   // about what the engines said. Its own POP block is the batch-brief caveat
   // ("not measured"); the plan replaces it with the persisted fleet-wide gap
   // summary, which is one query and therefore cheap enough to carry here.
-  const { remediation, correlation } = summarizeIntelligence(await resolveSites(devices));
+  const fold = foldIntelligence(await resolveSites(devices));
+  const pop = foldPersistedPop(persistedPop.devices, persistedPop.fleetDevices);
+
+  // Every citable signal for this run, in one list. The model is shown the
+  // DESCRIPTORS (refs, counts, whether ids exist); the ids stay here and are
+  // joined onto the generated items afterwards. That is the fix for the plan's
+  // top item shipping `deviceIds: []` — see signals.ts.
+  const signals: PlanSignal[] = [...fold.signals, ...pop.signals, ...planRollups.signals];
 
   const input: PlanInput = {
     windowHours,
     overview,
-    remediation,
-    correlation,
-    proofOfPlay: summarizePersistedPop(persistedPop.devices, persistedPop.fleetDevices),
-    rollups: planRollups,
+    remediation: fold.intelligence.remediation,
+    correlation: fold.intelligence.correlation,
+    proofOfPlay: pop.proofOfPlay,
+    rollups: planRollups.rollups,
+    signals: describeSignals(signals),
   };
 
-  const { plan, usage } = await generateActionPlan(input, { ...(client ? { client } : {}) });
+  const { plan, usage } = await generateActionPlan(input, {
+    signals,
+    ...(client ? { client } : {}),
+  });
 
   assertPublishablePlan(plan);
 

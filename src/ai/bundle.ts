@@ -26,12 +26,23 @@ import {
 } from "../intelligence/remediation.js";
 import { correlate, type Finding, type Note } from "../intelligence/correlation.js";
 import { BASIS as POP_BASIS } from "../intelligence/proof-of-play.js";
+import {
+  attentionSignals,
+  correlationSignals,
+  describeSignals,
+  remediationSignals,
+  siteNameIndex,
+  type PlanSignal,
+  type SignalDescriptor,
+} from "./signals.js";
 
 /** Top self-heal recommendations plus the counts by kind/severity. */
 export interface RemediationSignal {
   summary: RemediationSummary;
   /** The highest-leverage recommendations, already ranked; capped for token cost. */
   top: Array<{
+    /** The ref an item cites to have THIS device set resolved for it (signals.ts). */
+    ref: string;
     deviceLabel: string;
     category: Recommendation["category"];
     severity: Recommendation["severity"];
@@ -46,6 +57,14 @@ export interface RemediationSignal {
 export interface CorrelationSignal {
   devicesConsidered: number;
   findings: Array<{
+    /**
+     * The ref an item cites to have this finding's device set resolved for it.
+     *
+     * The ids themselves are deliberately absent: a finding can carry 39 uuids,
+     * which would cost more input tokens than the rest of the payload and buy
+     * nothing, because the join happens in code afterwards (signals.ts).
+     */
+    ref: string;
     kind: Finding["kind"];
     severity: Finding["severity"];
     confidence: number;
@@ -86,6 +105,16 @@ export interface FleetBundle {
   changes: ChangeSince;
   /** Pre-computed engine output for the brief to reason over. Optional: absent = status-only. */
   intelligence?: FleetIntelligence;
+  /**
+   * Every signal a brief item may cite, with the ref to quote — but NOT the ids.
+   *
+   * The brief's `needsAttention[].device` is FREE TEXT, so the client used to
+   * resolve it by NAME, and 13 names on this tenant are shared by 30 devices:
+   * "open the broken device" opened a healthy twin. An item now cites a ref and
+   * we join the id (signals.ts). Optional so status-only callers and older eval
+   * fixtures still type-check.
+   */
+  signals?: SignalDescriptor[];
 }
 
 /** How many ranked recommendations to carry. Enough to lead on; bounded for cost. */
@@ -101,13 +130,37 @@ const TOP_RECOMMENDATIONS = 8;
  * represented by its honesty caveat and left to the live endpoint (see the type).
  */
 export function summarizeIntelligence(devices: DeviceView[]): FleetIntelligence {
+  return foldIntelligence(devices).intelligence;
+}
+
+/**
+ * What `summarizeIntelligence` folds, PLUS the device sets behind each signal.
+ *
+ * One fold, two products, because `correlate()` reads the wall clock for its
+ * temporal rule: calling it twice — once for the payload, once for the id
+ * catalog — could produce two different sets of clusters, and then the refs the
+ * model cited would not be the refs we resolve against.
+ */
+export interface IntelligenceFold {
+  /** Goes to the model. Carries refs and counts, never device ids. */
+  intelligence: FleetIntelligence;
+  /**
+   * Stays in code: the ref → device-ids catalog the generated items are resolved
+   * against. Kept out of `intelligence` precisely so it never reaches the prompt.
+   */
+  signals: PlanSignal[];
+}
+
+export function foldIntelligence(devices: DeviceView[]): IntelligenceFold {
   const recs = recommendationsFor(devices);
   const correlation = correlate(devices);
+  const top = recs.slice(0, TOP_RECOMMENDATIONS);
 
-  return {
+  const intelligence: FleetIntelligence = {
     remediation: {
       summary: summarize(recs),
-      top: recs.slice(0, TOP_RECOMMENDATIONS).map((r) => ({
+      top: top.map((r) => ({
+        ref: `remediation/rec::${r.id}`,
         deviceLabel: r.deviceLabel,
         category: r.category,
         severity: r.severity,
@@ -120,6 +173,7 @@ export function summarizeIntelligence(devices: DeviceView[]): FleetIntelligence 
     correlation: {
       devicesConsidered: correlation.devicesConsidered,
       findings: correlation.findings.map((f) => ({
+        ref: `correlation/${f.id}`,
         kind: f.kind,
         severity: f.severity,
         confidence: f.confidence,
@@ -139,13 +193,24 @@ export function summarizeIntelligence(devices: DeviceView[]): FleetIntelligence 
         "imply POP is clean — it was simply not measured here.",
     },
   };
+
+  return {
+    intelligence,
+    signals: [
+      ...correlationSignals(correlation.findings, siteNameIndex(devices)),
+      // Buckets over EVERY recommendation; individual refs only for the ones the
+      // model was actually shown, so the citable enum stays the size of the
+      // payload rather than the size of the fleet.
+      ...remediationSignals(recs, top),
+    ],
+  };
 }
 
 export async function assembleBundle(
   fleet: FleetContext,
   queries: ReadQueries,
   windowHours = 24,
-): Promise<FleetBundle> {
+): Promise<{ bundle: FleetBundle; signals: PlanSignal[] }> {
   const [overview, firmware, attention, changes, devices] = await Promise.all([
     fleet.overview(),
     fleet.firmwareDistribution(),
@@ -153,5 +218,20 @@ export async function assembleBundle(
     fleet.changesSince(windowHours),
     queries.remediationDevices(),
   ]);
-  return { overview, firmware, attention, changes, intelligence: summarizeIntelligence(devices) };
+  const fold = foldIntelligence(devices);
+  // One ref per device the attention list was built from, plus every engine
+  // signal. The bundle carries the DESCRIPTORS (refs and counts); the ids stay
+  // beside it, in code, so 250 uuids never reach the prompt.
+  const signals = [...attentionSignals(attention), ...fold.signals];
+  return {
+    bundle: {
+      overview,
+      firmware,
+      attention,
+      changes,
+      intelligence: fold.intelligence,
+      signals: describeSignals(signals),
+    },
+    signals,
+  };
 }

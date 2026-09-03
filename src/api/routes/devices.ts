@@ -8,13 +8,31 @@ import {
   type SiteResolution,
 } from "../queries.js";
 import { GroupSiteCache } from "../../videri/services/group-hierarchy.js";
+import { COUNT_ONLY_LIMIT, countOnlyMeta, isCountOnly, pageMeta } from "../count-only.js";
 import type { ApiContext } from "../server.js";
 
 const ListQuery = z.object({
   page: z.coerce.number().int().min(1).default(1),
-  // Capped: this endpoint joins two laterals per row, and an uncapped limit is
-  // how a dashboard bug turns into a database incident.
-  limit: z.coerce.number().int().min(1).max(200).default(50),
+  /**
+   * Rows per page — or `0` for the total with no rows at all (count-only.ts).
+   *
+   * `min(0)` is the count endpoint. `limit=0` reaches SQL as `LIMIT 0`, which
+   * Postgres answers without executing the child plan (no sort, no lateral
+   * fan-out), so the request costs the `COUNT(*)` this function already runs in
+   * parallel and nothing else. Reusing the list's own filters is the point: a
+   * count that ignores the caller's filters is worse than no count, and a second
+   * WHERE builder is a second chance to diverge from this one silently.
+   *
+   * CEILING RAISED 200 → 500. The cap exists because this endpoint joins three
+   * laterals per row, so an uncapped limit is how a dashboard bug becomes a
+   * database incident — that reasoning stands, only the number moves. 500 rows
+   * is ~450 KB of JSON on this tenant's row shape (~900 bytes/row measured) and
+   * three index-driven lateral lookups per row; the console's 2,000-row ceiling
+   * now costs 4 round trips instead of 10. It is NOT removed: the laterals make
+   * cost linear in rows with a much bigger constant than a plain scan, and
+   * nothing in the product needs a single 5,000-row page when it needs a count.
+   */
+  limit: z.coerce.number().int().min(COUNT_ONLY_LIMIT).max(500).default(50),
   status: z.enum(["online", "warning", "alert", "offline", "unknown"]).optional(),
   deviceClass: z.string().min(1).max(50).optional(),
   groupId: z.string().min(1).max(100).optional(),
@@ -117,12 +135,12 @@ export async function registerDeviceRoutes(app: FastifyInstance, ctx: ApiContext
       resolution,
     );
 
-    const base = envelope(result.items, freshness, {
-      page: filters.page,
-      limit: filters.limit,
-      totalItems: result.totalItems,
-      totalPages: Math.max(1, Math.ceil(result.totalItems / filters.limit)),
-    });
+    const base = envelope(
+      result.items,
+      freshness,
+      pageMeta(filters.page, filters.limit, result.totalItems),
+    );
+    const countOnly = countOnlyMeta(filters.limit);
     // Extra meta block rather than a new field on `envelope()`, which is shared
     // by every endpoint. Same shape and same key as /api/correlation's `sites`,
     // so a consumer learns one contract for the site dimension.
@@ -130,6 +148,9 @@ export async function registerDeviceRoutes(app: FastifyInstance, ctx: ApiContext
       ...base,
       meta: {
         ...base.meta,
+        // Present only on a count-only request, so an empty `data` is never
+        // mistaken for "nothing matched your filters".
+        ...(countOnly ? { countOnly: countOnly.countOnly, countNote: countOnly.note } : {}),
         sites: {
           /** False = the site column is unavailable, not empty. */
           available: resolution.index !== null,
@@ -145,12 +166,16 @@ export async function registerDeviceRoutes(app: FastifyInstance, ctx: ApiContext
               ? null
               : { siteIds: filters.siteIds, groupsMatched: siteGroupIds?.length ?? 0 },
           // Honest denominators for THIS page, so "no site" is countable rather
-          // than an impression left by blank cells.
-          onPage: {
-            devices: result.items.length,
-            resolved: result.items.filter((d) => d.site.resolved).length,
-            unresolved: result.items.filter((d) => !d.site.resolved).length,
-          },
+          // than an impression left by blank cells. Null on a count-only
+          // request: there is no page, and reporting 0/0/0 would read as "no
+          // device on this page has a site" rather than "no page was fetched".
+          onPage: isCountOnly(filters.limit)
+            ? null
+            : {
+                devices: result.items.length,
+                resolved: result.items.filter((d) => d.site.resolved).length,
+                unresolved: result.items.filter((d) => !d.site.resolved).length,
+              },
         },
       },
     };
