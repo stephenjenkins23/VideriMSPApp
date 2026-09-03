@@ -40,6 +40,115 @@ const placeholders = (rowCount: number, columnCount: number): string =>
     (_, r) => `(${Array.from({ length: columnCount }, (_, c) => `$${r * columnCount + c + 1}`).join(",")})`,
   ).join(",");
 
+/**
+ * ── device action log (audit trail) ─────────────────────────────────────────
+ *
+ * `device_action_log` records what WE did — every attempted device write, with
+ * the value we asked for, the value we read back, and how it ended. See
+ * migrations/009-device-action-log.sql.
+ */
+
+/**
+ * Closed outcome vocabulary, matched by a CHECK constraint on the table.
+ *
+ * `refused` means the device was never touched (we declined); `failed` means we
+ * tried and it did not work. Collapsing the two would make "everything that
+ * failed" a question with no honest answer.
+ */
+export type DeviceActionOutcome =
+  | "applied"
+  | "verified"
+  | "no_change"
+  | "rolled_back"
+  | "rollback_failed"
+  | "refused"
+  | "failed";
+
+export const DEVICE_ACTION_OUTCOMES: readonly DeviceActionOutcome[] = [
+  "applied", "verified", "no_change", "rolled_back", "rollback_failed",
+  "refused", "failed",
+] as const;
+
+/**
+ * Default retention for the audit log: two years, with a one-year floor.
+ * See `pruneDeviceActionLog` for why this lives apart from `pruneTimeSeries`.
+ */
+export const AUDIT_RETAIN_DAYS = 730;
+export const AUDIT_MIN_RETAIN_DAYS = 365;
+
+export interface DeviceActionEntry {
+  /** Our operation vocabulary: 'brightness_write' | 'device_command' | … */
+  action: string;
+  /** What actually went on the wire, when there was a wire call at all. */
+  verb?: string | null;
+  deviceId: string;
+  /** Requested and read-back values as text. NULL = not applicable or UNREADABLE. */
+  requestedValue?: string | null;
+  observedValue?: string | null;
+  params?: Record<string, unknown>;
+  detail?: Record<string, unknown>;
+  outcome: DeviceActionOutcome;
+  /** Who or what initiated it. No user model exists yet; see resolveActor(). */
+  actor: string;
+  actorIp?: string | null;
+  startedAt: Date;
+  finishedAt?: Date;
+  durationMs?: number | null;
+  error?: string | null;
+}
+
+export interface DeviceActionRow {
+  id: number;
+  action: string;
+  verb: string | null;
+  deviceId: string;
+  /** Null when the device row is gone — the audit row outlives it by design. */
+  deviceName: string | null;
+  requestedValue: string | null;
+  observedValue: string | null;
+  params: Record<string, unknown>;
+  detail: Record<string, unknown>;
+  outcome: DeviceActionOutcome;
+  actor: string;
+  actorIp: string | null;
+  startedAt: Date;
+  finishedAt: Date;
+  durationMs: number | null;
+  error: string | null;
+}
+
+export interface DeviceActionFilters {
+  deviceId?: string | undefined;
+  actor?: string | undefined;
+  /** Any of these outcomes. Empty/absent means every outcome. */
+  outcome?: DeviceActionOutcome[] | undefined;
+  action?: string | undefined;
+  /** Half-open window [since, until) on `started_at`. */
+  since?: Date | undefined;
+  until?: Date | undefined;
+  page: number;
+  limit: number;
+}
+
+interface DeviceActionSqlRow {
+  id: string;
+  action: string;
+  verb: string | null;
+  device_id: string;
+  device_name: string | null;
+  requested_value: string | null;
+  observed_value: string | null;
+  params: Record<string, unknown> | null;
+  detail: Record<string, unknown> | null;
+  outcome: string;
+  actor: string;
+  actor_ip: string | null;
+  started_at: Date;
+  finished_at: Date;
+  duration_ms: number | null;
+  error: string | null;
+}
+
 export interface EvaluationDevice {
   id: string;
   name: string | null;
@@ -1537,6 +1646,193 @@ export class Repository {
       [id, enabled],
     );
     return (rowCount ?? 0) > 0;
+  }
+
+  // ── device action log (audit trail) ────────────────────────────────────────
+
+  /**
+   * Record one attempted action on one device. Never throws.
+   *
+   * This is called from inside the device-write paths, which means a broken
+   * audit insert must not break or mask the write itself: a failed brightness
+   * rollback reported as a 500 "logging failed" would hide the one outcome an
+   * operator has to see. So every failure is swallowed HERE — no call site can
+   * forget the `.catch()` — and returned as `{ id: null, error }` for the caller
+   * to log through its own logger (routes use `request.log.error`).
+   *
+   * Returning the error rather than console-logging it keeps this file free of
+   * IO it does not own, and makes "a logging failure does not break the device
+   * operation" assertable in a unit test.
+   */
+  async recordDeviceAction(
+    entry: DeviceActionEntry,
+  ): Promise<{ id: number | null; error: string | null }> {
+    try {
+      const { rows } = await this.pool.query<{ id: string }>(
+        `INSERT INTO device_action_log
+           (action, verb, device_id, requested_value, observed_value, params, detail,
+            outcome, actor, actor_ip, started_at, finished_at, duration_ms, error)
+         VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7::jsonb,$8,$9,$10,$11,$12,$13,$14)
+         RETURNING id`,
+        [
+          entry.action,
+          entry.verb ?? null,
+          entry.deviceId,
+          entry.requestedValue ?? null,
+          entry.observedValue ?? null,
+          JSON.stringify(entry.params ?? {}),
+          JSON.stringify(entry.detail ?? {}),
+          entry.outcome,
+          entry.actor,
+          entry.actorIp ?? null,
+          entry.startedAt,
+          entry.finishedAt ?? new Date(),
+          entry.durationMs ?? null,
+          entry.error ?? null,
+        ],
+      );
+      return { id: rows[0] ? Number(rows[0].id) : null, error: null };
+    } catch (error) {
+      return { id: null, error: (error as Error).message };
+    }
+  }
+
+  /**
+   * One page of the audit log, newest first, plus the span of the MATCHED set.
+   *
+   * The span comes back with the count in a single aggregate query rather than
+   * being derived from the page: a caller looking at page 1 of 40 still needs to
+   * know how far back the match reaches, and an audit answer that silently
+   * describes only the visible rows is the sort of half-truth this table exists
+   * to prevent.
+   *
+   * `deviceName` is a LEFT JOIN precisely because there is no foreign key — a
+   * row whose device has since been removed upstream is still a valid audit row
+   * and comes back with a null name rather than disappearing from the result.
+   */
+  async listDeviceActions(filters: DeviceActionFilters): Promise<{
+    items: DeviceActionRow[];
+    totalItems: number;
+    oldestAt: Date | null;
+    newestAt: Date | null;
+  }> {
+    const where: string[] = [];
+    const values: unknown[] = [];
+    const bind = (value: unknown): string => {
+      values.push(value);
+      return `$${values.length}`;
+    };
+
+    if (filters.deviceId) where.push(`l.device_id = ${bind(filters.deviceId)}`);
+    if (filters.actor) where.push(`l.actor = ${bind(filters.actor)}`);
+    if (filters.outcome) where.push(`l.outcome = ANY(${bind(filters.outcome)}::text[])`);
+    if (filters.action) where.push(`l.action = ${bind(filters.action)}`);
+    // Half-open [since, until): an audit window that includes both endpoints
+    // double-counts a row when two windows are read back to back.
+    if (filters.since) where.push(`l.started_at >= ${bind(filters.since)}`);
+    if (filters.until) where.push(`l.started_at < ${bind(filters.until)}`);
+    const clause = where.length > 0 ? `WHERE ${where.join(" AND ")}` : "";
+
+    const totals = await this.pool.query<{ n: string; oldest: Date | null; newest: Date | null }>(
+      `SELECT count(*)::text AS n, MIN(l.started_at) AS oldest, MAX(l.started_at) AS newest
+         FROM device_action_log l ${clause}`,
+      // A copy: the same array then gains LIMIT/OFFSET for the page query, and a
+      // shared reference is the sort of aliasing that only bites under a retry.
+      [...values],
+    );
+    const totalItems = Number(totals.rows[0]?.n ?? 0);
+
+    const offset = (filters.page - 1) * filters.limit;
+    const { rows } = await this.pool.query<DeviceActionSqlRow>(
+      `SELECT l.id::text AS id, l.action, l.verb, l.device_id, d.name AS device_name,
+              l.requested_value, l.observed_value, l.params, l.detail, l.outcome,
+              l.actor, l.actor_ip, l.started_at, l.finished_at, l.duration_ms, l.error
+         FROM device_action_log l
+         LEFT JOIN devices d ON d.id = l.device_id
+         ${clause}
+        ORDER BY l.started_at DESC, l.id DESC
+        LIMIT ${bind(filters.limit)} OFFSET ${bind(offset)}`,
+      values,
+    );
+
+    return {
+      items: rows.map((r) => ({
+        id: Number(r.id),
+        action: r.action,
+        verb: r.verb,
+        deviceId: r.device_id,
+        deviceName: r.device_name,
+        requestedValue: r.requested_value,
+        observedValue: r.observed_value,
+        params: r.params ?? {},
+        detail: r.detail ?? {},
+        outcome: r.outcome as DeviceActionOutcome,
+        actor: r.actor,
+        actorIp: r.actor_ip,
+        startedAt: r.started_at,
+        finishedAt: r.finished_at,
+        durationMs: r.duration_ms,
+        error: r.error,
+      })),
+      totalItems,
+      oldestAt: totals.rows[0]?.oldest ?? null,
+      newestAt: totals.rows[0]?.newest ?? null,
+    };
+  }
+
+  /**
+   * Rows in the whole log, ignoring every filter.
+   *
+   * Read only when a filtered page comes back empty, so the endpoint can say
+   * WHICH kind of empty it is: "we have logged nothing yet" and "your filter
+   * matched nothing" are different answers, and conflating them is how an
+   * operator concludes a write was never recorded when it was.
+   */
+  async deviceActionLogSize(): Promise<number> {
+    const { rows } = await this.pool.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM device_action_log`,
+    );
+    return Number(rows[0]?.n ?? 0);
+  }
+
+  /**
+   * Prune the audit log. Deliberately NOT part of `pruneTimeSeries`.
+   *
+   * `pruneTimeSeries` trims measurement history — samples, poller runs, computed
+   * snapshots — on 14-90 day windows, and it runs nightly and unattended. An
+   * audit trail is not measurement history: it is the record of what we did to
+   * someone else's estate, and it is the last thing that should be deleted by
+   * the same unattended code path that trims CPU readings. Keeping it out of
+   * that method means no future tweak to a metrics window can shorten it by
+   * accident, and adding a table to that method's label map cannot silently pick
+   * up this one.
+   *
+   * The default is TWO YEARS, and there is a hard floor: a caller cannot prune
+   * the audit log to a metrics-style window even by asking. The bound exists
+   * only as a ceiling against unbounded growth (at the observed write rate —
+   * single-digit writes per day — two years is a few thousand rows), in the same
+   * spirit as the `fleet_snapshots` bound, which is honestly a ceiling that has
+   * never yet deleted a live row.
+   *
+   * Nothing calls this today: the nightly retention task lives in
+   * pipeline/run-poller.ts and wiring it there is a deliberate, separate decision
+   * for a human to take, not a default that starts deleting audit rows two years
+   * from now because a table existed.
+   */
+  async pruneDeviceActionLog(retainDays = AUDIT_RETAIN_DAYS): Promise<number> {
+    if (retainDays < AUDIT_MIN_RETAIN_DAYS) {
+      throw new Error(
+        `Refusing to prune the device action log to ${retainDays} days. The audit ` +
+          `trail of our own writes is bounded at no less than ${AUDIT_MIN_RETAIN_DAYS} ` +
+          `days (default ${AUDIT_RETAIN_DAYS}); a metrics-length window here would ` +
+          `destroy the only record of what we changed on a customer's estate.`,
+      );
+    }
+    const { rowCount } = await this.pool.query(
+      `DELETE FROM device_action_log WHERE started_at < now() - ($1::text || ' days')::interval`,
+      [String(retainDays)],
+    );
+    return rowCount ?? 0;
   }
 
   async withTransaction<T>(fn: (client: PoolClient) => Promise<T>): Promise<T> {

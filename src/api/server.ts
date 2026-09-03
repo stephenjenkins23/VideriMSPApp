@@ -32,6 +32,7 @@ import { registerProofOfPlayRoutes } from "./routes/proof-of-play.js";
 import { registerRollupRoutes } from "./routes/rollups.js";
 import { registerActionPlanRoutes } from "./routes/action-plan.js";
 import { registerTrendRoutes } from "./routes/trends.js";
+import { registerAuditRoutes } from "./routes/audit.js";
 
 export interface BuildServerOptions {
   pool: Pool;
@@ -54,6 +55,13 @@ export interface ApiContext {
   freshness: () => ReturnType<typeof getFreshness>;
   /** undefined when this server cannot reach devices. */
   videri?: VideriHttp | undefined;
+  /**
+   * Whether this server was started with --allow-anonymous. Carried so the audit
+   * trail can name its actor honestly: an unauthenticated local caller is
+   * `api:anonymous`, not a fabricated identity. The TOKEN itself is deliberately
+   * NOT on the context — no route has any business reading it.
+   */
+  allowAnonymous: boolean;
 }
 
 export async function buildServer(options: BuildServerOptions): Promise<FastifyInstance> {
@@ -69,6 +77,7 @@ export async function buildServer(options: BuildServerOptions): Promise<FastifyI
     queries: new ReadQueries(options.pool),
     freshness: () => getFreshness(options.pool),
     videri: options.videri,
+    allowAnonymous: options.auth.allowAnonymous,
   };
 
   await app.register(cors, {
@@ -155,6 +164,7 @@ export async function buildServer(options: BuildServerOptions): Promise<FastifyI
   await registerRollupRoutes(app, ctx);
   await registerActionPlanRoutes(app, ctx);
   await registerTrendRoutes(app, ctx);
+  await registerAuditRoutes(app, ctx);
   await registerHealthRoutes(app, ctx);
 
   return app;

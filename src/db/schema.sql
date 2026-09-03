@@ -479,3 +479,53 @@ CREATE TABLE IF NOT EXISTS device_screen_verdict (
 );
 CREATE INDEX IF NOT EXISTS device_screen_verdict_latest_idx
   ON device_screen_verdict (device_id, observed_at DESC);
+
+-- ── Device action log: the audit trail of what WE did ────────────────────────
+-- 21 tables recorded what the platform told us; none recorded our own writes.
+-- One row per attempted action on one device, append-only, written WHATEVER the
+-- outcome — a rollback and a refusal are exactly the events an audit needs.
+-- Mirrored here because setup-db.sh applies only this file; see
+-- migrations/009-device-action-log.sql for the full reasoning, including why
+-- this is the one per-device table with NO foreign key to `devices` (an audit
+-- row must outlive its subject, and a write refused because the device was
+-- unknown is itself auditable).
+--
+-- `observed_value` NULL is "could not be read", never 0 — an unconfirmed
+-- read-back is the whole reason the rollback cycle exists.
+CREATE TABLE IF NOT EXISTS device_action_log (
+  id              bigserial   PRIMARY KEY,
+  action          text        NOT NULL,
+  verb            text,
+  device_id       text        NOT NULL,
+  requested_value text,
+  observed_value  text,
+  params          jsonb       NOT NULL DEFAULT '{}',
+  detail          jsonb       NOT NULL DEFAULT '{}',
+  /* Closed vocabulary, CHECKed: `outcome` is a filter on /api/audit, and a
+     free-text column means "everything that failed" silently misses rows whose
+     spelling drifted. Writers go through one tested mapper. */
+  outcome         text        NOT NULL,
+  CONSTRAINT device_action_log_outcome_check CHECK (outcome IN (
+    'applied', 'verified', 'no_change', 'rolled_back', 'rollback_failed',
+    'refused', 'failed'
+  )),
+  /* No user model exists yet (shared bearer token), so this is a plain string —
+     'api:token', 'api:anonymous', 'api:<X-VFI-Actor>', 'poller:<lane>' — rather
+     than a fabricated user id. */
+  actor           text        NOT NULL,
+  actor_ip        text,
+  started_at      timestamptz NOT NULL,
+  finished_at     timestamptz NOT NULL DEFAULT now(),
+  duration_ms     integer,
+  error           text
+);
+
+-- One index per question this table exists to answer, all newest-first.
+CREATE INDEX IF NOT EXISTS device_action_log_device_idx
+  ON device_action_log (device_id, started_at DESC);
+CREATE INDEX IF NOT EXISTS device_action_log_time_idx
+  ON device_action_log (started_at DESC);
+CREATE INDEX IF NOT EXISTS device_action_log_outcome_idx
+  ON device_action_log (outcome, started_at DESC);
+CREATE INDEX IF NOT EXISTS device_action_log_actor_idx
+  ON device_action_log (actor, started_at DESC);

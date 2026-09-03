@@ -25,7 +25,7 @@
  */
 
 import { z } from "zod";
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { ApiContext } from "../server.js";
 import { envelope } from "../freshness.js";
 import { applyBrightness, applyBrightnessLive, type CommandRunner } from "../../videri/brightness.js";
@@ -34,6 +34,8 @@ import {
   type TelemetryRunner,
 } from "../../videri/telemetry.js";
 import { verifyBlackScreenClaim } from "../../intelligence/screen-verify.js";
+import { auditOutcomeForBrightness, resolveActor } from "./audit.js";
+import type { DeviceActionEntry } from "../../db/repository.js";
 
 type Risk = "read" | "disruptive" | "unverified";
 
@@ -123,7 +125,52 @@ const BrightnessBody = z.object({
   mode: z.enum(["verify", "live"]).default("verify"),
 });
 
+/**
+ * Write one audit row for a device action, and NEVER let it affect the action.
+ *
+ * `recordDeviceAction` does not throw (see repository.ts); the failure comes
+ * back as a string and is logged here, because an audit trail that silently
+ * stops recording is worse than none — and a device write that 500s because the
+ * logging failed would hide the outcome the operator actually needs.
+ *
+ * The actor is resolved per-request rather than stored: there is no user model
+ * yet, so this is the caller's own claim plus what the transport tells us.
+ */
+function auditor(ctx: ApiContext) {
+  return async (
+    request: FastifyRequest,
+    entry: Omit<DeviceActionEntry, "actor" | "actorIp">,
+  ): Promise<void> => {
+    const header = request.headers["x-vfi-actor"];
+    // Belt AND braces: `recordDeviceAction` is contracted not to throw, and this
+    // still catches. The guarantee "logging never breaks the write" must not
+    // depend on a contract in another file staying true.
+    let failure: string | null = null;
+    try {
+      failure = (await ctx.repo.recordDeviceAction({
+        ...entry,
+        actor: resolveActor({
+          actorHeader: Array.isArray(header) ? header[0] : header,
+          authorization: request.headers.authorization,
+          allowAnonymous: ctx.allowAnonymous,
+        }),
+        actorIp: request.ip ?? null,
+      })).error;
+    } catch (error) {
+      failure = (error as Error).message;
+    }
+    if (failure) {
+      request.log.error(
+        { auditError: failure, action: entry.action, deviceId: entry.deviceId, outcome: entry.outcome },
+        "audit log write failed — the device action itself was unaffected",
+      );
+    }
+  };
+}
+
 export async function registerCommandRoutes(app: FastifyInstance, ctx: ApiContext): Promise<void> {
+  const audit = auditor(ctx);
+
   /** What the UI may offer, and what each will demand before it runs. */
   app.get("/api/commands", async () => {
     const freshness = await ctx.freshness();
@@ -163,6 +210,18 @@ export async function registerCommandRoutes(app: FastifyInstance, ctx: ApiContex
 
     const spec = COMMANDS[command];
     if (!spec) {
+      // Logged even though nothing was sent, and logged for EVERY command rather
+      // than only the write-risk ones: an attempt to run a verb that is not on
+      // the allowlist (su_shell_cmd, android_factory_reset, a firmware install)
+      // is the single most important thing this table can contain, and we cannot
+      // classify the risk of a command we do not know.
+      await audit(request, {
+        action: "device_command", verb: command, deviceId: request.params.id,
+        outcome: "refused", startedAt: new Date(), durationMs: 0,
+        params: raw ?? {},
+        detail: { reason: "command_not_allowed" },
+        error: `"${command}" is not on the allowlist.`,
+      });
       return reply.code(400).send({
         error: "command_not_allowed",
         message:
@@ -171,6 +230,15 @@ export async function registerCommandRoutes(app: FastifyInstance, ctx: ApiContex
       });
     }
     if (spec.risk !== "read" && confirm !== true) {
+      // The confirm handshake is a normal two-step for the UI, but it is still a
+      // caller asking us to change a device, so it is recorded — with its reason,
+      // so a reader can tell a handshake apart from a real refusal to act.
+      await audit(request, {
+        action: "device_command", verb: command, deviceId: request.params.id,
+        outcome: "refused", startedAt: new Date(), durationMs: 0,
+        params: raw ?? {},
+        detail: { reason: "confirmation_required", risk: spec.risk },
+      });
       return reply.code(409).send({
         error: "confirmation_required",
         risk: spec.risk,
@@ -182,12 +250,34 @@ export async function registerCommandRoutes(app: FastifyInstance, ctx: ApiContex
       });
     }
 
+    /**
+     * From here on the refusals are logged only for state-CHANGING commands.
+     * A read command runs on every drawer open, and filling the audit trail with
+     * "we tried to read settings from a device with no JID" would bury the writes
+     * it exists to record. Reads change nothing, so they are not audit events.
+     */
+    const auditable = spec.risk !== "read";
+
     const device = await ctx.queries.device(request.params.id);
     if (!device) {
+      if (auditable) {
+        await audit(request, {
+          action: "device_command", verb: command, deviceId: request.params.id,
+          outcome: "refused", startedAt: new Date(), durationMs: 0,
+          params: raw ?? {}, detail: { reason: "device_not_found" },
+        });
+      }
       return reply.code(404).send({ error: "not_found", message: "No such device." });
     }
     const target = await ctx.repo.commandTarget(request.params.id);
     if (!target || !target.deviceJid) {
+      if (auditable) {
+        await audit(request, {
+          action: "device_command", verb: command, deviceId: request.params.id,
+          outcome: "refused", startedAt: new Date(), durationMs: 0,
+          params: raw ?? {}, detail: { reason: "not_addressable" },
+        });
+      }
       return reply.code(409).send({
         error: "not_addressable",
         message: "This device has no XMPP JID recorded, so sync_command cannot address it.",
@@ -198,6 +288,14 @@ export async function registerCommandRoutes(app: FastifyInstance, ctx: ApiContex
     try {
       commandParams = spec.params ? spec.params(raw ?? {}) : {};
     } catch (error) {
+      if (auditable) {
+        await audit(request, {
+          action: "device_command", verb: command, deviceId: device.id,
+          outcome: "refused", startedAt: new Date(), durationMs: 0,
+          params: raw ?? {}, detail: { reason: "bad_params" },
+          error: (error as Error).message,
+        });
+      }
       return reply.code(400).send({ error: "bad_params", message: (error as Error).message });
     }
 
@@ -243,6 +341,28 @@ export async function registerCommandRoutes(app: FastifyInstance, ctx: ApiContex
         }
       }
 
+      /**
+       * The outcome of a state-changing command, whichever way it went.
+       *
+       * `observedValue` stays NULL here on purpose: this endpoint sends and
+       * reports, it does not read back — only the brightness endpoint below runs
+       * a verify cycle. So a SUCCESS is `applied` (the device accepted it) with
+       * no observed value, and the audit row says exactly that rather than
+       * implying we confirmed anything.
+       */
+      if (auditable) {
+        await audit(request, {
+          action: "device_command", verb: command, deviceId: device.id,
+          outcome: ok ? "applied" : "failed",
+          requestedValue: typeof commandParams["arg"] === "string" ? commandParams["arg"] : null,
+          observedValue: null,
+          params: commandParams,
+          detail: { responseCode: code, risk: spec.risk, verified: false },
+          startedAt: new Date(startedAt), durationMs: Date.now() - startedAt,
+          error: ok ? null : `The device answered ${code}.`,
+        });
+      }
+
       const freshness = await ctx.freshness();
       return reply.code(ok ? 200 : 502).send(
         envelope(
@@ -261,6 +381,18 @@ export async function registerCommandRoutes(app: FastifyInstance, ctx: ApiContex
         ),
       );
     } catch (error) {
+      // A transport failure is still an attempt on a device, and "we tried and
+      // could not reach it" is precisely the row a dispute needs.
+      if (auditable) {
+        await audit(request, {
+          action: "device_command", verb: command, deviceId: device.id,
+          outcome: "failed",
+          requestedValue: typeof commandParams["arg"] === "string" ? commandParams["arg"] : null,
+          params: commandParams, detail: { reason: "transport_error", risk: spec.risk },
+          startedAt: new Date(startedAt), durationMs: Date.now() - startedAt,
+          error: (error as Error).message,
+        });
+      }
       return reply.code(502).send({
         error: "command_failed",
         message: (error as Error).message,
@@ -299,6 +431,13 @@ export async function registerCommandRoutes(app: FastifyInstance, ctx: ApiContex
     }
     // A write to hardware is deliberate: require an explicit confirm.
     if (body.data.confirm !== true) {
+      await audit(request, {
+        action: "brightness_write", verb: "set_brightness", deviceId: request.params.id,
+        outcome: "refused",
+        requestedValue: `${body.data.brightnessPercent}%`,
+        detail: { reason: "confirmation_required", mode: body.data.mode },
+        startedAt: new Date(), durationMs: 0,
+      });
       return reply.code(409).send({
         error: "confirmation_required",
         message: "Writing brightness to a device requires confirm:true.",
@@ -306,9 +445,23 @@ export async function registerCommandRoutes(app: FastifyInstance, ctx: ApiContex
     }
 
     const device = await ctx.queries.device(request.params.id);
-    if (!device) return reply.code(404).send({ error: "not_found", message: "No such device." });
+    if (!device) {
+      await audit(request, {
+        action: "brightness_write", verb: "set_brightness", deviceId: request.params.id,
+        outcome: "refused", requestedValue: `${body.data.brightnessPercent}%`,
+        detail: { reason: "device_not_found", mode: body.data.mode },
+        startedAt: new Date(), durationMs: 0,
+      });
+      return reply.code(404).send({ error: "not_found", message: "No such device." });
+    }
     const target = await ctx.repo.commandTarget(request.params.id);
     if (!target || !target.deviceJid) {
+      await audit(request, {
+        action: "brightness_write", verb: "set_brightness", deviceId: device.id,
+        outcome: "refused", requestedValue: `${body.data.brightnessPercent}%`,
+        detail: { reason: "not_addressable", mode: body.data.mode },
+        startedAt: new Date(), durationMs: 0,
+      });
       return reply.code(409).send({
         error: "not_addressable",
         message: "This device has no XMPP JID recorded, so it cannot be commanded.",
@@ -340,6 +493,32 @@ export async function registerCommandRoutes(app: FastifyInstance, ctx: ApiContex
     // device value so the slider can show the truth, not the request.
     if (body.data.mode === "live") {
       const live = await applyBrightnessLive(device.id, body.data.brightnessPercent, run);
+      /**
+       * `applied` when the read-back matched, `failed` otherwise. The read-back
+       * is the observed value and it is NULL when the device would not tell us —
+       * never 0, which on this scale is a display-off panel and would read as a
+       * blanked screen we caused.
+       */
+      await audit(request, {
+        action: "brightness_write", verb: "set_brightness", deviceId: device.id,
+        outcome: live.applied ? "applied" : "failed",
+        requestedValue: `${live.requestedPercent}%`,
+        observedValue: live.observedPercent === null ? null : `${live.observedPercent}%`,
+        params: { arg: `set_brightness:=${live.requestedRaw}` },
+        detail: {
+          mode: "live", responseCode: live.code,
+          requestedRaw: live.requestedRaw, observedRaw: live.observedRaw,
+          /* The drag path never rolls back — recorded so the row is not read as
+             a verify cycle that failed to restore anything. */
+          rollbackAvailable: false,
+        },
+        startedAt: new Date(startedAt), durationMs: Date.now() - startedAt,
+        error: live.applied
+          ? null
+          : live.observedRaw === null
+            ? `The device answered ${live.code} and its brightness could not be read back.`
+            : `The device reports raw ${live.observedRaw}, not the requested ${live.requestedRaw}.`,
+      });
       const freshness = await ctx.freshness();
       return reply.code(live.observedRaw === null ? 502 : 200).send(
         envelope({ ...live, durationMs: Date.now() - startedAt }, freshness),
@@ -347,6 +526,36 @@ export async function registerCommandRoutes(app: FastifyInstance, ctx: ApiContex
     }
 
     const result = await applyBrightness(device.id, body.data.brightnessPercent, run);
+
+    /**
+     * The audit row for the full cycle. Written for EVERY state, including the
+     * ones where the panel was never touched (`preflight_blocked` → refused) and
+     * the ones where we put it back (`unconfirmed_rolled_back` → rolled_back):
+     * a rollback and a refusal are exactly the events an audit exists for, and
+     * `rollback_failed` is the row someone will be paged about.
+     */
+    await audit(request, {
+      action: "brightness_write", verb: "set_brightness", deviceId: device.id,
+      outcome: auditOutcomeForBrightness(result.state),
+      requestedValue: `${result.requestedPercent}%`,
+      observedValue:
+        result.observedRaw === null ? null : `${brightnessPercentFromRaw(result.observedRaw)}%`,
+      params: { arg: `set_brightness:=${result.requestedRaw}` },
+      detail: {
+        mode: "verify", state: result.state,
+        requestedRaw: result.requestedRaw,
+        originalRaw: result.originalRaw,
+        observedRaw: result.observedRaw,
+        applied: result.applied,
+        message: result.message,
+      },
+      startedAt: new Date(startedAt), durationMs: Date.now() - startedAt,
+      /* The cycle's own sentence is the error when the panel did not end up
+         where it was asked to; `verified` and `no_change` are not errors. */
+      error:
+        result.state === "verified" || result.state === "no_change" ? null : result.message,
+    });
+
     const freshness = await ctx.freshness();
 
     // Map the outcome to a status the client can branch on. Only `verified` is a
