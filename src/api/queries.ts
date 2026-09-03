@@ -26,6 +26,10 @@
 
 import type { Pool } from "pg";
 import type { DeviceView } from "../intelligence/remediation.js";
+// Site resolution is REUSED, never reimplemented: the depth-1 tree walk, its
+// termination rules and the group index all live in group-hierarchy.ts. Only the
+// pure parts are imported here — the IO (GroupSiteCache) belongs to the route.
+import { resolveSite, type GroupIndex } from "../videri/services/group-hierarchy.js";
 import type { ScheduledEvent } from "../intelligence/proof-of-play.js";
 import type { DeviceBucketCounts, UsageDay } from "../intelligence/trends.js";
 
@@ -35,9 +39,158 @@ export interface DeviceListFilters {
   status?: string | undefined;
   deviceClass?: string | undefined;
   groupId?: string | undefined;
+  /**
+   * Site filter, already translated into the group ids that roll up to the
+   * requested site(s) — see `groupIdsForSites`.
+   *
+   * The translation happens in the route because the site dimension is NOT in
+   * Postgres: it is the depth-1 ancestor of a device's group in the `rpm
+   * /v1/groups` tree. What reaches SQL is therefore a set of `group_id` values,
+   * which is also what makes the predicate legal in both statements below.
+   *
+   * `undefined` means unfiltered. An empty array means "explicitly filtered, and
+   * nothing matches" — see the fail-closed note in `devices()`.
+   */
+  siteGroupIds?: string[] | undefined;
   search?: string | undefined;
+  /**
+   * Group ids whose SITE NAME matched `search`, OR-ed into the text search so
+   * "NYC Office" finds the devices at that site. Resolved in the route, for the
+   * same reason as `siteGroupIds`.
+   */
+  searchSiteGroupIds?: string[] | undefined;
   sort: "name" | "last_seen" | "alerts";
   direction: "asc" | "desc";
+}
+
+/**
+ * The group hierarchy as one request sees it.
+ *
+ * `index: null` is the honest "we could not read the tree" — never an empty
+ * index, which would resolve every device to no site and look like a tenant with
+ * no groups. `reason` then says why, and travels all the way to the client.
+ */
+export interface SiteResolution {
+  index: GroupIndex | null;
+  /** Why the index is null, or why it may be incomplete. Null when fully read. */
+  reason: string | null;
+}
+
+/**
+ * A device's place in the customer/site axis.
+ *
+ * Always an object, never null, because "unresolved" has to be SAYABLE. About 15
+ * of 248 devices on this tenant carry no group at all; they stay visible in every
+ * list with `resolved: false` and a reason, and are never bucketed into an
+ * "Other" that reads like a real place.
+ *
+ * Invariant, relied on by the UI: whenever `name` is null there IS a `reason`, so
+ * the site cell always has something true to print.
+ */
+export interface DeviceSite {
+  /** The depth-1 ancestor group's uuid (`SiteRef.uuid`). Null when unresolved. */
+  id: string | null;
+  /** The site's display name. Null when unresolved, or when the group is unnamed. */
+  name: string | null;
+  resolved: boolean;
+  /** Why there is no name to show. Null only when `name` is a usable label. */
+  reason: string | null;
+}
+
+/** Stated when the server has no credentials, so there is no tree to read at all. */
+export const NO_HIERARCHY_REASON =
+  "No Videri credentials are configured, so the group hierarchy could not be read " +
+  "and no device could be placed at a site.";
+
+/**
+ * Pure: one device's site, or an honest reason there is none.
+ *
+ * The four null cases stay distinguishable on purpose — a technician reading
+ * "not in any group" acts differently from one reading "we could not read the
+ * hierarchy", and collapsing them into one blank cell is the failure this
+ * whole projection exists to fix.
+ */
+export function deviceSite(
+  hierarchy: SiteResolution,
+  groupId: string | null | undefined,
+): DeviceSite {
+  if (hierarchy.index === null) {
+    return {
+      id: null, name: null, resolved: false,
+      reason: hierarchy.reason ?? NO_HIERARCHY_REASON,
+    };
+  }
+  if (!groupId) {
+    return {
+      id: null, name: null, resolved: false,
+      reason: "This device is in no group, so it cannot be placed at a site.",
+    };
+  }
+  const site = resolveSite(hierarchy.index, groupId);
+  if (!site) {
+    // Two different facts, kept apart: a group we never read vs. a group that
+    // sits at the tenant root and so has no site level beneath it.
+    return {
+      id: null, name: null, resolved: false,
+      reason: hierarchy.index.has(groupId)
+        ? "This device's group is at the top of the hierarchy, so there is no site below it."
+        : `This device's group is not in the group hierarchy we read, so no site could be ` +
+          `resolved.${hierarchy.reason ? ` ${hierarchy.reason}` : ""}`,
+    };
+  }
+  return {
+    id: site.uuid,
+    name: site.name,
+    resolved: true,
+    // A resolved site CAN be nameless — one group comes back with a populated
+    // uuid and an empty display name. Resolved, but with nothing to print.
+    reason: site.name === null
+      ? "This site has no display name on the platform; it is identified by group id only."
+      : null,
+  };
+}
+
+/**
+ * Pure: every group id that rolls up to one of `siteIds`.
+ *
+ * This is how a site filter becomes a SQL predicate. It walks the index with the
+ * shared `resolveSite`, so the filter can never disagree with the site shown on
+ * a row. A site's own group id is included — `resolveSite` of a depth-1 group is
+ * itself, so a device attached directly to the site group is not lost.
+ *
+ * Sorted, so the bound parameter is deterministic whatever order the platform
+ * listed the groups in.
+ */
+export function groupIdsForSites(
+  index: GroupIndex,
+  siteIds: readonly string[],
+): string[] {
+  const wanted = new Set(siteIds);
+  if (wanted.size === 0) return [];
+  const matched: string[] = [];
+  for (const groupId of index.keys()) {
+    const site = resolveSite(index, groupId);
+    if (site && wanted.has(site.uuid)) matched.push(groupId);
+  }
+  return matched.sort();
+}
+
+/**
+ * Pure: the site uuids whose display name contains `term`, case-insensitively.
+ *
+ * Substring, to mirror the `ILIKE '%term%'` the text columns get — searching
+ * "NYC" has to find "NYC Office". Nameless sites can never match, which is
+ * correct: there is no name to have matched.
+ */
+export function sitesMatchingName(index: GroupIndex, term: string): string[] {
+  const needle = term.trim().toLowerCase();
+  if (needle === "") return [];
+  const hits = new Set<string>();
+  for (const groupId of index.keys()) {
+    const site = resolveSite(index, groupId);
+    if (site?.name && site.name.toLowerCase().includes(needle)) hits.add(site.uuid);
+  }
+  return [...hits].sort();
 }
 
 export interface DeviceListItem {
@@ -50,6 +203,20 @@ export interface DeviceListItem {
    * before treating it as a grouping dimension.
    */
   city: string | null;
+  /**
+   * The customer/site axis, projected onto every row.
+   *
+   * `groupId` is the join key — NEVER `groupName`. Device 1000015 carries a
+   * populated group_id and an EMPTY group_name while the hierarchy names that
+   * group correctly, and two sibling groups may share a display name, so a name
+   * is not an identity. `groupName` here is display text only.
+   */
+  groupId: string | null;
+  groupName: string | null;
+  accountName: string | null;
+  tags: string[];
+  /** Resolved from the group tree. Always present; see DeviceSite. */
+  site: DeviceSite;
   deviceClass: string;
   modelType: string | null;
   status: string;
@@ -195,8 +362,17 @@ export class ReadQueries {
     return row ? { snapshot: row.snapshot, computedAt: row.computed_at.toISOString() } : null;
   }
 
+  /**
+   * The device list.
+   *
+   * `hierarchy` carries the group tree so each row can be projected onto the
+   * site axis. It is a parameter rather than something this class fetches because
+   * reading the tree is IO against the control plane, and these are read queries
+   * over Postgres — the route owns the cache (see routes/devices.ts).
+   */
   async devices(
     filters: DeviceListFilters,
+    hierarchy: SiteResolution = { index: null, reason: NO_HIERARCHY_REASON },
   ): Promise<{ items: DeviceListItem[]; totalItems: number }> {
     // Retired devices are never listed: they no longer exist upstream, and a list
     // that includes them makes every total one too many.
@@ -211,13 +387,47 @@ export class ReadQueries {
       params.push(filters.groupId);
       where.push(`d.group_id = $${params.length}`);
     }
+    // The site filter, as a plain `devices` column predicate.
+    //
+    // TWO reasons it is written this way. First, site is derived from the group
+    // tree, which is not in Postgres, so the route hands us the group ids it
+    // rolls up to. Second, the COUNT and LIST statements below select from
+    // DIFFERENT FROM clauses — the count omits the telemetry lateral — so a
+    // predicate written against a lateral alias would compile in one and raise
+    // `missing FROM-clause entry` in the other. That exact shape once 500'd a
+    // live endpoint while stub tests passed. `d.group_id` is a real column on
+    // the one table both statements share, so the same predicate is legal in
+    // both and they agree by construction.
+    //
+    // FAIL CLOSED, matching the `deviceIds` decision on /api/alerts: an
+    // explicitly supplied site filter that resolves to no groups matches
+    // NOTHING. A filter whose whole job is to narrow must not fail open into the
+    // entire fleet — and that includes the case where the hierarchy could not be
+    // read at all, where returning every device as if the filter had been
+    // honoured would be a lie the caller cannot detect.
+    if (filters.siteGroupIds) {
+      params.push(filters.siteGroupIds);
+      where.push(`d.group_id = ANY($${params.length}::text[])`);
+    }
     if (filters.search) {
       params.push(`%${filters.search}%`);
       const i = params.length;
-      where.push(
-        `(d.name ILIKE $${i} OR d.location ILIKE $${i} OR d.id ILIKE $${i} ` +
-          `OR d.device_id ILIKE $${i} OR d.model_type ILIKE $${i} OR d.serial_no ILIKE $${i})`,
-      );
+      // group_name and account_name join the text search as DISPLAY TEXT. This
+      // is not a join — the standing "join on group_id, never group_name" rule
+      // is about identity, and searching a label is not claiming one.
+      const clauses = [
+        `d.name ILIKE $${i}`, `d.location ILIKE $${i}`, `d.id ILIKE $${i}`,
+        `d.device_id ILIKE $${i}`, `d.model_type ILIKE $${i}`, `d.serial_no ILIKE $${i}`,
+        `d.group_name ILIKE $${i}`, `d.account_name ILIKE $${i}`,
+      ];
+      // Site names live in the group tree, not in any column, so a search that
+      // should match a site arrives pre-resolved to group ids. Skipped when empty
+      // only to avoid binding a parameter that could never match anything.
+      if (filters.searchSiteGroupIds && filters.searchSiteGroupIds.length > 0) {
+        params.push(filters.searchSiteGroupIds);
+        clauses.push(`d.group_id = ANY($${params.length}::text[])`);
+      }
+      where.push(`(${clauses.join(" OR ")})`);
     }
     // Status is derived, so it filters on the computed expression rather than a
     // column — it has to be applied after the lateral joins.
@@ -244,6 +454,7 @@ export class ReadQueries {
     const offset = (filters.page - 1) * filters.limit;
     const rowsPromise = this.pool.query(
       `SELECT d.id, d.name, d.location, d.device_class, d.model_type, d.city,
+              d.group_id, d.group_name, d.account_name, d.tags,
               d.last_online_time, d.firmware_current, d.firmware_latest,
               ${STATUS_SQL} AS status,
               hs.observed_at, hs.presence, hs.is_screen_on, hs.is_black_screen,
@@ -264,11 +475,14 @@ export class ReadQueries {
 
     return {
       totalItems: Number(countResult.rows[0]?.count ?? 0),
-      items: rowsResult.rows.map((r) => this.#toListItem(r)),
+      items: rowsResult.rows.map((r) => this.#toListItem(r, hierarchy)),
     };
   }
 
-  async device(id: string): Promise<DeviceListItem | null> {
+  async device(
+    id: string,
+    hierarchy: SiteResolution = { index: null, reason: NO_HIERARCHY_REASON },
+  ): Promise<DeviceListItem | null> {
     const { rows } = await this.pool.query(
       `SELECT d.id, d.name, d.location, d.device_class, d.model_type, d.city,
               d.last_online_time, d.firmware_current, d.firmware_latest,
@@ -279,9 +493,9 @@ export class ReadQueries {
               al.critical, al.high, al.medium, al.info, al.total,
               d.serial_no, d.vendor, d.product_name, d.timezone, d.orientation,
               d.screen_width, d.screen_height, d.latitude, d.longitude,
-              d.license_status, d.license_expiration, d.group_name, d.account_name,
-              d.tags, d.first_seen_at, d.last_synced_at, d.metafields, d.city,
-              d.retired_at
+              d.license_status, d.license_expiration, d.group_id, d.group_name,
+              d.account_name, d.tags, d.first_seen_at, d.last_synced_at,
+              d.metafields, d.city, d.retired_at
          FROM devices d ${LATEST_SAMPLE_LATERAL} ${ALERT_COUNTS_LATERAL}
         -- Deliberately NOT filtered on retired_at: a lookup by id should show a
         -- retired device's last known state (with retiredAt set) rather than 404.
@@ -291,7 +505,7 @@ export class ReadQueries {
     const row = rows[0];
     if (!row) return null;
     return {
-      ...this.#toListItem(row),
+      ...this.#toListItem(row, hierarchy),
       // Detail-only fields ride along; the list shape is a strict subset.
       ...({
         serialNo: row.serial_no, vendor: row.vendor, productName: row.product_name,
@@ -300,8 +514,9 @@ export class ReadQueries {
         latitude: num(row.latitude), longitude: num(row.longitude),
         licenseStatus: row.license_status,
         licenseExpiration: row.license_expiration?.toISOString() ?? null,
-        groupName: row.group_name, accountName: row.account_name,
-        tags: row.tags ?? [],
+        // groupId/groupName/accountName/tags and `site` come from the list
+        // projection above — one source of truth, so the drawer and the row can
+        // never disagree about which customer and site a device belongs to.
         // Tenant-defined, so passed through verbatim rather than mapped.
         metafields: row.metafields ?? {},
         city: row.city ?? null,
@@ -1231,14 +1446,22 @@ export class ReadQueries {
     return rows.map((row) => ({ id: row.id, name: row.name, groupId: row.group_id }));
   }
 
-  #toListItem(r: Record<string, unknown>): DeviceListItem {
+  #toListItem(r: Record<string, unknown>, hierarchy: SiteResolution): DeviceListItem {
     const current = r["firmware_current"] as string | null;
     const latest = r["firmware_latest"] as string | null;
+    const groupId = (r["group_id"] as string | null) ?? null;
     return {
       id: r["id"] as string,
       name: (r["name"] as string | null) ?? null,
       location: (r["location"] as string | null) ?? null,
       city: (r["city"] as string | null) ?? null,
+      groupId,
+      // Display text. The identity is `groupId`; one device has a valid id and an
+      // empty name here, which is exactly why nothing joins on this field.
+      groupName: (r["group_name"] as string | null) ?? null,
+      accountName: (r["account_name"] as string | null) ?? null,
+      tags: (r["tags"] as string[] | null) ?? [],
+      site: deviceSite(hierarchy, groupId),
       deviceClass: r["device_class"] as string,
       modelType: (r["model_type"] as string | null) ?? null,
       status: r["status"] as string,
