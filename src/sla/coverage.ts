@@ -26,6 +26,17 @@
  * separates them.
  */
 
+import {
+  CLAIMABLE_COVERAGE_FLOOR,
+  MEASURABILITY_WITHOUT_LIVE_SIGNAL,
+  asUnmeasurableDimension,
+  humanDuration,
+  type MeasurabilityAssessment,
+  type UnmeasurableDimension,
+} from "./measurability.js";
+
+export type { UnmeasurableDimension };
+
 export type Confidence = "high" | "medium" | "low" | "none";
 
 /** Per-device aggregates for one SLA window, as computed in SQL. */
@@ -66,8 +77,11 @@ export interface DeviceSlaWindow {
 const HIGH = 0.98;
 const MEDIUM = 0.9;
 const LOW = 0.5;
-/** Below this, we do not make an external claim at all. */
-const CLAIMABLE_FLOOR = 0.95;
+/**
+ * Below this, we do not make an external claim at all. Shared with the
+ * measurability grader so the page has ONE claimability bar, not two.
+ */
+const CLAIMABLE_FLOOR = CLAIMABLE_COVERAGE_FLOOR;
 
 export function confidenceFor(coverage: number): Confidence {
   if (coverage >= HIGH) return "high";
@@ -77,14 +91,6 @@ export function confidenceFor(coverage: number): Confidence {
 }
 
 const pct = (n: number) => `${(n * 100).toFixed(1)}%`;
-
-const humanDuration = (seconds: number): string => {
-  const s = Math.max(0, Math.round(seconds));
-  if (s < 90) return `${s}s`;
-  if (s < 5400) return `${Math.round(s / 60)} min`;
-  if (s < 172800) return `${(s / 3600).toFixed(1)} h`;
-  return `${Math.round(s / 86400)} days`;
-};
 
 export function assessDevice(
   agg: DeviceWindowAggregate,
@@ -143,64 +149,25 @@ export interface BlindWindow {
   devicesReporting: number;
 }
 
-export interface UnmeasurableDimension {
-  dimension: string;
-  reason: string;
-  /** SLA language this dimension would be needed to evidence. */
-  slaImpact: string;
-}
-
 /**
- * Dimensions we can never evidence, stated once and prominently.
+ * Dimensions we cannot measure to SLA grade, stated once and prominently.
  *
- * An MSP signing an SLA needs to know which clauses it cannot instrument BEFORE
- * signing. Confirmed absent fleet-wide (docs/06, GAP-01): all 250 devices, 41
- * telemetry keys, zero runtime metrics.
+ * This used to be a hardcoded array of six, and three of its entries went false
+ * without anyone noticing: storage, Wi-Fi signal and screenshots all became
+ * readable, and this page kept telling customers otherwise. It is now DERIVED —
+ * see `measurability.ts` for the grades and where the SLA-grade line sits.
+ *
+ * This export is the no-live-signal fallback, kept under its original name for
+ * callers that have no capability probe to hand. It promotes nothing, so it is
+ * the union of "no source" and "readable but not SLA-grade": exactly the set an
+ * MSP must read BEFORE signing. A caller holding a live probe should pass a
+ * `MeasurabilityAssessment` into `buildFleetReport` instead and get the three
+ * grades separated.
  */
 export const UNMEASURABLE: UnmeasurableDimension[] = [
-  {
-    dimension: "Thermal state",
-    reason: "No temperature value exists in the Videri telemetry payload.",
-    slaImpact:
-      "Cannot evidence thermal shutdown, overheating, or environmental cause. " +
-      "Do not sign a clause referencing device temperature.",
-  },
-  {
-    dimension: "CPU / memory load",
-    reason: "No CPU or memory metric exists in the payload (cpu_cores is a static core count).",
-    slaImpact:
-      "Cannot attribute a content failure to device resource exhaustion, or " +
-      "disprove a claim that it was.",
-  },
-  {
-    dimension: "Network quality (signal, packet loss, jitter)",
-    reason: "No signal-strength, packet-loss or jitter value is reported.",
-    slaImpact:
-      "Cannot distinguish a venue network fault from a device fault. Materially " +
-      "affects who bears responsibility for an outage.",
-  },
-  {
-    dimension: "Storage capacity",
-    reason: "No per-device storage usage is exposed; CMS statistics are per-tenant and denied.",
-    slaImpact: "Cannot forecast or evidence a content-delivery failure caused by a full disk.",
-  },
-  {
-    dimension: "Playback verification (per-slot)",
-    reason:
-      "Proof-of-play exists only as a per-device asynchronous file export with an " +
-      "undocumented schema and no aggregation.",
-    slaImpact:
-      "Per-slot delivery cannot be evidenced in near-real-time. A 'every scheduled " +
-      "slot played' clause is not currently instrumentable.",
-  },
-  {
-    dimension: "Visual confirmation",
-    reason: "Screenshots are upload-only; no read endpoint exists.",
-    slaImpact:
-      "Cannot produce visual proof-of-display. A clause requiring screenshot " +
-      "evidence cannot be met.",
-  },
-];
+  ...MEASURABILITY_WITHOUT_LIVE_SIGNAL.unmeasurable,
+  ...MEASURABILITY_WITHOUT_LIVE_SIGNAL.readable,
+].map(asUnmeasurableDimension);
 
 export interface FleetSlaReport {
   windowHours: number;
@@ -218,7 +185,14 @@ export interface FleetSlaReport {
   reportingLag: { p50: number | null; p95: number | null; max: number | null };
   /** Fleet-wide silence = our collector failed. Never a fleet outage. */
   blindWindows: BlindWindow[];
+  /**
+   * Dimensions with NO usable source — the genuinely unmeasurable ones only.
+   * Readable-but-not-SLA-grade dimensions are in `measurability.readable`,
+   * because presenting the two as one list is what BUG-3 was.
+   */
   unmeasurable: UnmeasurableDimension[];
+  /** The full three-grade assessment, with coverage and cadence per dimension. */
+  measurability: MeasurabilityAssessment;
   /** Worst devices by coverage — where measurement, not uptime, is the problem. */
   leastObserved: DeviceSlaWindow[];
   warnings: string[];
@@ -229,6 +203,11 @@ export function buildFleetReport(
   bucketSeconds: number,
   devices: DeviceSlaWindow[],
   blindWindows: BlindWindow[],
+  /**
+   * Live capability grades. Omitted means "not probed", and the fallback
+   * promotes nothing — an unprobed page under-claims rather than over-claims.
+   */
+  measurability: MeasurabilityAssessment = MEASURABILITY_WITHOUT_LIVE_SIGNAL,
 ): FleetSlaReport {
   const observed = devices.filter((d) => d.observedUptime !== null);
   const claimable = devices.filter((d) => d.claimable);
@@ -267,10 +246,29 @@ export function buildFleetReport(
       `${devices.length - observed.length} device(s) produced no readings at all in this window.`,
     );
   }
-  warnings.push(
-    `${UNMEASURABLE.length} dimensions cannot be measured at all on this platform — ` +
-      `review before agreeing SLA language referencing them.`,
-  );
+  // Two separate sentences on purpose. "Cannot be measured at all" and "readable
+  // but not to SLA grade" lead to different contract decisions, and the old
+  // single count blurred them into one over-broad refusal.
+  if (measurability.unmeasurable.length > 0) {
+    warnings.push(
+      `${measurability.unmeasurable.length} dimensions cannot be measured at all on this ` +
+        `platform (${measurability.unmeasurable.map((d) => d.dimension).join(", ")}) — ` +
+        `do not agree SLA language referencing them.`,
+    );
+  }
+  if (measurability.readable.length > 0) {
+    warnings.push(
+      `${measurability.readable.length} dimensions are READABLE per device but not to SLA ` +
+        `grade (${measurability.readable.map((d) => d.dimension).join(", ")}) — useful for ` +
+        `diagnosis, and each states its live coverage and cadence. Do not promise them.`,
+    );
+  }
+  if (!measurability.fromLiveCapability) {
+    warnings.push(
+      `Measurability was graded with NO live capability sample, so nothing was promoted to ` +
+        `SLA grade. This list under-claims until the capability probe runs.`,
+    );
+  }
 
   return {
     windowHours,
@@ -291,7 +289,8 @@ export function buildFleetReport(
     confidenceBreakdown,
     reportingLag: { p50: at(0.5), p95: at(0.95), max: lags.length === 0 ? null : lags[lags.length - 1]! },
     blindWindows,
-    unmeasurable: UNMEASURABLE,
+    unmeasurable: measurability.unmeasurable.map(asUnmeasurableDimension),
+    measurability,
     leastObserved: [...devices]
       .sort((a, b) => a.collectionCoverage - b.collectionCoverage)
       .slice(0, 15),

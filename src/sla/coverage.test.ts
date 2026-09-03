@@ -267,8 +267,11 @@ test("leastObserved is sorted worst-coverage-first and capped at 15", () => {
 
 test("the unmeasurable dimensions are always surfaced, every one carrying an SLA impact", () => {
   const r = buildFleetReport(24, BUCKET, [win()], []);
-  assert.equal(r.unmeasurable.length, UNMEASURABLE.length);
-  assert.ok(UNMEASURABLE.length >= 5);
+  // The report lists only the SOURCELESS dimensions; `UNMEASURABLE` is the wider
+  // fail-closed set (sourceless + readable-but-not-SLA-grade), so it is a
+  // superset by construction. Conflating the two was BUG-3.
+  assert.ok(r.unmeasurable.length >= 2, "the sourceless dimensions are always stated");
+  assert.ok(UNMEASURABLE.length >= r.unmeasurable.length);
   for (const dim of r.unmeasurable) {
     assert.ok(dim.dimension && dim.reason && dim.slaImpact, "each dimension states what it blocks");
   }

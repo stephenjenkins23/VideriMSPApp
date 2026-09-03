@@ -2,7 +2,8 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { envelope } from "../freshness.js";
 import { buildSlaReport } from "../../sla/report.js";
-import { UNMEASURABLE } from "../../sla/coverage.js";
+import { loadMeasurability, type CapabilitySources } from "../../sla/capability.js";
+import { healthScoreBasis } from "../../sla/measurability.js";
 import type { ApiContext } from "../server.js";
 
 const Query = z.object({
@@ -12,6 +13,17 @@ const Query = z.object({
 });
 
 export async function registerSlaRoutes(app: FastifyInstance, ctx: ApiContext): Promise<void> {
+  /**
+   * The capability probe, wired to the SAME reads the Overview tile and the
+   * Trends engine use. BUG-3 was three surfaces giving three answers about one
+   * capability; sharing the source is the fix, not a second opinion.
+   */
+  const capability: CapabilitySources = {
+    telemetryAvailability: () => ctx.queries.telemetryAvailability(),
+    pollerRunHistory: (opts) => ctx.repo.pollerRunHistory(opts),
+    screenshotTargets: (onlineOnly, limit) => ctx.repo.screenshotTargets(onlineOnly, limit),
+  };
+
   /**
    * SLA coverage and measurement confidence.
    *
@@ -28,30 +40,48 @@ export async function registerSlaRoutes(app: FastifyInstance, ctx: ApiContext): 
         message: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; "),
       });
     }
-    const [report, freshness] = await Promise.all([
-      buildSlaReport(ctx.repo, parsed.data.windowHours, parsed.data.bucketSeconds),
+    const [measurability, freshness] = await Promise.all([
+      loadMeasurability(capability),
       ctx.freshness(),
     ]);
+    const report = await buildSlaReport(
+      ctx.repo,
+      parsed.data.windowHours,
+      parsed.data.bucketSeconds,
+      measurability,
+    );
     return envelope(report, freshness);
   });
 
   /**
-   * Dimensions this platform cannot measure at all.
+   * What can and cannot be evidenced, in three grades.
    *
    * Deliberately its own endpoint rather than a footnote: an MSP needs this
    * list BEFORE agreeing SLA language, and it should be as easy to find as the
-   * uptime number.
+   * uptime number. `dimensions` keeps its original meaning — the genuinely
+   * sourceless ones — and the readable-but-not-SLA-grade tier is its own list,
+   * because promising those is the mistake this endpoint exists to prevent.
    */
   app.get("/api/sla/unmeasurable", async (_request, reply) => {
-    const freshness = await ctx.freshness();
+    const [measurability, freshness] = await Promise.all([
+      loadMeasurability(capability),
+      ctx.freshness(),
+    ]);
     return reply.send(
       envelope(
         {
-          dimensions: UNMEASURABLE,
-          summary:
-            `${UNMEASURABLE.length} dimensions cannot be evidenced on this platform. ` +
-            `Confirmed across all devices: the Videri telemetry payload contains ` +
-            `package versions and hardware identity only — no runtime metrics.`,
+          dimensions: measurability.unmeasurable,
+          readableNotSlaGrade: measurability.readable,
+          slaGrade: measurability.slaGrade,
+          bars: measurability.bars,
+          /**
+           * So the console's health-score exclusion list is READ rather than
+           * hardcoded — the two disagreeing is what put a stale claim under a
+           * headline number.
+           */
+          healthScoreBasis: healthScoreBasis(measurability),
+          fromLiveCapability: measurability.fromLiveCapability,
+          summary: measurability.summary,
         },
         freshness,
       ),
