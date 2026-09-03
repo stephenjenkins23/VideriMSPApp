@@ -69,6 +69,15 @@ export interface DeviceListItem {
     ramPercent: number | null;
     temperatureC: number | null;
     wifiSignalDbm: number | null;
+    storagePercent: number | null;
+    ntpOffsetMs: number | null;
+    /**
+     * When the HARDWARE fields above were read. Separate from `observedAt`
+     * because they come from the slow lane (~2 h) not the status feed (~2 min),
+     * and a UI must be able to age them independently. Null when no slow-lane
+     * reading exists for this device.
+     */
+    hardwareObservedAt: string | null;
   };
 }
 
@@ -124,6 +133,35 @@ const LATEST_SAMPLE_LATERAL = `
      ORDER BY observed_at DESC
      LIMIT 1
   ) hs ON TRUE`;
+
+/**
+ * Most recent SLOW-LANE hardware reading per device.
+ *
+ * A second lateral rather than more columns on the first, because the two
+ * answer different questions on different clocks. `health_samples` is the
+ * status feed (~2 min, carries presence and screen flags, and structurally
+ * carries NO hardware values — that is why the slow lane exists).
+ * `device_telemetry` is the per-device demo_command sweep (~2 h) and is the only
+ * place CPU/RAM/storage/signal live.
+ *
+ * Reading hardware from `health_samples` alone is why `/api/devices` returned
+ * null CPU/RAM/signal for all 248 devices while `/api/pipeline/status` reported
+ * ~100 readable. The availability query was fixed for exactly this reason and
+ * this one was missed.
+ *
+ * `observed_at` comes back deliberately: a 2-hour-old hardware reading beside a
+ * 2-minute-old presence reading is legitimate, but the consumer must be able to
+ * tell them apart rather than assuming one age for the whole row.
+ */
+const LATEST_TELEMETRY_LATERAL = `
+  LEFT JOIN LATERAL (
+    SELECT observed_at, cpu_percent, ram_used_percent, storage_used_percent,
+           rssi_dbm, ntp_offset_ms
+      FROM device_telemetry
+     WHERE device_id = d.id
+     ORDER BY observed_at DESC
+     LIMIT 1
+  ) dt ON TRUE`;
 
 /**
  * The active-fleet predicate. Aliased `d` everywhere it is used.
@@ -211,8 +249,12 @@ export class ReadQueries {
               hs.observed_at, hs.presence, hs.is_screen_on, hs.is_black_screen,
               hs.showing_logo, hs.cpu_percent, hs.ram_percent, hs.temperature_c,
               hs.wifi_signal_dbm,
+              dt.observed_at AS hw_observed_at, dt.cpu_percent AS dt_cpu,
+              dt.ram_used_percent AS dt_ram, dt.storage_used_percent AS dt_storage,
+              dt.rssi_dbm AS dt_rssi, dt.ntp_offset_ms AS dt_ntp,
               al.critical, al.high, al.medium, al.info, al.total
-         FROM devices d ${LATEST_SAMPLE_LATERAL} ${ALERT_COUNTS_LATERAL} ${whereSql}
+         FROM devices d ${LATEST_SAMPLE_LATERAL} ${LATEST_TELEMETRY_LATERAL}
+              ${ALERT_COUNTS_LATERAL} ${whereSql}
         ORDER BY ${orderSql}
         LIMIT ${filters.limit} OFFSET ${offset}`,
       params,
@@ -1232,10 +1274,25 @@ export class ReadQueries {
         isScreenOn: (r["is_screen_on"] as boolean | null) ?? null,
         isBlackScreen: (r["is_black_screen"] as boolean | null) ?? null,
         showingLogo: (r["showing_logo"] as boolean | null) ?? null,
-        cpuPercent: num(r["cpu_percent"] as string | number | null),
-        ramPercent: num(r["ram_percent"] as string | number | null),
+        // Hardware fields: slow lane FIRST, status feed as fallback.
+        //
+        // The order is the fix, not a preference. The status feed structurally
+        // carries no hardware values, so reading it first returned null for
+        // every device while the slow lane held ~100 real readings. `??` and not
+        // `||` throughout: a genuine 0% CPU or a 0 dBm signal must survive, and
+        // `||` would discard both as falsy.
+        cpuPercent: num(r["dt_cpu"] as string | number | null)
+          ?? num(r["cpu_percent"] as string | number | null),
+        ramPercent: num(r["dt_ram"] as string | number | null)
+          ?? num(r["ram_percent"] as string | number | null),
+        // Temperature has no source on any model and no device_telemetry column,
+        // so it stays status-feed-only and stays null. Do not invent a fallback.
         temperatureC: num(r["temperature_c"] as string | number | null),
-        wifiSignalDbm: num(r["wifi_signal_dbm"] as string | number | null),
+        wifiSignalDbm: num(r["dt_rssi"] as string | number | null)
+          ?? num(r["wifi_signal_dbm"] as string | number | null),
+        storagePercent: num(r["dt_storage"] as string | number | null),
+        ntpOffsetMs: num(r["dt_ntp"] as string | number | null),
+        hardwareObservedAt: (r["hw_observed_at"] as Date | null)?.toISOString() ?? null,
       },
     };
   }
