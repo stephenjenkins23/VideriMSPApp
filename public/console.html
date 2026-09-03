@@ -80,8 +80,13 @@ button{font:inherit;cursor:pointer}
 .fp{display:inline-flex;align-items:center;gap:7px;border:1px solid var(--bd);border-radius:20px;
   padding:5px 12px;font-size:12.5px;background:var(--card);transition:.12s}
 .fp:hover{border-color:var(--blue-bd)}
-.fp[aria-pressed="true"]{background:var(--blue-2);border-color:var(--blue-bd)}
+.fp[aria-pressed="true"],.fp.on{background:var(--blue-2);border-color:var(--blue-bd)}
 .fp b{font-weight:600}
+/* triage controls: a select has to read as the same control family as the pills */
+.tbar select{font:inherit;font-size:12.5px;padding:5px 9px;border:1px solid var(--bd);
+  border-radius:8px;background:var(--card);color:var(--tx)}
+.tbar select:focus{outline:2px solid var(--blue);outline-offset:-1px}
+.tbar label{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--tx-3)}
 .d{width:9px;height:9px;border-radius:50%;flex:none}
 .d.red{background:var(--red)} .d.amb{background:var(--amber)}
 .d.blu{background:var(--blue)} .d.gry{background:var(--na)}
@@ -588,6 +593,10 @@ table.dt td .prov{display:block;margin-top:2px;white-space:normal;max-width:34ch
   <!-- Our own collector's health. Separate container from #staleness because the
        freshness banner re-renders every 15s and would otherwise wipe it. -->
   <div id="pipebanner"></div>
+  <!-- "We could not load all of it." Above every view on purpose: a count that
+       is a lower bound must not be explained only on the tab you happened to
+       open. Its own container for the same reason as the two above. -->
+  <div id="trunc"></div>
 
   <!-- ============ OVERVIEW ============ -->
   <section id="v-overview">
@@ -659,12 +668,24 @@ table.dt td .prov{display:block;margin-top:2px;white-space:normal;max-width:34ch
     <div class="card">
       <div class="chd">
         <h2>&#128276; Active alerts <span class="cnt" id="acount">&#8212;</span></h2>
-        <div class="r"><button class="btn" id="reload">&#8635; Refresh</button></div>
+        <div class="r"><span class="prov" id="asub"></span>
+          <button class="btn" id="reload">&#8635; Refresh</button></div>
       </div>
       <div id="abands"></div>
+      <!-- The fields a technician actually knows when the phone rings: the
+           canvas name, where it is, what the alert says, and the rule id from a
+           previous ticket. Static markup and wired once, so typing never loses
+           focus to a re-render. -->
+      <div class="srch">
+        <input id="aq" type="search"
+               placeholder="Search alerts by device, location, title or rule&#8230;"
+               aria-label="Search alerts">
+      </div>
+      <div class="tbar" id="actl"></div>
       <div class="pills" id="fp"></div>
       <div id="alist"><div class="skel"><span class="sk row"></span><span class="sk row"></span>
         <span class="sk row"></span></div></div>
+      <div id="atrunc"></div>
       <div class="wbar" id="inertbar" style="display:none">
         <span class="d gry"></span>
         <span class="l" id="inerttext"></span>
@@ -685,6 +706,7 @@ table.dt td .prov{display:block;margin-top:2px;white-space:normal;max-width:34ch
       <div class="tbar" id="dfilters"></div>
       <div id="dtable"><div class="skel"><span class="sk line"></span><span class="sk row"></span>
         <span class="sk row"></span><span class="sk row"></span></div></div>
+      <div id="dtrunc"></div>
     </div>
   </section>
 
@@ -694,6 +716,7 @@ table.dt td .prov{display:block;margin-top:2px;white-space:normal;max-width:34ch
       <div class="chd"><h2>&#128737; Configuration compliance</h2>
         <div class="r"><span class="prov" id="compsub"></span></div></div>
       <div id="comptable"></div>
+      <div id="ctrunc"></div>
     </div>
   </section>
 
@@ -889,24 +912,73 @@ async function api(path, opts) {
   return res.json();
 }
 
-/** Walk a paginated endpoint to completion. The API caps limit at 200 and the
- *  fleet is larger, so a single request would silently truncate the fleet. */
+/** The server clamps `limit`; anything above this is rejected outright, so a
+ *  bigger page is not something this console can buy for itself. */
+const API_PAGE_LIMIT = 200;
+/** How many page requests are in flight at once. Page 1 reports totalPages, so
+ *  pages 2..N are known up front and do not have to be discovered one at a
+ *  time: 50 serial round trips per collection was the cost that made a cap
+ *  necessary in the first place. Kept modest -- this is a read API shared with
+ *  the pollers, and the point is fewer round-trip WAITS, not more load. */
+const API_PAGE_CONCURRENCY = 6;
+
+/**
+ * Walk a paginated endpoint and report HOW MUCH OF IT WE ACTUALLY GOT.
+ *
+ * The fleet is larger than one page, so this pages. The cap exists because
+ * paging is not free. What must never happen again is the two ending in the
+ * same silence: this used to `break` on `out.length >= cap` and return the same
+ * shape as a completed walk, so 2,000-of-2,540 was indistinguishable from all
+ * of it. At the observed ~1.25 alerts per device that wall is hit by ALERTS at
+ * roughly 1,600 devices -- and every count downstream would have understated
+ * the estate with nothing on screen saying so.
+ *
+ * So the contract is now: `total` is the server's `totalItems` (what exists),
+ * `loaded` is what we hold, and `truncated` is simply `loaded < total`. That
+ * covers the cap AND every other way a walk can come up short -- a 429 from the
+ * sweep rate-limiter mid-walk yields an empty page, which used to vanish and
+ * now shows up as a shortfall. Callers must not present a count over a
+ * truncated collection as a fact; see renderTruncationBanner().
+ */
 async function apiAll(path, cap = 2000) {
   const sep = path.includes("?") ? "&" : "?";
-  const out = [];
-  let page = 1, meta = null;
-  for (;;) {
-    const body = await api(`${path}${sep}page=${page}&limit=200`);
-    meta = body.meta;
-    out.push(...(body.data || []));
-    // The envelope calls this `page`, not `pagination`. Reading the wrong key
-    // silently stopped after one request and truncated the fleet at the API's
-    // 200-row cap -- which looked like a real number, not a bug.
-    const p = meta && meta.page;
-    if (!p || page >= (p.totalPages || 1) || out.length >= cap) break;
-    page += 1;
-  }
-  return { data: out, meta };
+  const at = (page) => api(`${path}${sep}page=${page}&limit=${API_PAGE_LIMIT}`);
+  const first = await at(1);
+  const meta = first.meta;
+  // The envelope calls this `page`, not `pagination`. Reading the wrong key
+  // silently stopped after one request and truncated the fleet at the API's
+  // 200-row cap -- which looked like a real number, not a bug.
+  const p = meta && meta.page;
+  const pages = [first.data || []];
+  const totalPages = (p && p.totalPages) || 1;
+  // No page meta at all means this endpoint is not paginated; then what we hold
+  // IS everything, and claiming a shortfall would be its own false alarm.
+  const total = p && typeof p.totalItems === "number" ? p.totalItems : pages[0].length;
+  const wanted = Math.min(totalPages, Math.max(1, Math.ceil(cap / API_PAGE_LIMIT)));
+  let next = 2;
+  const worker = async () => {
+    for (;;) {
+      const page = next++;
+      if (page > wanted) return;
+      // Written by index, so the fleet keeps the server's order regardless of
+      // which request settles first.
+      pages[page - 1] = (await at(page)).data || [];
+    }
+  };
+  await Promise.all(Array.from(
+    { length: Math.max(0, Math.min(API_PAGE_CONCURRENCY, wanted - 1)) }, worker));
+  const data = pages.flat();
+  return {
+    data, meta, loaded: data.length,
+    // Never claim a total smaller than what we are holding.
+    total: Math.max(total, data.length),
+    truncated: data.length < total,
+    // Was it the cap specifically? That is the one the operator can do something
+    // about (narrow the query) and the one that says the product needs a
+    // count-only endpoint.
+    capped: wanted < totalPages,
+    cap, pagesFetched: wanted, pagesAvailable: totalPages,
+  };
 }
 
 /* ---- formatting -------------------------------------------------- */
@@ -933,6 +1005,13 @@ function dur(sec) {
 const S = { summary: null, alerts: [], devices: [], compliance: [], pipeline: null,
             fresh: null, sev: "all", cls: "all", q: "", dev: null, dtab: "overview",
             sort: { key: "status", dir: 1 }, loading: false, brief: null, sla: null,
+            // What a paged fetch could NOT get. Keyed by collection; an entry
+            // exists only when that collection is short, and every surface that
+            // prints a count over it must mark the number as a lower bound.
+            trunc: {}, lastLoadAt: 0,
+            // Alert triage controls. A queue of 110 with no search is a queue a
+            // technician works by scrolling, which is not working it.
+            aq: "", arule: "all", aage: "all", asort: "sev",
             // Our own collector's health, and the lane-status filter for it.
             pipe: null, plane: "all",
             // Trends: the window is state because every figure is labelled with it.
@@ -947,7 +1026,7 @@ const S = { summary: null, alerts: [], devices: [], compliance: [], pipeline: nu
 /** Page titles, so the header narrates where you are. */
 const PAGES = {
   overview:   ["Fleet Overview", "Everything measurable, and everything that is not"],
-  alerts:     ["Active Alerts", "Grouped by severity, newest evidence first"],
+  alerts:     ["Active Alerts", "Search, filter by rule or age, group by rule — severity first, newest evidence first"],
   actions:    ["Recommended Actions", "Self-heal: what to do, ranked — one-click where we hold a verified fix, advice everywhere else"],
   devices:    ["Devices", "Sortable, searchable; click any row for full detail"],
   compliance: ["Configuration Compliance", "Calibrated drift scored apart from policy adoption"],
@@ -981,6 +1060,76 @@ function renderFreshness() {
        Everything below is a snapshot of that moment, not of now.
        ${warnings.length ? "<ul>" + warnings.map((w) => `<li>${esc(w)}</li>`).join("") + "</ul>" : ""}
        </span></div>`;
+}
+
+/* ===================================================================
+   TRUNCATION — the counts that are only lower bounds.
+
+   apiAll() reports `loaded` against the server's `totalItems`. When they differ
+   the honest position is not a smaller number, it is a number plus the fact
+   that it is a floor: a silent cap and a bigger silent cap are the same bug.
+   The rule this file follows: a count over a short collection is rendered with
+   a trailing "+", and the "+" is explained here -- once loudly above every
+   view, and once inside the card that holds the short list.
+   =================================================================== */
+
+/** Nouns for the three paged collections, so one shortfall reads identically
+ *  wherever it is reported. */
+const COLLECTION_NOUN = { alerts: "open alerts", devices: "devices", compliance: "scored devices" };
+const TRUNCATED_KEYS = ["alerts", "devices", "compliance"];
+/** Where the per-card note goes for each collection. */
+const TRUNC_HOSTS = { alerts: "#atrunc", devices: "#dtrunc", compliance: "#ctrunc" };
+
+/** One sentence for one short collection, in measured numbers: the server's own
+ *  totalItems against what we hold. Not a guess, and not a round figure. */
+function truncSentence(key) {
+  const t = (S.trunc || {})[key];
+  if (!t) return "";
+  const noun = COLLECTION_NOUN[key] || key;
+  const missing = (t.total - t.loaded).toLocaleString();
+  return `<b>${t.loaded.toLocaleString()} of ${t.total.toLocaleString()} ${noun} loaded.</b> ` + (t.capped
+    ? `This console pages ${API_PAGE_LIMIT} rows at a time and stops at ${t.cap.toLocaleString()}
+       (${t.pagesFetched} of ${t.pagesAvailable} pages), so ${missing} ${noun} are in no number on this screen.`
+    : `${missing} did not come back — a page was rejected or rate-limited part way through the walk.`);
+}
+
+/**
+ * Say it where it cannot be missed.
+ *
+ * Rendered into its own containers, like the freshness and collector banners,
+ * because the 15 s freshness re-render would otherwise wipe it and "we are
+ * showing you less than the whole fleet" must not blink out.
+ */
+function renderTruncationBanner() {
+  const t = S.trunc || {};
+  for (const key of TRUNCATED_KEYS) {
+    const el = $(TRUNC_HOSTS[key]);
+    if (!el) continue;
+    el.innerHTML = t[key]
+      ? `<div class="note">${truncSentence(key)} Every count over this list is a LOWER BOUND,
+           marked with a trailing &#8220;+&#8221;.</div>`
+      : "";
+  }
+  const el = $("#trunc");
+  if (!el) return;
+  const short = TRUNCATED_KEYS.filter((k) => t[k]);
+  if (short.length === 0) { el.innerHTML = ""; return; }
+  el.innerHTML =
+    `<div class="banner bad"><span>&#9888;&#65039;</span><span>
+       <b>This screen is not showing the whole estate.</b>
+       ${short.length === 1 ? "One collection" : short.length + " collections"} could not be fetched in
+       full, so the counts derived from ${short.length === 1 ? "it" : "them"} are lower bounds and are
+       marked with a trailing &#8220;+&#8221;.
+       <ul>${short.map((k) => `<li>${truncSentence(k)}</li>`).join("")}</ul>
+       Filter or search to bring the set you care about under the cap. Raising the cap would only move
+       this wall; the fix is a count endpoint and a larger page from the API.</span></div>`;
+}
+
+/** The "+" that marks a count over a short collection. Every surface that
+ *  prints such a count appends this; the sentence explaining it lives in
+ *  renderTruncationBanner(), which owns the fact. */
+function truncMark(key) {
+  return (S.trunc || {})[key] ? "+" : "";
 }
 
 /* ===================================================================
@@ -1033,7 +1182,7 @@ function healthScore() {
     const mean = S.compliance.reduce((a, c) => a + c.score, 0) / S.compliance.length;
     dims.push({
       key: "Configuration drift", weight: 25, value: Math.round(mean),
-      detail: `mean drift score across ${S.compliance.length} devices with a config snapshot`,
+      detail: `mean drift score across ${S.compliance.length}${truncMark("compliance")} devices with a config snapshot`,
     });
   }
 
@@ -1161,6 +1310,14 @@ function renderStatusWidget() {
        <span class="sn">Hardware telemetry</span>
        <span class="sv">${Math.round(cov * 100)}%</span>
        <span class="sp">of fleet</span></div>`;
+  // Shares of a fleet we could not fetch in full are shares of the part we hold,
+  // which is not the same claim. Inline state read: this function is lifted and
+  // run in isolation by the console-invariant tests.
+  const shortLine = (S.trunc || {}).devices
+    ? `<div class="prov" style="padding:8px 0 0">Percentages are of the
+         ${S.devices.length.toLocaleString()} devices this page could load, not of the whole fleet
+         &#8212; see the banner above.</div>`
+    : "";
   el.innerHTML = `<div class="slist">` + order.map((k) => {
     const n = by[k] || 0;
     return `<button class="srow ${k}" data-status="${k}">
@@ -1169,7 +1326,7 @@ function renderStatusWidget() {
       <span class="sn">${k[0].toUpperCase() + k.slice(1)}</span>
       <span class="sv">${n.toLocaleString()}</span>
       <span class="sp">${Math.round((n / total) * 100)}%</span></button>`;
-  }).join("") + `</div>` + covLine;
+  }).join("") + `</div>` + covLine + shortLine;
   el.querySelectorAll(".srow").forEach((b) =>
     b.addEventListener("click", () => {
       S.cls = b.dataset.status;
@@ -1183,11 +1340,14 @@ function renderAlertWidget() {
   // Count the BAND being shown: the chips below the header filter this band, so
   // the header must report it. It previously printed S.alerts.length (290) above
   // chips summing to 90, with nothing saying the chips were incidents-only.
-  const { band, incidents, dormant, scoped } = alertBands();
+  const { band, incidents, dormant, scoped, mark } = alertBands();
   const other = band === "dormant"
     ? `${incidents.length} incident${incidents.length === 1 ? "" : "s"}`
     : `${dormant.length} dormant`;
-  $("#wacount").textContent = scoped.length;
+  // The BAND, not the Alerts tab's filtered queue: this widget has no filter
+  // controls, so it must not report a number the operator cannot see the shape
+  // of. `mark` is the "+" for a collection apiAll could not fetch in full.
+  $("#wacount").textContent = String(scoped.length) + mark;
   $("#wasub").innerHTML = dormant.length
     ? `${esc(band)} &#183; ${other} (not in these chips)`
     : esc(band);
@@ -1221,6 +1381,12 @@ function renderAlertWidget() {
   el.querySelectorAll("[data-sev]").forEach((b) =>
     b.addEventListener("click", () => {
       S.sev = b.dataset.sev;
+      // These pills count the whole band, so the Alerts tab must not open with
+      // a leftover search or rule filter still applied — the pill would have
+      // promised 39 rows and delivered 3.
+      S.aq = ""; S.arule = "all"; S.aage = "all";
+      const box = $("#aq");
+      if (box) box.value = "";
       switchTab("alerts");
       renderAlertFilters(); renderAlerts();
     }));
@@ -1539,11 +1705,56 @@ function renderAlertFilters() {
   // rows and the chip would claim a count the list below it contradicts (the same
   // trap already fixed for the device status chips).
   const counts = {};
-  // Scoped to the BAND on screen, from the one shared split — these chips filter
-  // the visible list, so counting every open alert would print a total the list
-  // contradicts (the same invariant that broke on the device status chips).
-  const { scoped } = alertBands();
-  for (const a of scoped) counts[a.severity] = (counts[a.severity] || 0) + 1;
+  // The band on screen AFTER search/rule/age, from the one shared queue — these
+  // chips filter that set, so counting every open alert (or even the whole band
+  // while a search is active) would print a total the list contradicts. That is
+  // the invariant that has broken three times in this file.
+  const { matched, rules, ages, sorts, active, filtered, scoped, band, mark } = alertBands();
+  for (const a of matched) counts[a.severity] = (counts[a.severity] || 0) + 1;
+
+  // The rule / age / sort controls. Every option carries the number of rows
+  // choosing it would render — computed by alertBands() with all the OTHER
+  // controls held fixed, so the count and the list can never disagree.
+  const ctl = $("#actl");
+  if (ctl) {
+    const sel = (id, label, opts, cur) =>
+      `<label for="${id}">${label}</label><select id="${id}">` +
+      opts.map(([k, text, n]) =>
+        `<option value="${esc(k)}"${k === cur ? " selected" : ""}>${esc(text)}` +
+        `${n == null ? "" : ` (${n})`}</option>`).join("") + `</select>`;
+    ctl.innerHTML =
+      sel("arule", "Rule", rules, active.rule) +
+      sel("aage", "Age", ages, active.age) +
+      sel("asort", "Sort", sorts, active.sort) +
+      (filtered || active.sev !== "all"
+        ? `<button class="fp" id="aclear">&#10005; Clear filters</button>`
+        : "");
+    // Looked up by id off the document, not off `ctl`: these selects are rebuilt
+    // on every render, so the handler must be attached to the element that is
+    // now on screen.
+    const on = (id) => {
+      const e = $("#" + id);
+      if (e) e.addEventListener("change", () => { S[id] = e.value; renderAlertFilters(); renderAlerts(); });
+    };
+    on("arule"); on("aage"); on("asort");
+    const clear = filtered || active.sev !== "all" ? $("#aclear") : null;
+    if (clear) clear.addEventListener("click", () => {
+      S.aq = ""; S.arule = "all"; S.aage = "all"; S.sev = "all";
+      const box = $("#aq");
+      if (box) box.value = "";
+      renderAlertFilters(); renderAlerts();
+    });
+  }
+
+  // What the header count means, in words, so "12" above a band of 110 is never
+  // a mystery. Reports `matched` because that is what #acount prints.
+  const sub = $("#asub");
+  if (sub) {
+    sub.textContent = filtered
+      ? `${matched.length}${mark} of ${scoped.length}${mark} ${band} match these filters`
+      : `${scoped.length}${mark} ${band}`;
+  }
+
   const wrap = $("#fp");
   wrap.innerHTML = "";
   for (const [sev, dot] of SEV) {
@@ -1632,6 +1843,13 @@ const isDormantAlert = (a, dormIds) =>
  * The device-based path is kept only as a fallback for a payload that predates
  * `alertIds`, and it applies the same exemption so the fallback is not a
  * different product.
+ *
+ * IT ALSO OWNS THE TRIAGE QUEUE. Search, rule, age, severity and sort are
+ * applied here and the option counts are computed here, in the same tick as the
+ * rows, because a control that shows a count must count the rows it actually
+ * filters. Adding a fifth surface that re-derives any of it is how this broke
+ * three times; there is a durable test in src/api/console-invariants.test.ts
+ * that fails if one appears.
  */
 function alertBands() {
   const dormIds = dormantIdSet();
@@ -1645,8 +1863,111 @@ function alertBands() {
   const dormant = [];
   for (const a of S.alerts) (inDormantBand(a) ? dormant : incidents).push(a);
   const band = S.aband === "dormant" ? "dormant" : "incidents";
-  return { band, dormIds, incidents, dormant, authoritative: serverIds !== null,
-           scoped: band === "dormant" ? dormant : incidents };
+  const scoped = band === "dormant" ? dormant : incidents;
+
+  /* ---- the triage queue ------------------------------------------------
+     Search, rule, age, severity and sort live HERE rather than in the
+     renderers, for the same reason the band split does: a control that shows a
+     count must count the rows it actually filters, and the only way to
+     guarantee that is for one function to compute the rows and the counts in
+     the same tick. Everything below is deliberately inline -- this function is
+     the queue, and a helper it called from elsewhere would be a second place
+     the queue could be defined. */
+
+  // Where the canvas is. The alert row carries `location` but populates it on
+  // only a handful (8 of 200 today), so the device record's own `location` fills
+  // the rest in -- the same field, from the collection that has it.
+  //
+  // NOT `device.city`, which was the obvious next fallback and is wrong: it
+  // reads "LONDON" on 199 of 200 devices, including the canvases whose
+  // `location` says Gustavsberg, Barcelona and Antarctica. It is an account
+  // city, not where the screen is, and printing it would put a Swedish canvas
+  // in London. A row with no location shows none; the device table already
+  // behaves this way.
+  const where = new Map();
+  for (const d of (S.devices || [])) where.set(d.id, d.location || null);
+  const locOf = (a) => a.location || where.get(a.deviceId) || null;
+
+  const q = String(S.aq || "").trim().toLowerCase();
+  const rule = S.arule || "all";
+  const age = S.aage || "all";
+  const sort = S.asort || "sev";
+  const sev = S.sev || "all";
+
+  // The fields a technician knows when the phone rings, and nothing else: the
+  // evidence blob is excluded on purpose, because matching free text inside it
+  // makes a search for "logo" return rows whose rule is not showing-logo.
+  const hay = (a) => [a.deviceName, a.deviceId, a.title, a.ruleId, a.severity, locOf(a)]
+    .filter(Boolean).join(" \u0000 ").toLowerCase();
+  // An alert with no parseable open time matches only "any age" -- it cannot be
+  // placed in a window, and guessing one would be a fabricated reading.
+  const opened = (a) => {
+    const t = Date.parse(a.openedAt || a.lastFiredAt || "");
+    return Number.isFinite(t) ? t : null;
+  };
+  const now = Date.now();
+  // Cumulative windows, not disjoint buckets: the question is "what came in
+  // today" and "what has been rotting for a month", not "what is between one
+  // and seven days old". Single-select, so nothing claims these sum to a total.
+  const AGES = [
+    ["all",  "any age",           () => true],
+    ["1h",   "opened < 1 hour",   (t) => t != null && now - t < 3600e3],
+    ["24h",  "opened < 24 hours", (t) => t != null && now - t < 864e5],
+    ["7d",   "opened < 7 days",   (t) => t != null && now - t < 6048e5],
+    ["o7d",  "open > 7 days",     (t) => t != null && now - t >= 6048e5],
+    ["o30d", "open > 30 days",    (t) => t != null && now - t >= 2592e6],
+  ];
+  const ageFn = (AGES.find(([k]) => k === age) || AGES[0])[2];
+  const ruleOf = (a) => a.ruleId || "(no rule id)";
+
+  const passQ = q ? (a) => hay(a).includes(q) : () => true;
+  const passRule = rule === "all" ? () => true : (a) => ruleOf(a) === rule;
+  const passAge = (a) => ageFn(opened(a));
+  const passSev = sev === "all" ? () => true : (a) => a.severity === sev;
+
+  // `matched` is the queue after search/rule/age: what the header reports and
+  // what the severity chips count, because those chips filter within it.
+  // `rows` is `matched` after the severity chip: exactly what renders.
+  const matched = scoped.filter((a) => passQ(a) && passRule(a) && passAge(a));
+  const rows = matched.filter(passSev);
+
+  const rank = (a) => { const i = SEV.findIndex(([k]) => k === a.severity); return i < 0 ? SEV.length : i; };
+  const fired = (a) => { const t = Date.parse(a.lastFiredAt || a.openedAt || ""); return Number.isFinite(t) ? t : 0; };
+  const byName = (a) => String(a.deviceName || a.deviceId || "").toLowerCase();
+  const SORTS_A = {
+    sev:    (x, y) => rank(x) - rank(y) || fired(y) - fired(x),
+    recent: (x, y) => fired(y) - fired(x),
+    oldest: (x, y) => (opened(x) == null ? Infinity : opened(x)) - (opened(y) == null ? Infinity : opened(y)),
+    device: (x, y) => byName(x).localeCompare(byName(y)) || rank(x) - rank(y),
+    rule:   (x, y) => ruleOf(x).localeCompare(ruleOf(y)) || rank(x) - rank(y) || fired(y) - fired(x),
+  };
+  rows.sort(SORTS_A[sort] || SORTS_A.sev);
+
+  /* Option counts. The rule is the same one the chips live under: the number
+     beside an option is how many rows CHOOSING IT renders, every other control
+     held where it is. So each option's count applies all the predicates except
+     its own. Sort carries no counts -- sorting cannot change the set, and a
+     count that never moves invites the reader to trust it as something else. */
+  const countIf = (pred) => { let n = 0; for (const a of scoped) if (pred(a)) n++; return n; };
+  const ruleIds = [];
+  for (const a of scoped) if (!ruleIds.includes(ruleOf(a))) ruleIds.push(ruleOf(a));
+  ruleIds.sort();
+  const rules = [["all", "all rules", countIf((a) => passQ(a) && passAge(a) && passSev(a))]].concat(
+    ruleIds.map((r) => [r, r, countIf((a) => ruleOf(a) === r && passQ(a) && passAge(a) && passSev(a))]));
+  const ages = AGES.map(([k, label, fn]) =>
+    [k, label, countIf((a) => fn(opened(a)) && passQ(a) && passRule(a) && passSev(a))]);
+  const sorts = [["sev", "severity, then newest"], ["recent", "newest evidence first"],
+                 ["oldest", "oldest open first"], ["device", "device name"], ["rule", "group by rule"]];
+
+  return { band, dormIds, incidents, dormant, authoritative: serverIds !== null, scoped,
+           matched, rows, locOf, rules, ages, sorts,
+           active: { q, rule, age, sort, sev },
+           filtered: q !== "" || rule !== "all" || age !== "all",
+           // The "+" that marks a count over a collection apiAll could not
+           // fetch in full. Read once here so the three alert surfaces cannot
+           // disagree about whether their numbers are floors; the sentence that
+           // explains it belongs to renderTruncationBanner().
+           mark: (S.trunc || {}).alerts ? "+" : "" };
 }
 
 /**
@@ -1678,7 +1999,8 @@ function renderAlertBands() {
   const neverSeen = S.devices.filter((d) => !d.lastOnlineTime);
   const canName = !!r && neverSeen.length === r.neverSeenDevices;
   const tab = (key, label, n) =>
-    `<button class="fp${(S.aband || "incidents") === key ? " on" : ""}" data-aband="${key}">
+    `<button class="fp${(S.aband || "incidents") === key ? " on" : ""}" data-aband="${key}"
+       aria-pressed="${(S.aband || "incidents") === key}">
        <b>${n}</b> ${label}</button>`;
   const days = (secs) => Math.floor((secs || 0) / 86400);
   host.innerHTML =
@@ -1725,26 +2047,61 @@ function renderAlertBands() {
 function renderAlerts() {
   const L = $("#alist");
   L.className = "";
-  // The one shared split. When hygiene is unavailable the dormant id set is
-  // empty and this degrades to the old behaviour — the full list — rather than
-  // an empty screen.
-  const { scoped } = alertBands();
-  const rows = scoped.filter((a) => S.sev === "all" || a.severity === S.sev);
-  $("#acount").textContent = scoped.length;
+  // How many rows are drawn at once. Same cap and same honest sentence as the
+  // device table: 200 is a page a browser can draw, and the line beneath says
+  // how many matched, so the rest is never merely absent. Declared here rather
+  // than at the top level on purpose — the console-invariant tests lift this
+  // function by name and run it against a fixed set of declarations, so a
+  // top-level constant it referenced would be undefined there.
+  const ALERT_ROWS_SHOWN = 200;
+  // The one shared queue: same split, same filters, same sort, same tick. When
+  // hygiene is unavailable the dormant id set is empty and this degrades to the
+  // old behaviour — the full list — rather than an empty screen.
+  const { matched, rows, locOf, active, filtered, band, scoped, mark } = alertBands();
+  // The header reports `matched`, which is what the severity chips beneath it
+  // count and what the filters produced. `mark` is the "+" that says the whole
+  // collection was short; see renderTruncationBanner().
+  $("#acount").textContent = String(matched.length) + mark;
   renderAlertBands();
   if (rows.length === 0) {
-    L.innerHTML = `<div class="empty">No ${S.sev === "all" ? "" : esc(S.sev) + " "}alerts are open.</div>`;
+    // Say WHY it is empty. "No alerts are open" is false when the truth is that
+    // a filter excluded all 110 of them, and it is the kind of false that ends
+    // with a technician telling a customer there is nothing wrong.
+    L.innerHTML = `<div class="empty">` + (filtered || active.sev !== "all"
+      ? `No ${band} alert matches these filters — ${scoped.length}${mark} in this band.`
+      : `No ${band} alerts are open.`) + `</div>`;
     return;
   }
-  L.innerHTML = rows.map((a) => `
+  const shown = rows.slice(0, ALERT_ROWS_SHOWN);
+  // "Group by rule" is the sort that also draws the group headers: a queue of
+  // 79 offline-6mo rows is one decision, not 79.
+  const grouped = active.sort === "rule";
+  let last = null;
+  L.innerHTML = shown.map((a) => {
+    const rule = a.ruleId || "(no rule id)";
+    const head = grouped && rule !== last
+      ? `<div class="sechd amb">${esc(rule)} &#183;
+           ${shown.filter((x) => (x.ruleId || "(no rule id)") === rule).length} shown</div>`
+      : "";
+    last = grouped ? rule : last;
+    // Location comes from the alert row when the API populated it, otherwise
+    // from the device record — the first thing asked after "which device".
+    const loc = locOf(a);
+    return head + `
     <button class="arow" data-id="${esc(a.deviceId)}">
       <span class="thumb">${thumbFor(a)}</span>
       <span><span class="ti">${esc(a.title)} &#8212; ${esc(a.deviceName || a.deviceId)}</span>
         <span class="ds">${esc(a.evidence || "")}</span>
-        <span class="mt">${ago(a.lastFiredAt || a.openedAt)} &#183; <em>${esc(a.ruleId)}</em>
+        <span class="mt">${loc ? `&#128205; ${esc(loc)} &#183; ` : ""}${ago(a.lastFiredAt || a.openedAt)}
+          &#183; <em>${esc(a.ruleId)}</em>
           ${a.acknowledgedAt ? " &#183; acknowledged" : ""}</span></span>
       <span class="btn sm">Open</span>
-    </button>`).join("");
+    </button>`;
+  }).join("") +
+    (rows.length > shown.length
+      ? `<div class="pg">Showing ${shown.length} of ${rows.length}${mark} matching alert(s)
+           &#8212; narrow the search or filters to see the rest.</div>`
+      : `<div class="pg">${rows.length}${mark} alert(s)</div>`);
   L.querySelectorAll(".arow").forEach((b) =>
     b.addEventListener("click", () => openDevice(b.dataset.id)));
 }
@@ -1814,7 +2171,12 @@ function renderDevices() {
     const x = acc(a), y = acc(b);
     return (x < y ? -1 : x > y ? 1 : 0) * S.sort.dir;
   });
-  $("#dcount").textContent = S.devices.length;
+  // The "+" marks a fleet list apiAll could not fetch in full. Read inline from
+  // state rather than through truncMark() because this function is lifted and
+  // run in isolation by the console-invariant tests; the sentence that explains
+  // the mark belongs to renderTruncationBanner().
+  const short = !!(S.trunc || {}).devices;
+  $("#dcount").textContent = String(S.devices.length) + (short ? "+" : "");
   const T = $("#dtable");
   T.className = "";
   if (rows.length === 0) { T.innerHTML = `<div class="empty">No devices match.</div>`; return; }
@@ -1846,8 +2208,10 @@ function renderDevices() {
         <td>${playing}</td></tr>`;
     }).join("") + `</tbody></table></div>` +
     (rows.length > shown.length
-      ? `<div class="pg">Showing ${shown.length} of ${rows.length} matches &#8212; narrow the search to see the rest.</div>`
-      : `<div class="pg">${rows.length} device(s)</div>`);
+      ? `<div class="pg">Showing ${shown.length} of ${rows.length}${short ? "+" : ""} matches
+           &#8212; narrow the search to see the rest.${short ? " The fleet list itself is incomplete." : ""}</div>`
+      : `<div class="pg">${rows.length}${short ? "+" : ""} device(s)${short
+           ? " &#8212; and the fleet list itself is incomplete." : ""}</div>`);
   T.querySelectorAll("tr.r").forEach((r) =>
     r.addEventListener("click", () => openDevice(r.dataset.id)));
   T.querySelectorAll("th[data-sort]").forEach((h) =>
@@ -3318,9 +3682,14 @@ function renderCompliance() {
   const el = $("#comptable");
   const rows = S.compliance.slice().sort((a, b) => a.score - b.score);
   const scored = rows.length;
+  // `devices - scored` is only a real figure when BOTH collections were fetched
+  // in full. Short either one and the difference is arithmetic on two unrelated
+  // fractions — it can even go negative — so it is refused rather than printed.
+  const short = truncMark("compliance") || truncMark("devices");
   const unscored = S.devices.length - scored;
-  $("#compsub").textContent =
-    `${scored} scored · ${unscored} without a config snapshot (offline devices cannot be read)`;
+  $("#compsub").textContent = short
+    ? `${scored}+ scored · how many lack a config snapshot cannot be counted while these lists are incomplete`
+    : `${scored} scored · ${unscored} without a config snapshot (offline devices cannot be read)`;
   if (scored === 0) { el.innerHTML = `<div class="empty">No device has returned a config snapshot yet.</div>`; return; }
   el.innerHTML =
     `<div class="tblwrap"><table class="dt"><thead><tr>
@@ -4274,11 +4643,28 @@ addEventListener("keydown", (e) => {
    immediate via visibilitychange.
    =================================================================== */
 const REFRESH_MS = 120_000;
+/**
+ * How stale the page must be before returning to the tab refetches it.
+ *
+ * Every load() is 15 requests plus a paged walk of three collections; at fleet
+ * scale that walk is the expensive part. Refetching all of it on every
+ * visibilitychange meant alt-tabbing four times in a minute cost four full
+ * sweeps of a fleet that had not moved. Below this age the data on screen is
+ * still inside the freshness banner's "fresh" band, and the age chip keeps
+ * re-ageing locally, so nothing is presented as newer than it is.
+ */
+const REFRESH_MIN_AGE_MS = 30_000;
 setInterval(() => {
   if (document.visibilityState === "visible" && !S.loading) load();
 }, REFRESH_MS);
 document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "visible" && !S.loading) load();
+  if (document.visibilityState !== "visible" || S.loading) return;
+  if (Date.now() - (S.lastLoadAt || 0) < REFRESH_MIN_AGE_MS) {
+    // Not a refetch, but the age on screen must still be true.
+    renderFreshness();
+    return;
+  }
+  load();
 });
 setInterval(() => { if (S.fresh) renderFreshness(); }, 15_000);
 
@@ -4287,6 +4673,12 @@ $("#dx").addEventListener("click", closeDevice);
 $("#scrim").addEventListener("click", closeDevice);
 addEventListener("keydown", (e) => { if (e.key === "Escape") closeDevice(); });
 $("#q").addEventListener("input", (e) => { S.q = e.target.value; renderDevices(); });
+// Both renderers, because the severity chips and the header count the searched
+// set: the chips, the header and the rows have to move in the same tick.
+$("#aq").addEventListener("input", (e) => {
+  S.aq = e.target.value;
+  renderAlertFilters(); renderAlerts();
+});
 $("#reload").addEventListener("click", () => load());
 
 const VIEWS_ALL = ["overview", "alerts", "actions", "devices", "compliance", "brief", "insights", "sla", "trends"];
@@ -4327,6 +4719,9 @@ $("#exportbtn").addEventListener("click", () => {
     sla: S.sla,
     openAlerts: S.alerts.length,
     compliance: { scored: S.compliance.length, devices: S.devices.length },
+    // An exported figure outlives the banner that qualified it, so the
+    // shortfall travels with the file. Empty object = every collection complete.
+    incompleteCollections: S.trunc || {},
     knownPlatformGaps: GAPS.map(([name, why]) => ({ name, why })),
   };
   const blob = new Blob([JSON.stringify(report, null, 2)], { type: "application/json" });
@@ -4374,6 +4769,18 @@ async function load() {
       api("/api/trends?windowDays=7").catch(() => null),
     ]);
     S.summary = summary.data;
+    // What each paged walk could NOT get. Recorded BEFORE anything renders, so
+    // no surface can print a count over a short collection without the mark.
+    // Rebuilt wholesale every load: a shortfall that has cleared must not linger.
+    S.trunc = {};
+    for (const [key, res] of [["alerts", alerts], ["devices", devices], ["compliance", compliance]]) {
+      if (res && res.truncated) {
+        S.trunc[key] = { loaded: res.loaded, total: res.total, cap: res.cap,
+                         capped: res.capped, pagesFetched: res.pagesFetched,
+                         pagesAvailable: res.pagesAvailable };
+      }
+    }
+    S.lastLoadAt = Date.now();
     S.alerts = alerts.data;
     S.hyg = hygiene && hygiene.data;
     S.devices = devices.data;
@@ -4399,10 +4806,23 @@ async function load() {
     // Our collector's own health, rendered next to the freshness banner: "the
     // data is 4 min old" and "we stopped collecting it" are the same question.
     renderPipelineBanner();
-    $("#nb-alerts").textContent = S.alerts.length;
+    // "We are showing you less than the whole estate", said above every view.
+    renderTruncationBanner();
+    // Nav badges are counts over the paged collections, so they carry the mark
+    // and say why on hover — a badge is the one number seen from every tab.
+    const badge = (sel, n, key) => {
+      const el = $(sel);
+      el.textContent = String(n) + truncMark(key);
+      el.title = (S.trunc || {})[key]
+        // Tags out, and the template's own indentation collapsed: a title
+        // attribute renders its whitespace literally.
+        ? `Lower bound: ${truncSentence(key).replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim()}`
+        : "";
+    };
+    badge("#nb-alerts", S.alerts.length, "alerts");
     $("#nb-alerts").classList.toggle("hot", S.alerts.some((a) => a.severity === "critical"));
-    $("#nb-devices").textContent = S.devices.length;
-    $("#nb-comp").textContent = S.compliance.length;
+    badge("#nb-devices", S.devices.length, "devices");
+    badge("#nb-comp", S.compliance.length, "compliance");
     renderOverview();
     renderBrief();
     renderAlertFilters(); renderAlerts(); renderInert();
