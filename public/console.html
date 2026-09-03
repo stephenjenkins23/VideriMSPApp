@@ -1195,12 +1195,24 @@ function healthScore() {
     });
   }
 
-  // Excluded on purpose — each has no data source, verified across 107 read ops.
-  const excluded = [
-    ["Hardware health", "no CPU, memory or temperature field exists in the payload"],
-    ["Network quality", "no signal strength, packet loss or jitter is reported"],
-    ["Content verification", "screenshots cannot be read back, so what is on screen is unverifiable"],
-  ];
+  // Excluded dimensions come from the SERVER's live capability assessment, not a
+  // literal here. This array was the real stale mirror behind BUG-3: it claimed
+  // "no CPU, memory or temperature field exists", "no signal strength is
+  // reported" and "screenshots cannot be read back" — three statements the same
+  // page load disproved, and it was excluding a dimension on the strength of them.
+  //
+  // The server now classifies every dimension against live readings and returns
+  // the exclusions with their measured reasons (coverage and cadence), so this
+  // can never drift from reality again. Note what the server does NOT do: it does
+  // not promote a 42%-coverage, ~6.4-hour-rotation reading into the score just
+  // because it is readable. Readable is not SLA-grade, and a headline gauge is
+  // exactly where that distinction matters most.
+  const basis = S.slaCap && S.slaCap.healthScoreBasis;
+  const excluded = basis && Array.isArray(basis.excluded) && basis.excluded.length
+    ? basis.excluded.map((e) => [e.dimension, e.why])
+    // Fallback only if the capability endpoint is unavailable. Deliberately says
+    // it does not know rather than restating the claims that were wrong.
+    : [["Capability assessment", "the live capability endpoint is unavailable, so which dimensions are scorable cannot be stated"]];
   if (!S.compliance.length) {
     excluded.push(["Configuration drift", "no device has returned a config snapshot yet"]);
   }
@@ -4739,7 +4751,7 @@ async function load() {
     // NOTE: every entry added below must also be NAMED in this destructuring
     // array, in the same position — a missing name silently shifts every payload
     // after it into the wrong variable.
-    const [summary, alerts, hygiene, devices, compliance, pipeline, sla, brief, shots, remediation, correlation, pop, plan, pipeHealth, trends] = await Promise.all([
+    const [summary, alerts, hygiene, devices, compliance, pipeline, sla, slaCap, brief, shots, remediation, correlation, pop, plan, pipeHealth, trends] = await Promise.all([
       api("/api/fleet/summary"),
       apiAll("/api/alerts"),
       // Alert hygiene: which alerts are today's incidents vs a dormant band on
@@ -4749,6 +4761,9 @@ async function load() {
       apiAll("/api/compliance"),
       api("/api/pipeline/status"),
       api("/api/sla/coverage").catch(() => null),
+      // Live capability assessment: which dimensions are SLA-grade, merely
+      // readable, or genuinely sourceless. Drives the health score's exclusions.
+      api("/api/sla/unmeasurable").catch(() => null),
       // 404 until the first brief is generated, which is a normal state.
       api("/api/fleet/brief").catch(() => null),
       // A wall of HEAD requests upstream, so it is allowed to fail without
@@ -4787,6 +4802,7 @@ async function load() {
     S.compliance = compliance.data;
     S.pipeline = pipeline.data;
     S.sla = sla && sla.data;
+    S.slaCap = slaCap && slaCap.data;
     S.brief = brief && brief.data;
     S.shots = shots && shots.data;
     S.remediation = remediation && remediation.data;
