@@ -1390,6 +1390,7 @@ function renderBrief() {
   const b = wrap.brief || {};
   $("#bmeta").textContent =
     `${wrap.model || "model unknown"} \u00b7 ${wrap.windowHours}h window \u00b7 generated ${ago(wrap.generatedAt)}`;
+  const bStale = aiStaleBanner("brief", wrap.generatedAt, wrap.ageSeconds);
 
   const items = (b.needsAttention || []).map((it) => `
     <button class="bitem" data-name="${esc(it.device)}">
@@ -1402,7 +1403,10 @@ function renderBrief() {
       </span></button>`).join("");
 
   el.innerHTML =
-    `<div class="bhead">${esc(b.headline || "")}</div>
+    // Banner first: a technician must see "do not act on these counts" before
+    // reading the confident prose, not after.
+    `${bStale}
+     <div class="bhead">${esc(b.headline || "")}</div>
      <div class="bstate">${esc(b.fleetState || "")}</div>
      ${items ? `<div class="blab">Needs attention (${(b.needsAttention || []).length})</div>${items}` : ""}
      ${(b.changes || []).length
@@ -1462,6 +1466,72 @@ function renderBrief() {
    ALERTS
    =================================================================== */
 const SEV = [["critical", "red"], ["high", "red"], ["medium", "amb"], ["info", "blu"]];
+
+/**
+ * Staleness gate for the two AI artefacts (brief and action plan).
+ *
+ * Both are generated out-of-band and served from cache, and both state COUNTS in
+ * confident prose. A QA pass found the brief 69 hours old asserting "34 one-click
+ * brightness restores are queued" when the live engine had 2, and "runtime
+ * telemetry coverage is 0%" when it was over 40% — with nothing but a quiet
+ * "generated 3 d ago" subtitle to warn anyone. A technician spends the first ten
+ * minutes of a shift hunting work that does not exist.
+ *
+ * A warning alone is not enough, so where we can CHECK a claim we do: the live
+ * engines are already in `S`, so the banner names the figure the artefact used
+ * and the figure that is true now. Disagreement is the useful signal, not the age.
+ */
+const AI_STALE_CAUTION_S = 2 * 3600;   // counts start drifting
+const AI_STALE_HARD_S = 12 * 3600;     // past this, do not act on any count
+
+function aiStaleness(generatedAt, ageSeconds) {
+  const age = Number.isFinite(ageSeconds)
+    ? ageSeconds
+    : generatedAt ? Math.max(0, (Date.now() - new Date(generatedAt).getTime()) / 1000) : null;
+  if (age === null) return { level: "unknown", age: null };
+  return { level: age >= AI_STALE_HARD_S ? "hard" : age >= AI_STALE_CAUTION_S ? "caution" : "fresh", age };
+}
+
+/**
+ * Live counters worth cross-checking an artefact against. Only figures we can
+ * recompute honestly from what is already loaded — no guessing at the rest.
+ */
+function aiLiveCheck() {
+  const rows = [];
+  const auto = S.remediation && S.remediation.summary && S.remediation.summary.byKind
+    ? S.remediation.summary.byKind["auto-safe"] : null;
+  if (auto != null) rows.push(["one-click (auto-safe) fixes", auto]);
+  const snap = S.summary && S.summary.snapshot;
+  if (snap) {
+    if (snap.totalDevices != null) rows.push(["devices", snap.totalDevices]);
+    if (snap.byStatus && snap.byStatus.offline != null) rows.push(["offline", snap.byStatus.offline]);
+    if (snap.telemetryCoverage != null) {
+      rows.push(["hardware telemetry coverage", Math.round(snap.telemetryCoverage * 100) + "%"]);
+    }
+  }
+  return rows;
+}
+
+function aiStaleBanner(what, generatedAt, ageSeconds) {
+  const st = aiStaleness(generatedAt, ageSeconds);
+  if (st.level === "fresh") return "";
+  const live = aiLiveCheck();
+  const table = live.length
+    ? `<div class="prov" style="margin-top:6px">True right now, for comparison:
+         ${live.map(([k, v]) => `<b>${esc(String(v))}</b> ${esc(k)}`).join(" &#183; ")}</div>`
+    : "";
+  if (st.level === "unknown") {
+    return `<div class="note wn">This ${esc(what)} carries no generation time, so its age is
+      unknown. Treat every count in it as unverified.</div>${table}`;
+  }
+  const hard = st.level === "hard";
+  return `<div class="note ${hard ? "bd" : "wn"}">
+      <b>${hard ? "Do not act on the counts in this " + esc(what) + "." : "Counts in this " + esc(what) + " may have moved."}</b>
+      It was generated <b>${dur(st.age)} ago</b>${hard
+        ? " — the numbers below are historical, not a queue. The narrative may still be useful; the figures are not."
+        : "."}
+    </div>${table}`;
+}
 
 function renderAlertFilters() {
   // Counted from the alerts these chips actually filter, NOT the stored snapshot.
@@ -4061,6 +4131,7 @@ function renderActions() {
     ? `<div class="card" style="margin-bottom:16px"><div class="chd">
          <h2>&#10024; Do this first <span class="na" style="font-size:12px;font-weight:400">&#8212; AI-ranked plan</span></h2>
          <span class="na" style="font-size:12px">${esc(PL.model || "")} &#183; ${ago(PL.generatedAt)}</span></div>
+       ${aiStaleBanner("plan", PL.generatedAt, PL.ageSeconds)}
        <div class="wbody">
          ${plan.focus ? `<div class="note" style="margin-bottom:10px">${esc(plan.focus)}</div>` : ""}
          ${plan.items.map((it) => `<div class="arow" style="cursor:default;align-items:flex-start">
