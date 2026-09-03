@@ -42,6 +42,7 @@ import {
   describeOnWindow,
   isReachableStatus,
 } from "./screen-state.js";
+import { resolveIntent, type DeviceIntent, type RecordedIntent } from "./device-intent.js";
 
 /** The assembled per-device facts the engine reasons over. Honest nulls throughout. */
 export interface DeviceView {
@@ -155,6 +156,24 @@ export interface Recommendation {
   /** 0..1 — how sure we are the action addresses the symptom. */
   confidence: number;
   kind: RecommendationKind;
+  /**
+   * What we believe this device is FOR, when anything says so — US-8.2.7.
+   *
+   * Present only when the device carries intent, and then it is the REASON this
+   * recommendation is `manual`. Never a reason the recommendation is absent: a
+   * lab unit with a genuinely dark screen is still a finding, and dropping it
+   * would be the silent suppression the alerting side of this product refuses to
+   * do. Read `source` before believing it — `device-name` is a heuristic and the
+   * UI must render it as one.
+   */
+  intent?: DeviceIntent;
+  /**
+   * True when `intent` took this item out of `auto-safe`. Explicit rather than
+   * inferable from `kind`, because "manual because we hold no verified write for
+   * it" and "manual because the device's name says End of Life" are different
+   * facts and only one of them is overridable by the operator.
+   */
+  demotedByIntent?: boolean;
 }
 
 // ── thresholds ───────────────────────────────────────────────────────────────
@@ -188,6 +207,27 @@ const NTP_DRIFT_MS = 1000;
 const SEVERITY_RANK: Record<Severity, number> = { critical: 0, high: 1, medium: 2, low: 3 };
 
 /**
+ * How each intent kind reads in a sentence an operator will actually see.
+ *
+ * Hedged wording throughout ("looks like", "appears to be") on purpose: for the
+ * name heuristic this IS a guess, and a product that states a guess as a fact
+ * about a customer's asset has earned the mistrust it gets. Where the intent was
+ * recorded by a human, `DeviceIntent.rationale` says so in the next sentence and
+ * names them, which is what un-hedges it.
+ */
+const INTENT_PHRASE: Record<string, string> = {
+  eol: "End of Life",
+  "not-product": "not a product unit",
+  repair: "away for repair or return",
+  prototype: "engineering or prototype hardware",
+  lab: "a lab unit",
+  test: "a test unit",
+  "demo-unit": "a demo or travel unit",
+  "internal-account": "an internal Videri staff canvas rather than a managed asset",
+  none: "production (an operator has recorded this explicitly)",
+};
+
+/**
  * "Online" for the purpose of acting: presence is online (the platform reports
  * it), regardless of what is on the panel. The derived status collapses a
  * black-screen or logo-fallback device into 'alert'/'warning', but those devices
@@ -202,7 +242,25 @@ const labelOf = (d: DeviceView): string => d.name ?? d.id;
 /** A brightness compliance check we could actually fix with our one verified write. */
 const isBrightnessValueDrift = (field: string): boolean => field === "brightness";
 
-export function recommendationsFor(devices: DeviceView[], now: Date = new Date()): Recommendation[] {
+/**
+ * Everything the engine needs beyond the device facts themselves.
+ *
+ * `recordedIntent` is the operator's own decision per device id, loaded from the
+ * suppression records (alerting/suppression.ts `recordedIntentByDevice`). It
+ * ALWAYS outranks the name heuristic, including the `none` value, which is how
+ * an operator tells us that a device called `Repairs Desk Menu Board` is a
+ * production screen and we should stop demoting it. Absent means "nobody has
+ * recorded anything", which is not the same as "this is production".
+ */
+export interface RemediationOptions {
+  recordedIntent?: ReadonlyMap<string, RecordedIntent> | undefined;
+}
+
+export function recommendationsFor(
+  devices: DeviceView[],
+  now: Date = new Date(),
+  { recordedIntent }: RemediationOptions = {},
+): Recommendation[] {
   const out: Recommendation[] = [];
 
   for (const d of devices) {
@@ -482,6 +540,57 @@ export function recommendationsFor(devices: DeviceView[], now: Date = new Date()
     }
   }
 
+  // ── US-8.2.7 — intent DEMOTES, and never drops ─────────────────────────────
+  //
+  // One post-pass rather than a check inside each of the eight branches above.
+  // "A recommendation on an intent-tagged device is never auto-safe" is an
+  // INVARIANT, and an invariant enforced in one place cannot be forgotten by the
+  // ninth rule somebody adds next month. The live queue had exactly two auto-safe
+  // items and one of them was a HIGH brightness restore at 0.9 confidence on
+  // `SparkBridge (EoL)` — a one-click write onto a device whose own name says End
+  // of Life.
+  //
+  // Demotion is the whole effect: the item keeps its severity, its confidence and
+  // its place in the ranking, and gains a sentence saying why it is no longer a
+  // one-click. That asymmetry is what makes a NAME-derived heuristic admissible
+  // here at all — a false positive costs an operator one extra click, whereas the
+  // same heuristic used to suppress would cost them a dark screen.
+  const intentByDevice = new Map<string, DeviceIntent | null>();
+  for (const rec of out) {
+    // One device per recommendation at this layer (correlation is Epic 2), so the
+    // first id is the subject. Memoised because several recommendations share a
+    // device and the matcher is regex work.
+    const deviceId = rec.deviceIds[0];
+    if (deviceId === undefined) continue;
+    if (!intentByDevice.has(deviceId)) {
+      const device = devices.find((d) => d.id === deviceId);
+      intentByDevice.set(
+        deviceId,
+        resolveIntent(device?.name ?? null, recordedIntent?.get(deviceId) ?? null),
+      );
+    }
+    const intent = intentByDevice.get(deviceId);
+    if (!intent) continue;
+
+    rec.intent = intent;
+    if (rec.kind === "auto-safe") {
+      rec.kind = "manual";
+      rec.demotedByIntent = true;
+      rec.rationale =
+        `${rec.rationale} NOT offered as a one-click: this device looks like it is ` +
+        `${INTENT_PHRASE[intent.kind]}. ${intent.rationale} The finding itself stands — ` +
+        `an operator can still act on it, deliberately.`;
+    } else {
+      // Already manual, so nothing changes except that the operator is told. Said
+      // anyway: "why is this lab unit in my list at all" is a fair question, and
+      // the answer belongs on the item rather than in a wiki.
+      rec.demotedByIntent = false;
+      rec.rationale =
+        `${rec.rationale} Context: this device looks like it is ` +
+        `${INTENT_PHRASE[intent.kind]}. ${intent.rationale}`;
+    }
+  }
+
   // US-1.1 — ranked: severity first, then confidence. Stable id tiebreak keeps
   // the order deterministic across identical-rank items (and across polls).
   return out.sort((a, b) => {
@@ -497,6 +606,23 @@ export interface RemediationSummary {
   total: number;
   byKind: Record<RecommendationKind, number>;
   bySeverity: Record<Severity, number>;
+  /**
+   * How much of the list is on devices that carry intent, and how many one-clicks
+   * that cost. Counted rather than merely applied: "the auto-safe queue went from
+   * 2 to 1" is a claim about our own behaviour and it must be checkable from the
+   * payload, not taken on trust.
+   */
+  intent: {
+    /** Recommendations on an intent-carrying device, demoted or already manual. */
+    onIntentDevices: number;
+    /** Recommendations that WERE auto-safe and are now manual because of intent. */
+    demotedFromAutoSafe: number;
+    /** How many of those rested on a NAME heuristic rather than a recorded decision. */
+    fromNameHeuristic: number;
+    /** ...and of those, how many matched only a bare word (the shakiest case). */
+    fromWeakNameMatch: number;
+    byKind: Record<string, number>;
+  };
 }
 
 export function summarize(recs: Recommendation[]): RemediationSummary {
@@ -504,10 +630,25 @@ export function summarize(recs: Recommendation[]): RemediationSummary {
     total: recs.length,
     byKind: { "auto-safe": 0, manual: 0 },
     bySeverity: { critical: 0, high: 0, medium: 0, low: 0 },
+    intent: {
+      onIntentDevices: 0,
+      demotedFromAutoSafe: 0,
+      fromNameHeuristic: 0,
+      fromWeakNameMatch: 0,
+      byKind: {},
+    },
   };
   for (const r of recs) {
     summary.byKind[r.kind] += 1;
     summary.bySeverity[r.severity] += 1;
+    if (!r.intent) continue;
+    summary.intent.onIntentDevices += 1;
+    if (r.demotedByIntent) summary.intent.demotedFromAutoSafe += 1;
+    if (r.intent.source === "device-name") {
+      summary.intent.fromNameHeuristic += 1;
+      if (r.intent.strength === "weak") summary.intent.fromWeakNameMatch += 1;
+    }
+    summary.intent.byKind[r.intent.kind] = (summary.intent.byKind[r.intent.kind] ?? 0) + 1;
   }
   return summary;
 }

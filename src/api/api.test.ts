@@ -206,6 +206,18 @@ function stubPool(opts: StubOptions = {}): Pool {
 const stubRepo = (opts: StubOptions = {}): Repository =>
   ({
     async acknowledgeAlert() { return opts.acknowledgeResult ?? true; },
+    // Epic 8.2. `/api/alerts` bands the list from the pure suppression
+    // classifier, and `/api/remediation` reads the operator's recorded device
+    // intent from the same records — so both routes now touch these two reads.
+    // Empty is the "nobody has recorded anything yet" case, which is what keeps
+    // these tests about the shapes they were written for.
+    async openAlertFacts() { return []; },
+    async listSuppressions() { return []; },
+    // The alert lifecycle log. `alertScope` answering a device lets the
+    // acknowledge route append its event; the append itself is asserted in
+    // routes/alerts.work-surface.test.ts.
+    async alertScope() { return { deviceId: "d1", open: true }; },
+    async appendAlertEvent() { return 1; },
     // A device is addressable iff a device row was supplied.
     async commandTarget() {
       return opts.device

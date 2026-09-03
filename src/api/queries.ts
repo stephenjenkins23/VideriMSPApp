@@ -707,6 +707,33 @@ export class ReadQueries {
     deviceId?: string | undefined;
     /** Many-device filter, used by the dormant rollup drilldown. */
     deviceIds?: string[] | undefined;
+    /**
+     * Many-ALERT filter, used by the suppressed-band drilldown.
+     *
+     * Alert ids rather than device ids, and that is the whole point: the dormant
+     * band learned the hard way that a client reproducing a band from device ids
+     * gets it wrong, because a critical alert stays in the incident list even on
+     * a banded device. The suppressed device set is likewise a superset of the
+     * suppressed alert set. Handing over ids means the client never has to know
+     * the rule, so the rule cannot drift out from under it.
+     */
+    alertIds?: string[] | undefined;
+    /**
+     * The complement, for the default incident view: everything EXCEPT these.
+     *
+     * Populated by the route from the pure classifier
+     * (alerting/suppression.ts), never re-derived in SQL. Re-encoding the
+     * critical/high safety valve as a second predicate here is exactly how the
+     * queue and the chip would come to disagree, and a suppression feature is the
+     * likeliest place in this product to break the sum invariant.
+     */
+    excludeAlertIds?: string[] | undefined;
+    /**
+     * Acknowledged in / out / both. `undefined` and `"all"` mean both, because
+     * an acknowledged alert is not a fixed one and must never be hidden by
+     * default (docs/23 US-6.2.3).
+     */
+    acknowledged?: "yes" | "no" | "all" | undefined;
   }): Promise<{ items: Array<Record<string, unknown>>; totalItems: number }> {
     const where: string[] = [
       // A retired device's alerts must appear in neither the list nor the count.
@@ -741,6 +768,21 @@ export class ReadQueries {
       params.push(filters.deviceId);
       where.push(`a.device_id = $${params.length}`);
     }
+    // Same fail-closed rule as `deviceIds`: an explicitly supplied filter that
+    // resolves to nothing matches NOTHING. An empty suppressed band asking for
+    // its own drilldown must return zero rows, not the whole queue.
+    if (filters.alertIds) {
+      params.push(filters.alertIds);
+      where.push(`a.id = ANY($${params.length}::uuid[])`);
+    }
+    if (filters.acknowledged === "yes") where.push(`a.acknowledged_at IS NOT NULL`);
+    if (filters.acknowledged === "no") where.push(`a.acknowledged_at IS NULL`);
+    // The exclusion fails OPEN, and must: an empty exclusion list means "nothing
+    // is suppressed", and the correct answer to that is the entire queue.
+    if (filters.excludeAlertIds && filters.excludeAlertIds.length > 0) {
+      params.push(filters.excludeAlertIds);
+      where.push(`NOT (a.id = ANY($${params.length}::uuid[]))`);
+    }
     const whereSql = where.length > 0 ? `WHERE ${where.join(" AND ")}` : "";
 
     const [countResult, rowsResult] = await Promise.all([
@@ -752,9 +794,41 @@ export class ReadQueries {
         `SELECT a.id, a.device_id, d.name AS device_name, d.location,
                 a.rule_id, a.severity, a.title, a.evidence,
                 a.opened_at, a.last_fired_at, a.acknowledged_at, a.acknowledged_by,
-                a.resolved_at, a.videri_alert_uuid
+                a.resolved_at, a.videri_alert_uuid,
+                sup.id AS sup_id, sup.rule_id AS sup_rule_id, sup.reason AS sup_reason,
+                sup.intent AS sup_intent, sup.include_critical_high AS sup_include_critical_high,
+                sup.created_by AS sup_created_by, sup.created_at AS sup_created_at,
+                sup.expires_at AS sup_expires_at, sup.never_expires AS sup_never_expires,
+                ev.note_count, ev.last_note_at
            FROM alerts a
            LEFT JOIN devices d ON d.id = a.device_id
+           /* An active suppression COVERING this alert, narrowest first.
+              Deliberately does NOT apply the critical/high safety valve: this
+              answers "has anyone recorded that this is expected", which is a
+              different question from "is it banded out of the queue" (the pure
+              classifier owns that, and the route stamps its answer on). Keeping
+              them separate is what lets the UI say the useful thing — "there is
+              a suppression on this device and your CRITICAL came through
+              anyway" — instead of hiding the tension. */
+           LEFT JOIN LATERAL (
+             SELECT s.id, s.rule_id, s.reason, s.intent, s.include_critical_high,
+                    s.created_by, s.created_at, s.expires_at, s.never_expires
+               FROM alert_suppressions s
+              WHERE s.device_id = a.device_id
+                AND (s.rule_id IS NULL OR s.rule_id = a.rule_id)
+                AND s.revoked_at IS NULL
+                AND (s.never_expires OR s.expires_at > now())
+              ORDER BY (s.rule_id IS NULL), s.created_at DESC, s.id
+              LIMIT 1
+           ) sup ON TRUE
+           /* Note COUNT on the row, full history in the drawer. Notes only —
+              counting the acknowledgement in this badge would make it disagree
+              with the list the drawer renders. */
+           LEFT JOIN LATERAL (
+             SELECT COUNT(*)::text AS note_count, MAX(created_at) AS last_note_at
+               FROM alert_events e
+              WHERE e.alert_id = a.id AND e.kind = 'note'
+           ) ev ON TRUE
            ${whereSql}
           ORDER BY CASE a.severity
                      WHEN 'critical' THEN 0 WHEN 'high' THEN 1
@@ -782,8 +856,62 @@ export class ReadQueries {
         acknowledgedBy: r["acknowledged_by"],
         resolvedAt: (r["resolved_at"] as Date | null)?.toISOString() ?? null,
         videriAlertUuid: r["videri_alert_uuid"],
+        /**
+         * How many notes a technician has left, and when the last one landed —
+         * so the row can say "3 notes, 12 min ago" without fetching them.
+         * `0` here is a real zero (we counted), not an unread value.
+         */
+        noteCount: Number(r["note_count"] ?? 0),
+        lastNoteAt: (r["last_note_at"] as Date | null)?.toISOString() ?? null,
+        /**
+         * The active suppression covering this alert, if any. Its presence does
+         * NOT mean the alert is out of the queue — see the lateral join above.
+         */
+        suppression:
+          r["sup_id"] == null
+            ? null
+            : {
+                id: r["sup_id"],
+                scope: r["sup_rule_id"] == null ? "device" : "rule",
+                ruleId: r["sup_rule_id"],
+                reason: r["sup_reason"],
+                intent: r["sup_intent"],
+                includeCriticalHigh: r["sup_include_critical_high"],
+                createdBy: r["sup_created_by"],
+                createdAt: (r["sup_created_at"] as Date).toISOString(),
+                expiresAt: (r["sup_expires_at"] as Date | null)?.toISOString() ?? null,
+                neverExpires: r["sup_never_expires"],
+              },
       })),
     };
+  }
+
+  /**
+   * Does this device exist (retired or not)?
+   *
+   * Retired devices deliberately still resolve, matching the rest of this file:
+   * a suppression on a soft-deleted device is a legitimate record ("this asset is
+   * gone, stop asking"), and refusing it would push the operator back to having
+   * nowhere to put the conclusion. What we refuse is a suppression on an id we
+   * have never seen, which would be a mute that can never lapse and never match.
+   */
+  async deviceExists(id: string): Promise<boolean> {
+    const { rows } = await this.pool.query(`SELECT 1 FROM devices WHERE id = $1`, [id]);
+    return rows.length > 0;
+  }
+
+  /**
+   * One alert, in full, for the drawer.
+   *
+   * Reuses `alerts()` rather than reimplementing the projection, so the detail
+   * view and the row can never disagree about an alert's own fields — a drawer
+   * that says "acknowledged by Sam" over a row that says unclaimed is worse than
+   * either being wrong alone. `state: "all"` because a resolved alert's history
+   * is exactly what a deep link from a ticket wants.
+   */
+  async alert(id: string): Promise<Record<string, unknown> | null> {
+    const { items } = await this.alerts({ page: 1, limit: 1, state: "all", alertIds: [id] });
+    return items[0] ?? null;
   }
 
   /**

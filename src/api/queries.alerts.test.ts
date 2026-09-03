@@ -135,9 +135,50 @@ function assertAliasesResolve(sql: string): void {
 
 const flat = (s: string) => s.replace(/\s+/g, " ").trim();
 
+/**
+ * Remove `LEFT JOIN LATERAL ( ... ) alias ON TRUE` decorations.
+ *
+ * Epic 8.2 added two of them to the LIST query — the active suppression covering
+ * each alert, and the note count — and both carry their own WHERE, which sits
+ * BEFORE the outer WHERE in the statement. Without stripping them, `whereClause`
+ * below finds the LATERAL's WHERE instead of the query's own and every predicate
+ * test evaluates the wrong clause.
+ *
+ * Stripping is only safe because `ON TRUE` cannot eliminate a row: a lateral
+ * joined on TRUE decorates the result and never filters it. That is asserted
+ * rather than assumed, so the day someone moves a real filter into a lateral this
+ * fake refuses instead of quietly ignoring it.
+ */
+function stripLateralJoins(sql: string): string {
+  let out = sql;
+  for (;;) {
+    const at = out.search(/LEFT JOIN LATERAL\s*\(/i);
+    if (at < 0) return out;
+    let depth = 0;
+    let end = -1;
+    for (let i = out.indexOf("(", at); i < out.length; i += 1) {
+      if (out[i] === "(") depth += 1;
+      else if (out[i] === ")") {
+        depth -= 1;
+        if (depth === 0) { end = i; break; }
+      }
+    }
+    assert.ok(end > 0, "unbalanced parentheses in a LATERAL join");
+    const after = out.slice(end + 1);
+    const on = /^\s*(?:[a-z_]+\s+)?ON\s+TRUE/i.exec(after);
+    assert.ok(
+      on,
+      "a LEFT JOIN LATERAL in the alert query must be `ON TRUE` — anything else can " +
+        "eliminate rows, and this fake would then be evaluating a different query " +
+        "than Postgres. Teach the fake before trusting the result.",
+    );
+    out = out.slice(0, at) + " " + after.slice(on[0].length);
+  }
+}
+
 /** The WHERE clause only, with ORDER BY / LIMIT trimmed off. */
 function whereClause(sql: string): string {
-  const one = flat(sql);
+  const one = flat(stripLateralJoins(sql));
   const at = one.indexOf("WHERE ");
   if (at < 0) return "";
   return one.slice(at + 6).replace(/\s+ORDER BY .*$/i, "").replace(/\s+LIMIT .*$/i, "").trim();
@@ -233,8 +274,12 @@ function fakePostgres(model: { alerts?: AlertRow[]; devices?: DeviceRow[] } = {}
         return { rows, rowCount: 1 };
       }
       if (/FROM alerts a/i.test(sql)) {
-        const limit = Number(/LIMIT (\d+)/i.exec(sql)?.[1] ?? 50);
-        const offset = Number(/OFFSET (\d+)/i.exec(sql)?.[1] ?? 0);
+        // Read from the OUTER statement: the suppression lateral carries its own
+        // `LIMIT 1` (narrowest covering record) and matching that instead would
+        // silently paginate every page down to one row.
+        const outer = stripLateralJoins(sql);
+        const limit = Number(/LIMIT (\d+)/i.exec(outer)?.[1] ?? 50);
+        const offset = Number(/OFFSET (\d+)/i.exec(outer)?.[1] ?? 0);
         const rows = select(sql, values)
           .sort((x, y) =>
             (SEVERITY_RANK[x.severity] ?? 3) - (SEVERITY_RANK[y.severity] ?? 3) ||
@@ -451,7 +496,22 @@ test("deviceIds is parameterised, so an id carrying SQL is data and not syntax",
 const TOKEN = "test-token-at-least-16-chars";
 const auth = { authorization: `Bearer ${TOKEN}` };
 
-const stubRepo = () => ({}) as unknown as Repository;
+/**
+ * The minimum repository `/api/alerts` needs.
+ *
+ * Epic 8.2 made the list band-aware: it resolves the suppressed band from the
+ * PURE classifier and passes the resulting alert ids to the query, rather than
+ * re-encoding the critical/high safety valve as a second SQL predicate. So the
+ * route now reads the open-alert facts and the suppression records. Empty here —
+ * these tests are about the `deviceIds` parsing contract, and an empty
+ * suppression set is the case where the band adds no predicate at all, which is
+ * exactly what keeps these assertions about `deviceIds` alone.
+ */
+const stubRepo = () =>
+  ({
+    async openAlertFacts() { return []; },
+    async listSuppressions() { return []; },
+  }) as unknown as Repository;
 
 /** Builds the real server over the fake pool and returns what the SQL received. */
 async function inject(query: string): Promise<{

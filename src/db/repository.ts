@@ -22,6 +22,13 @@
 import type { Pool, PoolClient } from "pg";
 import type { Device, HealthSample, DataUsageDay, FleetSnapshot, Severity } from "../domain/types.js";
 import type { DiscoveredKey } from "../videri/adapter.js";
+/**
+ * Type-only, so nothing is imported at runtime and no cycle is possible.
+ * `alert_suppressions.intent` is a CHECKed closed vocabulary in the schema and
+ * this union is the same vocabulary in the type system; the two must be widened
+ * together or a row the database accepts becomes unrepresentable here.
+ */
+import type { DeviceIntentKind } from "../intelligence/device-intent.js";
 
 /** Postgres caps a statement at 65,535 bound parameters. */
 const MAX_PARAMS = 60_000;
@@ -115,6 +122,56 @@ export interface DeviceActionRow {
   finishedAt: Date;
   durationMs: number | null;
   error: string | null;
+}
+
+/**
+ * ── the technician's work surface (Epic 8.2) ────────────────────────────────
+ *
+ * One `alert_events` row: an append-only step in an alert's lifecycle. There is
+ * no update and no delete path to this table — an editable note destroys the
+ * audit value of the thing it records, because the next shift needs what the
+ * last shift ACTUALLY wrote, not the tidied version.
+ */
+export const ALERT_EVENT_KINDS = [
+  "acknowledge", "unacknowledge", "note", "suppress", "unsuppress",
+] as const;
+export type AlertEventKind = (typeof ALERT_EVENT_KINDS)[number];
+
+export interface AlertEventRow {
+  id: number;
+  kind: AlertEventKind;
+  /** Required on a note; on the lifecycle kinds it carries the reason given. */
+  body: string | null;
+  suppressionId: string | null;
+  actor: string;
+  actorIp: string | null;
+  createdAt: Date;
+}
+
+/**
+ * One `alert_suppressions` row, exactly as stored.
+ *
+ * Structurally the `SuppressionRecord` the pure classifier in
+ * src/alerting/suppression.ts consumes. Kept as its own name here because this
+ * layer's job is to be faithful to the columns — expiry is NOT evaluated in SQL,
+ * so `now` stays injectable and the expiry boundary is testable without a clock.
+ */
+export interface SuppressionRow {
+  id: string;
+  deviceId: string;
+  /** `null` = the whole device; a rule id = that rule on that device only. */
+  ruleId: string | null;
+  reason: string;
+  intent: DeviceIntentKind | null;
+  includeCriticalHigh: boolean;
+  createdBy: string;
+  createdAt: Date;
+  /** `null` only alongside `neverExpires` — the schema CHECK enforces the pair. */
+  expiresAt: Date | null;
+  neverExpires: boolean;
+  revokedAt: Date | null;
+  revokedBy: string | null;
+  revokedReason: string | null;
 }
 
 export interface DeviceActionFilters {
@@ -1325,6 +1382,287 @@ export class Repository {
       [id, by],
     );
     return (rowCount ?? 0) > 0;
+  }
+
+  // ── the technician's work surface (Epic 8.2) ──────────────────────────────
+  //
+  // Two append-mostly tables and the reads over them: `alert_suppressions` (an
+  // operator's recorded "this is meant to be like this") and `alert_events` (the
+  // alert's lifecycle log). See migrations/010-alert-work-surface.sql for why
+  // every constraint that matters lives in the schema rather than here.
+  //
+  // Nothing in this section ever DELETEs. Un-suppression sets `revoked_*`;
+  // un-acknowledgement clears the two `alerts` columns and APPENDS an event, so
+  // the release is as visible as the claim was.
+
+  /**
+   * Release an alert a technician claimed by mistake.
+   *
+   * Deliberately narrower than `acknowledgeAlert`'s mirror image: it requires the
+   * alert to be acknowledged and unresolved, so a "release" that silently did
+   * nothing cannot read as success. Whether only the acknowledger may release is
+   * a policy question we cannot answer honestly without a user model — the shared
+   * bearer token means `acknowledged_by` is a claim, not an identity — so anyone
+   * may release and the event log records who did. Enforcing ownership against an
+   * unverified name would be security theatre.
+   */
+  async unacknowledgeAlert(id: string): Promise<boolean> {
+    const { rowCount } = await this.pool.query(
+      `UPDATE alerts SET acknowledged_at = NULL, acknowledged_by = NULL
+        WHERE id = $1::uuid AND acknowledged_at IS NOT NULL AND resolved_at IS NULL`,
+      [id],
+    );
+    return (rowCount ?? 0) > 0;
+  }
+
+  /** The device an alert belongs to, and whether it is still open. */
+  async alertScope(id: string): Promise<{ deviceId: string; open: boolean } | null> {
+    const { rows } = await this.pool.query<{ device_id: string; resolved_at: Date | null }>(
+      `SELECT device_id, resolved_at FROM alerts WHERE id = $1::uuid`,
+      [id],
+    );
+    const row = rows[0];
+    return row ? { deviceId: row.device_id, open: row.resolved_at === null } : null;
+  }
+
+  /**
+   * Append one lifecycle event. Never updates, never deletes.
+   *
+   * Returns the new id so a caller can reference it, and does NOT swallow
+   * failures — unlike `recordDeviceAction`, whose contract is that logging must
+   * never break a device write. Here the event IS the operation: a note that
+   * failed to store must fail loudly, because the technician has already stopped
+   * thinking about it.
+   */
+  async appendAlertEvent(entry: {
+    alertId: string;
+    deviceId: string;
+    kind: "acknowledge" | "unacknowledge" | "note" | "suppress" | "unsuppress";
+    body?: string | null;
+    suppressionId?: string | null;
+    actor: string;
+    actorIp?: string | null;
+  }): Promise<number> {
+    const { rows } = await this.pool.query<{ id: string }>(
+      `INSERT INTO alert_events
+         (alert_id, device_id, kind, body, suppression_id, actor, actor_ip)
+       VALUES ($1::uuid, $2, $3, $4, $5::uuid, $6, $7)
+       RETURNING id`,
+      [
+        entry.alertId,
+        entry.deviceId,
+        entry.kind,
+        entry.body ?? null,
+        entry.suppressionId ?? null,
+        entry.actor,
+        entry.actorIp ?? null,
+      ],
+    );
+    return Number(rows[0]?.id ?? 0);
+  }
+
+  /**
+   * The full lifecycle of one alert, OLDEST FIRST.
+   *
+   * Oldest-first is not a preference: a lifecycle read newest-first tells the
+   * story backwards, and "released, noted, claimed" is a different sequence of
+   * events from the one that happened. The audit log is newest-first for the
+   * opposite reason — you read it to find the most recent thing.
+   */
+  async alertEvents(alertId: string): Promise<AlertEventRow[]> {
+    const { rows } = await this.pool.query<{
+      id: string; kind: string; body: string | null; suppression_id: string | null;
+      actor: string; actor_ip: string | null; created_at: Date;
+    }>(
+      `SELECT id, kind, body, suppression_id, actor, actor_ip, created_at
+         FROM alert_events
+        WHERE alert_id = $1::uuid
+        ORDER BY created_at, id`,
+      [alertId],
+    );
+    return rows.map((r) => ({
+      id: Number(r.id),
+      kind: r.kind as AlertEventRow["kind"],
+      body: r.body,
+      suppressionId: r.suppression_id,
+      actor: r.actor,
+      actorIp: r.actor_ip,
+      createdAt: r.created_at,
+    }));
+  }
+
+  /**
+   * How many NOTES each of these alerts carries.
+   *
+   * Notes only, not every event kind: the list row shows "3 notes" and counting
+   * the acknowledgement in that number would make the badge disagree with the
+   * drawer that renders them. Batched over the page's ids so the list costs one
+   * extra query rather than one per row.
+   */
+  async alertNoteCounts(alertIds: readonly string[]): Promise<Map<string, number>> {
+    if (alertIds.length === 0) return new Map();
+    const { rows } = await this.pool.query<{ alert_id: string; n: string }>(
+      `SELECT alert_id, COUNT(*)::text AS n
+         FROM alert_events
+        WHERE kind = 'note' AND alert_id = ANY($1::uuid[])
+        GROUP BY alert_id`,
+      [alertIds],
+    );
+    return new Map(rows.map((r) => [r.alert_id, Number(r.n)]));
+  }
+
+  /**
+   * Create a suppression, or REPLACE the one already in force for that scope.
+   *
+   * "Suppress it again" must update the decision rather than stack a second
+   * record whose reason contradicts the first, so the unique indexes are partial
+   * on `revoked_at IS NULL` and this revokes the incumbent in the same
+   * transaction. The incumbent is revoked, never deleted, and its revocation is
+   * attributed to the person who superseded it — so the history reads as a
+   * sequence of decisions rather than as one mutable row.
+   *
+   * `expiresAt`/`neverExpires` are passed through as given; the CHECK in the
+   * schema refuses the incoherent combinations, and the route defaults an
+   * omitted expiry to 30 days rather than letting it default to forever.
+   */
+  async createSuppression(input: {
+    deviceId: string;
+    ruleId: string | null;
+    reason: string;
+    intent: DeviceIntentKind | null;
+    includeCriticalHigh: boolean;
+    createdBy: string;
+    expiresAt: Date | null;
+    neverExpires: boolean;
+  }): Promise<{ id: string; supersededId: string | null }> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      // Same-scope incumbent, revoked so the unique index has room. IS NOT
+      // DISTINCT FROM, not `=`: `rule_id = NULL` is never true, so an `=` here
+      // would leave whole-device incumbents in place and then trip the index.
+      const { rows: superseded } = await client.query<{ id: string }>(
+        `UPDATE alert_suppressions
+            SET revoked_at = now(), revoked_by = $3,
+                revoked_reason = 'superseded by a newer suppression for the same scope'
+          WHERE device_id = $1 AND rule_id IS NOT DISTINCT FROM $2 AND revoked_at IS NULL
+          RETURNING id`,
+        [input.deviceId, input.ruleId, input.createdBy],
+      );
+      const { rows } = await client.query<{ id: string }>(
+        `INSERT INTO alert_suppressions
+           (device_id, rule_id, reason, intent, include_critical_high,
+            created_by, expires_at, never_expires)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         RETURNING id`,
+        [
+          input.deviceId, input.ruleId, input.reason, input.intent,
+          input.includeCriticalHigh, input.createdBy, input.expiresAt, input.neverExpires,
+        ],
+      );
+      await client.query("COMMIT");
+      return { id: rows[0]!.id, supersededId: superseded[0]?.id ?? null };
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * Un-suppress. An UPDATE of three columns, never a DELETE.
+   *
+   * Returns false when the record does not exist or was already revoked, so the
+   * route can answer 404/409 rather than reporting a no-op as a success. A
+   * re-revocation must not overwrite the original revoker: who un-muted it first,
+   * and why, is the fact the audit exists for.
+   */
+  async revokeSuppression(id: string, by: string, reason: string | null): Promise<boolean> {
+    const { rowCount } = await this.pool.query(
+      `UPDATE alert_suppressions
+          SET revoked_at = now(), revoked_by = $2, revoked_reason = $3
+        WHERE id = $1::uuid AND revoked_at IS NULL`,
+      [id, by, reason],
+    );
+    return (rowCount ?? 0) > 0;
+  }
+
+  /**
+   * The OPEN alert ids a suppression scope covers.
+   *
+   * Used to write one lifecycle event per affected alert, so the suppression
+   * shows up in each alert's own history rather than only in a fleet-level
+   * record. A tech reading one alert should not have to know that a device-wide
+   * suppression exists to understand why it went quiet.
+   *
+   * Returns everything the SCOPE covers, including the criticals and highs the
+   * safety valve will hold back — the caller subtracts and reports the
+   * difference, which is what lets the response say "4 suppressed, 1 critical
+   * kept in the queue" instead of overstating the effect.
+   */
+  async openAlertIdsForScope(deviceId: string, ruleId: string | null): Promise<string[]> {
+    const { rows } = await this.pool.query<{ id: string }>(
+      `SELECT a.id
+         FROM alerts a
+        WHERE a.device_id = $1
+          AND a.resolved_at IS NULL
+          AND ($2::text IS NULL OR a.rule_id = $2)
+        ORDER BY a.opened_at`,
+      [deviceId, ruleId],
+    );
+    return rows.map((r) => r.id);
+  }
+
+  /**
+   * Suppression records.
+   *
+   * `includeLapsed` reads the revoked and expired ones TOO, and the caller wants
+   * that far more often than it looks: the `lapsed` block of the suppression view
+   * is how re-escalation is reported ("4 alerts are back because your mute ran
+   * out"), and you cannot report what you did not load. Expiry is evaluated in
+   * the pure classifier rather than in SQL so `now` stays injectable and the
+   * boundary is testable.
+   */
+  async listSuppressions(
+    { includeLapsed = false, deviceId }: { includeLapsed?: boolean; deviceId?: string } = {},
+  ): Promise<SuppressionRow[]> {
+    const where: string[] = [];
+    const params: unknown[] = [];
+    if (!includeLapsed) where.push(`revoked_at IS NULL`);
+    if (deviceId !== undefined) {
+      params.push(deviceId);
+      where.push(`device_id = $${params.length}`);
+    }
+    const { rows } = await this.pool.query<{
+      id: string; device_id: string; rule_id: string | null; reason: string;
+      intent: DeviceIntentKind | null; include_critical_high: boolean; created_by: string;
+      created_at: Date; expires_at: Date | null; never_expires: boolean;
+      revoked_at: Date | null; revoked_by: string | null; revoked_reason: string | null;
+    }>(
+      `SELECT id, device_id, rule_id, reason, intent, include_critical_high,
+              created_by, created_at, expires_at, never_expires,
+              revoked_at, revoked_by, revoked_reason
+         FROM alert_suppressions
+         ${where.length > 0 ? `WHERE ${where.join(" AND ")}` : ""}
+        ORDER BY created_at DESC, id`,
+      params,
+    );
+    return rows.map((r) => ({
+      id: r.id,
+      deviceId: r.device_id,
+      ruleId: r.rule_id,
+      reason: r.reason,
+      intent: r.intent,
+      includeCriticalHigh: r.include_critical_high,
+      createdBy: r.created_by,
+      createdAt: r.created_at,
+      expiresAt: r.expires_at,
+      neverExpires: r.never_expires,
+      revokedAt: r.revoked_at,
+      revokedBy: r.revoked_by,
+      revokedReason: r.revoked_reason,
+    }));
   }
 
   /** Seed rule definitions without clobbering operator tuning. */

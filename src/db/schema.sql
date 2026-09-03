@@ -529,3 +529,119 @@ CREATE INDEX IF NOT EXISTS device_action_log_outcome_idx
   ON device_action_log (outcome, started_at DESC);
 CREATE INDEX IF NOT EXISTS device_action_log_actor_idx
   ON device_action_log (actor, started_at DESC);
+
+-- ── Alert suppressions: the operator's own recorded conclusion ───────────────
+-- "This is meant to be like this, stop telling me" — durable, attributable,
+-- reversible and NEVER destructive. The alert stays open; what changes is which
+-- BAND it is counted in, exactly as the dormant band works. 42 of 250 devices
+-- carry their purpose in their own name and hold 22% of the open queue, and
+-- until this table there was nowhere to record that once.
+--
+-- Four properties are enforced here rather than in the app, because a constraint
+-- in TypeScript is a convention and a constraint in Postgres is a guarantee:
+-- a mandatory reason, an explicit choice about expiry, no blanket suppression of
+-- critical/high, and attributed revocation. See migrations/010-alert-work-surface.sql
+-- for the full reasoning behind each.
+CREATE TABLE IF NOT EXISTS alert_suppressions (
+  id              uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
+  device_id       text        NOT NULL REFERENCES devices (id) ON DELETE CASCADE,
+  /* NULL = the whole device (matches "this unit is in the lab"); a rule id =
+     that rule on that device only (the only safe scope on a live production
+     device). Narrower wins on match. */
+  rule_id         text,
+  /* Mandatory, with a floor: a suppression with no reason is indistinguishable
+     from a bug six weeks later. */
+  reason          text        NOT NULL,
+  CONSTRAINT alert_suppressions_reason_check
+    CHECK (char_length(btrim(reason)) >= 8),
+  /* The operator's recorded purpose for the asset. 'none' is load-bearing — it
+     is how an operator says "the NAME is lying, this is production", which makes
+     the name-derived intent heuristic overridable. A recorded intent always
+     outranks an inferred one. */
+  intent          text,
+  CONSTRAINT alert_suppressions_intent_check CHECK (intent IS NULL OR intent IN (
+    'eol', 'not-product', 'repair', 'prototype', 'lab', 'test', 'demo-unit',
+    'internal-account', 'none'
+  )),
+  /* A whole-device suppression may NEVER absorb critical/high — mirrors
+     NEVER_ABSORBED in src/alerting/hygiene.ts. A rule-scoped one may, explicitly:
+     naming the rule names the alert class, so it is a specific claim rather than
+     a blanket. */
+  include_critical_high boolean NOT NULL DEFAULT false,
+  CONSTRAINT alert_suppressions_no_blanket_critical
+    CHECK (include_critical_high = false OR rule_id IS NOT NULL),
+  /* No user model yet (shared bearer token), so the same honest plain string the
+     audit log uses: 'api:<actor>' / 'api:token' / 'api:anonymous'. */
+  created_by      text        NOT NULL,
+  created_at      timestamptz NOT NULL DEFAULT now(),
+  /* Finite by default (30 days, the offline-30d horizon), capped at 365. A
+     permanent suppression is legal but must be ASKED for: expires_at NULL is
+     only accepted together with never_expires, so an unset expiry can never be
+     mistaken for a considered one. */
+  expires_at      timestamptz,
+  never_expires   boolean     NOT NULL DEFAULT false,
+  CONSTRAINT alert_suppressions_expiry_explicit CHECK (
+    (never_expires AND expires_at IS NULL) OR (NOT never_expires AND expires_at IS NOT NULL)
+  ),
+  /* Un-suppression is an UPDATE of these and never a DELETE. */
+  revoked_at      timestamptz,
+  revoked_by      text,
+  revoked_reason  text,
+  CONSTRAINT alert_suppressions_revocation_attributed
+    CHECK (revoked_at IS NULL OR revoked_by IS NOT NULL)
+);
+
+-- At most one suppression in force per scope, so "mute it again" updates the
+-- decision instead of stacking records whose reasons disagree. Two indexes
+-- because a unique index treats NULL as distinct, so (device_id, rule_id) alone
+-- would accept ten whole-device suppressions — the exact stacking this prevents.
+CREATE UNIQUE INDEX IF NOT EXISTS alert_suppressions_device_scope_unique
+  ON alert_suppressions (device_id) WHERE revoked_at IS NULL AND rule_id IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS alert_suppressions_rule_scope_unique
+  ON alert_suppressions (device_id, rule_id) WHERE revoked_at IS NULL AND rule_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS alert_suppressions_active_idx
+  ON alert_suppressions (device_id, rule_id) WHERE revoked_at IS NULL;
+CREATE INDEX IF NOT EXISTS alert_suppressions_expiry_idx
+  ON alert_suppressions (expires_at) WHERE revoked_at IS NULL AND expires_at IS NOT NULL;
+
+-- ── Alert events: the alert's lifecycle log ──────────────────────────────────
+-- APPEND-ONLY, and that is the point: an editable note destroys the audit value
+-- of the thing it records — the next shift needs what the last shift ACTUALLY
+-- wrote. No UPDATE and no DELETE path to this table exists in the application.
+--
+-- One table rather than three, because the console needs them interleaved:
+-- "claimed by X 12 minutes ago, then noted Y, then released" is one ordered read.
+--
+-- NO FOREIGN KEY to alerts, for the same reason device_action_log has none to
+-- devices: alerts cascade-delete with their device, and losing a technician's
+-- notes as a side effect of a device disappearing upstream is the one deletion
+-- path this table must not have.
+CREATE TABLE IF NOT EXISTS alert_events (
+  id          bigserial   PRIMARY KEY,
+  alert_id    uuid        NOT NULL,
+  /* Denormalised so the log survives its alert and can still be grouped by
+     device. */
+  device_id   text        NOT NULL,
+  kind        text        NOT NULL,
+  CONSTRAINT alert_events_kind_check CHECK (kind IN (
+    'acknowledge', 'unacknowledge', 'note', 'suppress', 'unsuppress'
+  )),
+  /* Required on a note (a blank note is not a note); on the lifecycle kinds it
+     carries the release reason or the suppression reason. */
+  body        text,
+  CONSTRAINT alert_events_note_has_body
+    CHECK (kind <> 'note' OR char_length(btrim(coalesce(body, ''))) >= 1),
+  suppression_id uuid,
+  actor       text        NOT NULL,
+  actor_ip    text,
+  created_at  timestamptz NOT NULL DEFAULT now()
+);
+
+-- Oldest-first: the only order a lifecycle reads in, and the opposite of the
+-- audit log's newest-first.
+CREATE INDEX IF NOT EXISTS alert_events_alert_idx
+  ON alert_events (alert_id, created_at, id);
+CREATE INDEX IF NOT EXISTS alert_events_device_idx
+  ON alert_events (device_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS alert_events_actor_idx
+  ON alert_events (actor, created_at DESC);
