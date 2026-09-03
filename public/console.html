@@ -1413,14 +1413,48 @@ function renderBrief() {
            <div class="gapbox"><ul class="blist">${
              b.dataGaps.map((g) => `<li>${esc(g)}</li>`).join("")}</ul></div>` : ""}`;
 
-  // The brief names devices, not ids. Resolve by name so an item is still one
-  // click from the device it describes.
+  // The brief's schema gives us `device` as FREE TEXT, not an id — it can be a
+  // name, or prose like "34 devices with brightness at 0 (top-ranked: …)". The
+  // previous resolver did an exact-name lookup and then fell back to a SUBSTRING
+  // match, which was actively dangerous:
+  //   * 13 device names are shared by 30 devices on this fleet alone ("Spark 5"
+  //     x4, "Spark 4" x4). `find()` returned the first, so clicking a CRITICAL
+  //     item about an offline device opened its healthy twin — a tech sees green
+  //     and dismisses a real fault. That is the exact real-vs-not-real failure
+  //     this product exists to prevent.
+  //   * 17 names carry stray whitespace, so "Shadowbox" never matched
+  //     "Shadowbox " and the item was a dead click.
+  //   * the substring fallback matched prose against any device whose name
+  //     happened to appear inside it, opening devices the item never mentioned.
+  //
+  // Rules now: resolve only on a TRIMMED, EXACT, UNIQUE name. Ambiguity is never
+  // resolved by guessing — it hands the tech the choice instead. Prose is not a
+  // device and is not clickable.
+  const norm = (v) => (typeof v === "string" ? v.trim() : "");
   el.querySelectorAll(".bitem").forEach((btn) => {
-    const name = btn.dataset.name;
-    const match = S.devices.find((d) => d.name === name)
-      || S.devices.find((d) => name && d.name && name.includes(d.name));
-    if (!match) { btn.style.cursor = "default"; return; }
-    btn.addEventListener("click", () => openDevice(match.id));
+    const name = norm(btn.dataset.name);
+    const hits = name ? S.devices.filter((d) => norm(d.name) === name) : [];
+    if (hits.length === 1) {
+      btn.title = "Open " + hits[0].name;
+      btn.addEventListener("click", () => openDevice(hits[0].id));
+      return;
+    }
+    if (hits.length > 1) {
+      // Several devices share this name. Show them all rather than pick one.
+      btn.title = hits.length + " devices share this name — open the list to choose";
+      btn.addEventListener("click", () => {
+        S.q = name;
+        const box = $("#q");
+        if (box) box.value = name;
+        switchTab("devices");
+        renderDevices();
+      });
+      return;
+    }
+    // No single device is named here (usually a multi-device or prose item).
+    // Say so rather than leaving a control that looks clickable and is not.
+    btn.style.cursor = "default";
+    btn.title = "This item describes more than one device — see the Devices tab";
   });
 }
 
