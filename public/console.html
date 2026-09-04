@@ -129,6 +129,7 @@ button{font:inherit;cursor:pointer}
 .tag.on{background:var(--green-2);color:var(--green)}
 .tag.warn{background:var(--amber-2);color:var(--amber)}
 .tag.net{background:var(--blue-2);color:var(--blue);font-weight:600;letter-spacing:0}
+.tag.bad{background:var(--red-2);color:var(--red)}
 .toolbar{display:flex;gap:7px;padding:12px 18px;border-bottom:1px solid var(--bd-2);flex-wrap:wrap}
 
 .mets{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:11px;padding:14px 18px}
@@ -552,6 +553,60 @@ table.dt td .prov{display:block;margin-top:2px;white-space:normal;max-width:34ch
    under our rendering of the same numbers: it carries the caveats the engine
    attaches (observed time only, resolution limits) in its own words. */
 .tr-q{font-size:11.5px;color:var(--tx-3);line-height:1.5;margin-top:5px;max-width:96ch}
+/* ── the alert work surface (Epic 8.2) ──
+   Claim, note and suppress are this product's first operator writes beyond
+   brightness, and every one of them changes state a second technician sees. So
+   the strip under a row states WHO holds the alert before it offers a button,
+   and the modal shows an append-only history rather than an editable field: the
+   API cannot edit a note, so nothing here may imply that it can. */
+.awork{display:flex;gap:7px;align-items:center;flex-wrap:wrap;
+  padding:0 16px 11px 73px;font-size:11.5px;color:var(--tx-3)}
+.awork .who{color:var(--tx-2)}
+.awork .who b{color:var(--tx)}
+.awork .btn{padding:3px 9px;font-size:11px}
+.awork .held{color:var(--red);font-weight:600}
+.awork .supd{color:var(--amber)}
+
+.aw-sec{padding:13px 18px;border-top:1px solid var(--bd-2)}
+.aw-sec h4{margin:0 0 9px;font-size:11px;font-weight:700;letter-spacing:.06em;
+  text-transform:uppercase;color:var(--tx-3)}
+/* 112px because "unacknowledge" is the longest event kind the API emits and at
+   86px it overlapped the actor beside it. Kinds are a closed vocabulary, so this
+   is a measured width, not a guess. */
+.evt{display:grid;grid-template-columns:112px 1fr;gap:10px;padding:7px 0;
+  border-bottom:1px solid var(--bd-2);font-size:12.5px}
+.evt:last-child{border-bottom:0}
+.evt .kd{font-size:10.5px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--tx-3)}
+.evt .kd.k-note{color:var(--blue)}
+.evt .kd.k-suppress,.evt .kd.k-unsuppress{color:var(--amber)}
+.evt .kd.k-acknowledge{color:var(--green)}
+.evt .tx{color:var(--tx-2);line-height:1.5}
+.evt .tx b{color:var(--tx);font-weight:600}
+.aw-f{display:flex;gap:8px;align-items:flex-start;flex-wrap:wrap}
+.aw-f textarea,.aw-f input[type=text],.aw-f input[type=number]{font:inherit;font-size:12.5px;
+  padding:7px 10px;border:1px solid var(--bd);border-radius:8px;background:var(--bg);color:var(--tx)}
+.aw-f textarea{flex:1;min-width:250px;min-height:54px;resize:vertical}
+.aw-f input[type=text]{min-width:170px}
+.aw-f select{font:inherit;font-size:12.5px;padding:6px 9px;border:1px solid var(--bd);
+  border-radius:8px;background:var(--bg);color:var(--tx)}
+.aw-f label{font-size:11.5px;color:var(--tx-2);display:flex;gap:6px;align-items:center}
+.aw-f textarea:focus,.aw-f input:focus,.aw-f select:focus{outline:2px solid var(--blue);outline-offset:-1px}
+.chk{font-size:11px;color:var(--tx-3);font-variant-numeric:tabular-nums}
+.chk.short{color:var(--red)}
+/* "Never expires" is a MODE chosen from the same control as a finite expiry,
+   not a checkbox beside it. A permanent mute is the one choice on this form that
+   nobody undoes by waiting, so picking it repaints the form and says so. */
+.perm{background:var(--amber-2);border:1px solid var(--amber-bd);border-radius:8px;
+  padding:9px 11px;font-size:12px;color:var(--tx-2);margin-top:9px;line-height:1.45}
+.perm b{color:var(--amber)}
+.rec{border:1px solid var(--bd);border-radius:9px;padding:10px 12px;margin-bottom:8px;
+  font-size:12.5px;background:var(--card-2)}
+.rec .rh{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}
+.rec .why{color:var(--tx-2);margin-top:4px;line-height:1.45}
+.rec .why b{color:var(--tx)}
+.rec .rr{margin-left:auto;display:flex;gap:6px}
+.rec.lapse{border-color:var(--amber-bd);background:var(--amber-2)}
+.rec.inert{border-style:dashed}
 </style>
 
 <header class="appbar">
@@ -687,6 +742,11 @@ table.dt td .prov{display:block;margin-top:2px;white-space:normal;max-width:34ch
           <button class="btn" id="reload">&#8635; Refresh</button></div>
       </div>
       <div id="abands"></div>
+      <!-- The suppression rollup: the band counts, what each record is actually
+           doing, what has lapsed, and what is inert. Deliberately NOT inside
+           #abands — that host's children are the band pills, and the console
+           invariants assert every one of them reads "<b>N</b> label". -->
+      <div id="suppanel"></div>
       <!-- The fields a technician actually knows when the phone rings: the
            canvas name, where it is, what the alert says, and the rule id from a
            previous ticket. Static markup and wired once, so typing never loses
@@ -701,6 +761,7 @@ table.dt td .prov{display:block;margin-top:2px;white-space:normal;max-width:34ch
       <div id="alist"><div class="skel"><span class="sk row"></span><span class="sk row"></span>
         <span class="sk row"></span></div></div>
       <div id="atrunc"></div>
+      <div id="astrunc"></div>
       <div class="wbar" id="inertbar" style="display:none">
         <span class="d gry"></span>
         <span class="l" id="inerttext"></span>
@@ -791,6 +852,22 @@ table.dt td .prov{display:block;margin-top:2px;white-space:normal;max-width:34ch
   <div class="mets" id="dmets"></div>
   <div class="dtabs" id="dtabs"></div>
   <div class="dbody" id="dbody"></div>
+</div>
+
+<!-- The per-alert work surface. Its own layer, ABOVE the device drawer and
+     below the palette, and deliberately not part of that drawer: opening a
+     device fires live demo_command reads at reachable hardware, and claiming an
+     alert must never cost a device round trip. -->
+<div class="scrim" id="ascrim" style="z-index:74"></div>
+<div class="modal" id="amodal" role="dialog" aria-label="Alert work surface" style="z-index:75">
+  <div class="dv-hd">
+    <h3 id="awnm">&#8212;</h3>
+    <span class="tag" id="awsev">&#8212;</span>
+    <button class="x" id="awx" aria-label="Close">&#10005;</button>
+    <div class="loc" id="awloc">&#8212;</div>
+  </div>
+  <div id="awout" style="display:none;margin:14px 18px 0"></div>
+  <div class="dbody" id="awbody"></div>
 </div>
 
 <div class="scrim" id="pscrim" style="z-index:79"></div>
@@ -1055,7 +1132,27 @@ const S = { summary: null, alerts: [], devices: [], compliance: [], pipeline: nu
             // where they came from, so a narrowed table always explains itself.
             dids: null,
             // Which correlated finding is expanded into its device list.
-            cfind: null };
+            cfind: null,
+            /* Epic 8.2 — the suppressed band and the per-alert work surface.
+               `alerts` now holds the band=incident queue and `alertsSup` the
+               band=suppressed one, fetched separately rather than sliced out of
+               a single band=all list: each pill then counts the array it
+               renders, and neither has to know the server's banding rule.
+               `alertsSup: null` means that fetch FAILED, which is a different
+               statement from "nothing is suppressed" and is rendered as one.
+               `sup` is the /api/alerts/suppressions rollup: chips, per-record
+               effect, lapsed records, inert records and the policy this form
+               enforces (minReasonLength, expiry caps) instead of a magic
+               number of its own. */
+            alertsSup: null, sup: null, aband: "incidents",
+            /* The open work surface: { id, alert, busy, err }. `alert` carries
+               the detail payload including its append-only `events`. */
+            awork: null,
+            /* Who is claiming. `acknowledge` requires `by` and there is no user
+               model behind the shared token, so this is a self-declared name,
+               remembered locally and recorded as the claim it is — never
+               invented, and never sent as somebody else. */
+            actor: null };
 
 /* ===================================================================
    Freshness. This is the first thing rendered and the loudest thing on
@@ -1115,10 +1212,12 @@ function renderFreshness() {
 
 /** Nouns for the three paged collections, so one shortfall reads identically
  *  wherever it is reported. */
-const COLLECTION_NOUN = { alerts: "open alerts", devices: "devices", compliance: "scored devices" };
-const TRUNCATED_KEYS = ["alerts", "devices", "compliance"];
+const COLLECTION_NOUN = { alerts: "incident alerts", alertsSup: "suppressed alerts",
+                          devices: "devices", compliance: "scored devices" };
+const TRUNCATED_KEYS = ["alerts", "alertsSup", "devices", "compliance"];
 /** Where the per-card note goes for each collection. */
-const TRUNC_HOSTS = { alerts: "#atrunc", devices: "#dtrunc", compliance: "#ctrunc" };
+const TRUNC_HOSTS = { alerts: "#atrunc", alertsSup: "#astrunc",
+                      devices: "#dtrunc", compliance: "#ctrunc" };
 
 /** One sentence for one short collection, in measured numbers: the server's own
  *  totalItems against what we hold. Not a guess, and not a round figure. */
@@ -1397,20 +1496,30 @@ function renderAlertWidget() {
   // Count the BAND being shown: the chips below the header filter this band, so
   // the header must report it. It previously printed S.alerts.length (290) above
   // chips summing to 90, with nothing saying the chips were incidents-only.
-  const { band, incidents, dormant, scoped, mark } = alertBands();
-  const other = band === "dormant"
-    ? `${incidents.length} incident${incidents.length === 1 ? "" : "s"}`
-    : `${dormant.length} dormant`;
+  const { band, incidents, dormant, suppressed, scoped, mark } = alertBands();
+  /* The bands this widget is NOT showing, each with its count, so the number
+     above the chips can never be read as every open alert. The suppressed band
+     is named here for the same reason the dormant one is: it is a band this
+     console deliberately opts out of, and a count nobody can see is a count
+     nobody trusts. Only non-empty bands are named -- "0 suppressed" beside a
+     band that does not exist on this tenant is noise, not honesty. */
+  const elsewhere = [];
+  if (band !== "incidents") {
+    elsewhere.push(`${incidents.length} incident${incidents.length === 1 ? "" : "s"}`);
+  }
+  if (band !== "dormant" && dormant.length) elsewhere.push(`${dormant.length} dormant`);
+  if (band !== "suppressed" && suppressed.length) elsewhere.push(`${suppressed.length} suppressed`);
+  const other = elsewhere.join(" &#183; ");
   // The BAND, not the Alerts tab's filtered queue: this widget has no filter
   // controls, so it must not report a number the operator cannot see the shape
   // of. `mark` is the "+" for a collection apiAll could not fetch in full.
   $("#wacount").textContent = String(scoped.length) + mark;
-  $("#wasub").innerHTML = dormant.length
+  $("#wasub").innerHTML = other
     ? `${esc(band)} &#183; ${other} (not in these chips)`
     : esc(band);
   if (scoped.length === 0) {
     el.innerHTML = `<div class="empty">No ${esc(band)} alerts are open.` +
-      (dormant.length ? ` ${other} are counted in the dormant band.` : "") + `</div>`;
+      (other ? ` ${other} still counted in the other band(s).` : "") + `</div>`;
     return;
   }
   // The listed rows come from the same split as the header and the chips, so a
@@ -1919,8 +2028,29 @@ function alertBands() {
   const incidents = [];
   const dormant = [];
   for (const a of S.alerts) (inDormantBand(a) ? dormant : incidents).push(a);
-  const band = S.aband === "dormant" ? "dormant" : "incidents";
-  const scoped = band === "dormant" ? dormant : incidents;
+  /* ---- the SUPPRESSED band (US-8.2.3) --------------------------------
+     Why it arrives in its own array instead of being sliced out of one list.
+
+     The API still defaults to band=all ON PURPOSE: moving the server default
+     would make every suppressed alert vanish from any client that had not been
+     updated. So this console opts in explicitly and asks twice -- load() fetches
+     band=incident for the queue and band=suppressed for this band -- and keeps
+     the two answers apart. Slicing a single band=all list here would put the
+     server's banding rule back in the browser, which is precisely the mistake
+     the dormant band's `alertIds` comment above records: the client got it
+     wrong, because critical and high are HELD BACK into the incident list even
+     on a suppressed device.
+
+     `S.alertsSup === null` means that fetch failed. It is not an empty band:
+     rendering it as one would say "nothing is suppressed" when the truth is
+     "we could not ask", so the pill falls back to the rollup's own count and
+     the list says why it is empty. */
+  const supKnown = Array.isArray(S.alertsSup);
+  const suppressed = supKnown ? S.alertsSup : [];
+  const band = S.aband === "dormant" ? "dormant"
+    : S.aband === "suppressed" ? "suppressed" : "incidents";
+  const scoped = band === "dormant" ? dormant
+    : band === "suppressed" ? suppressed : incidents;
 
   /* ---- the triage queue ------------------------------------------------
      Search, rule, age, severity and sort live HERE rather than in the
@@ -2017,14 +2147,17 @@ function alertBands() {
                  ["oldest", "oldest open first"], ["device", "device name"], ["rule", "group by rule"]];
 
   return { band, dormIds, incidents, dormant, authoritative: serverIds !== null, scoped,
+           suppressed, supKnown,
            matched, rows, locOf, rules, ages, sorts,
            active: { q, rule, age, sort, sev },
            filtered: q !== "" || rule !== "all" || age !== "all",
            // The "+" that marks a count over a collection apiAll could not
            // fetch in full. Read once here so the three alert surfaces cannot
            // disagree about whether their numbers are floors; the sentence that
-           // explains it belongs to renderTruncationBanner().
-           mark: (S.trunc || {}).alerts ? "+" : "" };
+           // explains it belongs to renderTruncationBanner(). Keyed on the band
+           // on screen, because the two bands are two separate paged walks and
+           // either can come up short without the other.
+           mark: (S.trunc || {})[band === "suppressed" ? "alertsSup" : "alerts"] ? "+" : "" };
 }
 
 /**
@@ -2037,23 +2170,39 @@ function renderAlertBands() {
   const host = $("#abands");
   if (!host) return;
   const h = S.hyg;
-  if (!h || !h.dormant || !h.dormant.total) { host.innerHTML = ""; return; }
+  const hasDormant = !!(h && h.dormant && h.dormant.total);
+  /* The suppressed pill's count, and where it is allowed to come from.
+
+     Preference is the array this console will actually RENDER when the pill is
+     pressed, so the number on the pill is the number of rows beneath it -- the
+     same rule the dormant pill already follows. Only when that walk failed does
+     it fall back to the rollup's `suppressed.total`, and then it is labelled as
+     the rollup's figure rather than passed off as ours. `null` means we hold
+     neither, and a pill is not drawn at all: "0 suppressed" with nothing behind
+     it is a fabricated zero. */
+  const sv = S.sup;
+  const supRollup = sv && sv.suppressed && typeof sv.suppressed.total === "number"
+    ? sv.suppressed.total : null;
   // Counted from the SAME split that renders the rows, not from h.incidents /
   // h.dormant. The server counts per alert (a dormant device's critical is held
   // back into incidents) while these ids are per device; taking the pill numbers
   // from the snapshot and the rows from the filter is how a pill ends up
   // contradicting the list directly beneath it.
-  const { incidents, dormant } = alertBands();
+  const { incidents, dormant, suppressed, supKnown } = alertBands();
   const inc = incidents.length;
   const dor = dormant.length;
-  const r = h.rollup;
+  const supCount = supKnown ? suppressed.length : supRollup;
+  // Nothing to band by: no dormant rollup and no suppression rollup either.
+  // Hidden rather than drawn empty, exactly as the dormant band alone was.
+  if (!hasDormant && supCount == null) { host.innerHTML = ""; return; }
+  const r = (h && h.rollup) || null;
   // The payload carries a COUNT (rollup.neverSeenDevices) and no ids, so naming
   // these canvases means deriving the set here: one with no lastOnlineTime has
   // never been recorded online. Named only when that derivation reproduces the
   // server's count exactly -- otherwise the honest line is that they are
   // counted, because publishing a list we cannot reconcile with the count is
   // worse than admitting we only have the number.
-  const neverSeen = S.devices.filter((d) => !d.lastOnlineTime);
+  const neverSeen = (S.devices || []).filter((d) => !d.lastOnlineTime);
   const canName = !!r && neverSeen.length === r.neverSeenDevices;
   const tab = (key, label, n) =>
     `<button class="fp${(S.aband || "incidents") === key ? " on" : ""}" data-aband="${key}"
@@ -2062,8 +2211,23 @@ function renderAlertBands() {
   const days = (secs) => Math.floor((secs || 0) / 86400);
   host.innerHTML =
     `<div class="pills" style="margin-bottom:10px">
-       ${tab("incidents", "incidents", inc)}${tab("dormant", "dormant", dor)}
+       ${tab("incidents", "incidents", inc)}` +
+       // Each pill only exists when its band does, so a pill never promises a
+       // list this console does not hold.
+       `${hasDormant ? tab("dormant", "dormant", dor) : ""}` +
+       `${supCount == null ? "" : tab("suppressed", "suppressed", supCount)}
      </div>` +
+    // The suppressed band's own honesty line, in the two cases where the pill
+    // above cannot be taken at face value.
+    (supCount != null && !supKnown
+      ? `<div class="note na"><b>${supCount} suppressed alert(s)</b>, counted by the server's rollup
+           &#8212; the suppressed list itself could not be loaded, so this console cannot show the rows.
+           They are still open and still counted; nothing has been deleted.</div>`
+      : supKnown && supRollup != null && supRollup !== suppressed.length
+        ? `<div class="note"><b>The suppressed band does not reconcile.</b> The rollup counts
+             ${supRollup}; this console holds ${suppressed.length} row(s). The pill reports what it can
+             list. Treat the difference as unaccounted-for, not as resolved.</div>`
+        : "") +
     (r
       ? `<div class="card" style="margin-bottom:14px"><div class="wbody">
            <div style="display:flex;gap:10px;align-items:baseline;flex-wrap:wrap">
@@ -2094,6 +2258,12 @@ function renderAlertBands() {
   host.querySelectorAll("[data-aband]").forEach((b) =>
     b.addEventListener("click", () => {
       S.aband = b.dataset.aband;
+      // The Overview widget too. It reports the band as well, and pressing a
+      // pill used to leave it counting the band the operator had just left:
+      // "202 dormant" on the Alerts tab above an Overview card still headed 88.
+      // Every surface that reads the split moves in the same tick, or the
+      // dashboard contradicts itself in public.
+      renderAlertWidget();
       renderAlertFilters();
       renderAlerts();
     }));
@@ -2114,7 +2284,7 @@ function renderAlerts() {
   // The one shared queue: same split, same filters, same sort, same tick. When
   // hygiene is unavailable the dormant id set is empty and this degrades to the
   // old behaviour — the full list — rather than an empty screen.
-  const { matched, rows, locOf, active, filtered, band, scoped, mark } = alertBands();
+  const { matched, rows, locOf, active, filtered, band, scoped, mark, supKnown } = alertBands();
   // The header reports `matched`, which is what the severity chips beneath it
   // count and what the filters produced. `mark` is the "+" that says the whole
   // collection was short; see renderTruncationBanner().
@@ -2124,9 +2294,15 @@ function renderAlerts() {
     // Say WHY it is empty. "No alerts are open" is false when the truth is that
     // a filter excluded all 110 of them, and it is the kind of false that ends
     // with a technician telling a customer there is nothing wrong.
-    L.innerHTML = `<div class="empty">` + (filtered || active.sev !== "all"
-      ? `No ${band} alert matches these filters — ${scoped.length}${mark} in this band.`
-      : `No ${band} alerts are open.`) + `</div>`;
+    // A band whose rows could not be FETCHED is not an empty band. Saying "no
+    // suppressed alerts are open" when the walk failed would tell a technician
+    // the mute list is clear; the count on the pill came from the rollup.
+    L.innerHTML = `<div class="empty">` + (band === "suppressed" && !supKnown
+      ? `The suppressed list could not be loaded, so this console cannot show the rows.
+         The count on the pill above is the server's, not ours &#8212; refresh to try again.`
+      : filtered || active.sev !== "all"
+        ? `No ${band} alert matches these filters — ${scoped.length}${mark} in this band.`
+        : `No ${band} alerts are open.`) + `</div>`;
     return;
   }
   const shown = rows.slice(0, ALERT_ROWS_SHOWN);
@@ -2144,16 +2320,47 @@ function renderAlerts() {
     // Location comes from the alert row when the API populated it, otherwise
     // from the device record — the first thing asked after "which device".
     const loc = locOf(a);
+    /* Who holds this alert, stated before any button that changes it (US-8.2.1).
+       `acknowledgedBy` is a self-declared claim recorded as one, so it is printed
+       as the name that was given and never dressed up as an identity. A claim with
+       no timestamp prints no age rather than "just now". */
+    const claim = a.acknowledgedAt
+      ? `<span class="who">Claimed by <b>${esc(a.acknowledgedBy || "someone unnamed")}</b>` +
+        `${a.acknowledgedAt ? ` &#183; ${ago(a.acknowledgedAt)}` : ""}</span>` +
+        `<button class="btn sm" data-arel="${esc(a.id)}"
+           title="Release this claim &#8212; it returns to the unclaimed queue">Release</button>`
+      : `<span class="who">Unclaimed</span>` +
+        `<button class="btn sm" data-aack="${esc(a.id)}"
+           title="Claim this alert so another technician can see it is being worked">Claim</button>`;
+    // Notes are append-only. The button opens the history; there is no edit
+    // affordance anywhere, because the API cannot edit one.
+    const notes = a.noteCount
+      ? `${a.noteCount} note${a.noteCount === 1 ? "" : "s"}` +
+        `${a.lastNoteAt ? `, last ${ago(a.lastNoteAt)}` : ""}`
+      : "No notes";
+    const sp = a.suppression;
+    // The safety valve, named on the row it protects: this alert matched a
+    // suppression and was kept in the incident queue anyway.
+    const held = a.suppressionHeldBack
+      ? `<span class="held">&#9888;&#65039; held back from a suppression</span>` : "";
+    const supd = a.suppressed && sp
+      ? `<span class="supd">&#128263; suppressed (${esc(sp.scope)}${sp.ruleId ? `: ${esc(sp.ruleId)}` : ""})
+           &#183; ${sp.neverExpires ? "never expires"
+             : sp.expiresAt ? `expires ${esc(String(sp.expiresAt).slice(0, 10))}` : "no expiry recorded"}</span>`
+      : "";
     return head + `
     <button class="arow" data-id="${esc(a.deviceId)}">
       <span class="thumb">${thumbFor(a)}</span>
       <span><span class="ti">${esc(a.title)} &#8212; ${esc(a.deviceName || a.deviceId)}</span>
         <span class="ds">${esc(a.evidence || "")}</span>
         <span class="mt">${loc ? `&#128205; ${esc(loc)} &#183; ` : ""}${ago(a.lastFiredAt || a.openedAt)}
-          &#183; <em>${esc(a.ruleId)}</em>
-          ${a.acknowledgedAt ? " &#183; acknowledged" : ""}</span></span>
-      <span class="btn sm">Open</span>
-    </button>`;
+          &#183; <em>${esc(a.ruleId)}</em></span></span>
+      <span class="btn sm">Open device</span>
+    </button>
+    <div class="awork">${claim}${held}${supd}
+      <button class="btn sm" data-awork="${esc(a.id)}"
+        title="Notes, history and suppression for this alert">${notes} &#183; work&#8230;</button>
+    </div>`;
   }).join("") +
     (rows.length > shown.length
       ? `<div class="pg">Showing ${shown.length} of ${rows.length}${mark} matching alert(s)
@@ -2161,6 +2368,16 @@ function renderAlerts() {
       : `<div class="pg">${rows.length}${mark} alert(s)</div>`);
   L.querySelectorAll(".arow").forEach((b) =>
     b.addEventListener("click", () => openDevice(b.dataset.id)));
+  // The work-surface wiring. Claim and Release are one call each and reversible
+  // by the other, so they fire from the row; everything that is not (a note, a
+  // suppression, a revoke) goes through the surface, which confirms and then
+  // shows what the server did.
+  L.querySelectorAll("[data-awork]").forEach((b) =>
+    b.addEventListener("click", () => openAlertWork(b.dataset.awork)));
+  L.querySelectorAll("[data-aack]").forEach((b) =>
+    b.addEventListener("click", () => claimAlert(b.dataset.aack, b)));
+  L.querySelectorAll("[data-arel]").forEach((b) =>
+    b.addEventListener("click", () => releaseAlert(b.dataset.arel, b)));
 }
 
 /** Rules that cannot fire because their input does not exist. Reporting these
@@ -2175,6 +2392,811 @@ function renderInert() {
     `<b>${dead.length} hardware alert input(s) unavailable</b> &#8212; ` +
     dead.map((d) => esc(d)).join(", ") +
     ` have no data source on this platform, so rules reading them can never fire.`;
+}
+
+/* ===================================================================
+   THE ALERT WORK SURFACE — claim, release, note, suppress, revoke.
+
+   These are the product's first operator writes beyond brightness, and unlike
+   brightness they change state a SECOND TECHNICIAN SEES. So they hold to the
+   discipline the brightness path established:
+
+     - nothing fires blind. The surface READS the alert and its append-only
+       history before it offers a button;
+     - anything not undone by pressing the opposite button is confirmed against
+       the NAMED alert first. Claim and Release are each other's undo, so they
+       fire on one click; a note, a suppression and a revoke are confirmed;
+     - the server's own answer is shown verbatim, good or bad, and both bands
+       are re-read afterwards so the screen reflects what the database holds
+       rather than what we asked for;
+     - a note is append-only, so there is NO edit affordance anywhere here. An
+       editable note destroys the audit value of the thing it records.
+   =================================================================== */
+
+/**
+ * Who is claiming.
+ *
+ * `acknowledge` requires `by`, and there is no user model behind the shared
+ * bearer token, so the only honest answer is to ask and record the answer as
+ * the claim it is. Remembered per browser so a technician types it once a
+ * shift. Deliberately NOT defaulted to a hostname or a token fingerprint: an
+ * invented name in an audit trail is worse than an absent one.
+ */
+function actorName() {
+  if (S.actor) return S.actor;
+  let saved = null;
+  try { saved = localStorage.getItem("vfi.actor"); } catch { saved = null; }
+  if (saved) { S.actor = saved; return saved; }
+  const typed = window.prompt(
+    "Your name or initials, for the alert history.\n\n" +
+    "There is no login behind this console. The API records whoever you say you " +
+    "are, so this is a claim, not an identity — it is what another technician " +
+    "will see against this alert. Stored in this browser only.");
+  const name = String(typed || "").trim().slice(0, 120);
+  if (!name) return null;
+  S.actor = name;
+  try { localStorage.setItem("vfi.actor", name); } catch { /* private mode: ask again */ }
+  return name;
+}
+
+/**
+ * One write.
+ *
+ * Raw fetch rather than api(), for the same reason the brightness path uses
+ * one: api() replaces the caller's headers with the auth header alone, so it
+ * cannot send a content-type and a JSON body. Never throws — the caller renders
+ * the failure, because a write that failed silently is the worst outcome here.
+ */
+async function alertWrite(path, body) {
+  try {
+    const res = await fetch(path, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...(TOKEN ? { authorization: "Bearer " + TOKEN } : {}),
+      },
+      body: JSON.stringify(body || {}),
+    });
+    const env = await res.json().catch(() => null);
+    return {
+      ok: res.ok,
+      status: res.status,
+      data: (env && env.data) || null,
+      // The API answers a rejected body with a sentence; show that, not the code.
+      error: (env && (env.message || env.error)) || null,
+    };
+  } catch (e) {
+    return { ok: false, status: 0, data: null, error: e.message };
+  }
+}
+
+/** What a paged walk could NOT get, recorded in the one shape every surface
+ *  reads. Shared by load() and reloadAlertBands() so a shortfall is spelled the
+ *  same way whichever path fetched it — and CLEARED when it no longer applies,
+ *  because a stale "+" is its own lie. */
+function noteShortfall(key, res) {
+  S.trunc = S.trunc || {};
+  if (res && res.truncated) {
+    S.trunc[key] = { loaded: res.loaded, total: res.total, cap: res.cap,
+                     capped: res.capped, pagesFetched: res.pagesFetched,
+                     pagesAvailable: res.pagesAvailable };
+  } else {
+    delete S.trunc[key];
+  }
+}
+
+/**
+ * Re-read BOTH bands and the rollup, then repaint everything that counts them.
+ *
+ * Both, always — a suppression MOVES alerts between the bands, so refetching one
+ * would leave a pill contradicting the list beneath it, which is the invariant
+ * this file has broken three times. A failed suppressed walk sets `alertsSup`
+ * back to null so the band says "could not load" rather than "empty".
+ */
+async function reloadAlertBands() {
+  const [inc, sup, roll] = await Promise.all([
+    apiAll("/api/alerts?band=incident").catch(() => null),
+    apiAll("/api/alerts?band=suppressed").catch(() => null),
+    api("/api/alerts/suppressions").catch(() => null),
+  ]);
+  if (inc) { S.alerts = inc.data; noteShortfall("alerts", inc); }
+  S.alertsSup = sup ? sup.data : null;
+  noteShortfall("alertsSup", sup);
+  if (roll) S.sup = roll.data;
+  renderTruncationBanner();
+  renderAlertWidget();
+  renderAlertFilters();
+  renderAlerts();
+  renderSuppressions();
+}
+
+/* ---- claim / release, from the row ---------------------------------
+   One call each and each is the other's undo, so neither needs a modal. Release
+   IS confirmed, because the claim it removes may be somebody else's. */
+
+async function claimAlert(id, btn) {
+  const by = actorName();
+  if (!by) return;
+  if (btn) { btn.disabled = true; btn.textContent = "Claiming…"; }
+  const r = await alertWrite("/api/alerts/" + encodeURIComponent(id) + "/acknowledge", { by });
+  if (!r.ok) {
+    if (btn) { btn.disabled = false; btn.textContent = "Claim failed — retry"; }
+    window.alert("Could not claim this alert.\n\n" + (r.error || ("HTTP " + r.status)));
+    return;
+  }
+  await reloadAlertBands();
+  if (S.awork && S.awork.id === id) {
+    showAlertResult(`<span>&#9989;</span><span><b>Claimed</b> as ${esc(by)}. ` +
+      `Another technician now sees your name against this alert. Release undoes it.</span>`, "warn");
+    await refreshAlertWork(id);
+  }
+}
+
+async function releaseAlert(id, btn) {
+  const by = actorName();
+  if (!by) return;
+  // Named, because releasing somebody else's claim is a thing an operator does
+  // by accident and then cannot see they did.
+  const holder = (S.awork && S.awork.alert && S.awork.alert.acknowledgedBy) || null;
+  if (!window.confirm(
+    "Release this alert" + (holder ? ' — currently claimed by "' + holder + '"' : "") + "?\n\n" +
+    "It returns to the unclaimed queue for anyone to pick up. Nothing is deleted: " +
+    "the release is appended to this alert's history with your name on it.")) return;
+  if (btn) { btn.disabled = true; btn.textContent = "Releasing…"; }
+  const r = await alertWrite("/api/alerts/" + encodeURIComponent(id) + "/unacknowledge", { by });
+  if (!r.ok) {
+    if (btn) { btn.disabled = false; btn.textContent = "Release failed — retry"; }
+    window.alert("Could not release this alert.\n\n" + (r.error || ("HTTP " + r.status)));
+    return;
+  }
+  await reloadAlertBands();
+  if (S.awork && S.awork.id === id) {
+    showAlertResult(`<span>&#9989;</span><span><b>Released</b> by ${esc(by)}. ` +
+      `It is back in the unclaimed queue; the release is in the history below.</span>`, "warn");
+    await refreshAlertWork(id);
+  }
+}
+
+/* ---- the surface --------------------------------------------------- */
+
+function closeAlertWork() {
+  S.awork = null;
+  $("#ascrim").classList.remove("on");
+  $("#amodal").classList.remove("on");
+}
+
+/** Is the alert work surface the top layer right now? Escape must close the
+ *  thing on top, not the drawer underneath it. */
+function alertWorkOpen() {
+  return !!S.awork;
+}
+
+async function openAlertWork(id) {
+  S.awork = { id, alert: null, err: null, readAt: null };
+  $("#ascrim").classList.add("on");
+  $("#amodal").classList.add("on");
+  $("#awnm").textContent = "Loading…";
+  $("#awsev").textContent = "—";
+  $("#awsev").className = "tag";
+  $("#awloc").textContent = "";
+  $("#awout").style.display = "none";
+  $("#awbody").innerHTML =
+    `<div class="skel"><span class="sk wide"></span><span class="sk row"></span>` +
+    `<span class="sk line"></span></div>`;
+  const res = await api("/api/alerts/" + encodeURIComponent(id)).catch((e) => ({ _err: e.message }));
+  // The operator may have closed this or opened another while the read was out.
+  if (!S.awork || S.awork.id !== id) return;
+  if (!res || res._err || !res.data) {
+    S.awork.err = (res && res._err) || "the alert could not be read";
+  } else {
+    S.awork.alert = res.data;
+    S.awork.readAt = Date.now();
+  }
+  paintAlertWork();
+}
+
+/** The event log, oldest-first as the API serves it. Rendered as history, never
+ *  as fields: every row is a thing that happened, with who and when, and none
+ *  of them is editable because none of them can be. */
+function alertHistoryHtml(a) {
+  const evts = Array.isArray(a.events) ? a.events : null;
+  if (evts === null) {
+    return `<div class="unres">This alert's history could not be read, so it is not shown.
+      ${a.noteCount ? `The list said ${a.noteCount} note(s) exist.` : ""}</div>`;
+  }
+  if (evts.length === 0) {
+    return `<div class="unres">Nothing has been recorded against this alert yet &#8212;
+      no claim, no note, no suppression.</div>`;
+  }
+  return evts.map((e) => `
+    <div class="evt">
+      <span class="kd k-${esc(e.kind)}">${esc(e.kind)}</span>
+      <span class="tx"><b>${esc(e.actor || "unattributed")}</b> &#183; ${ago(e.createdAt)}
+        ${e.body ? `<br>${esc(e.body)}` : ""}</span>
+    </div>`).join("");
+}
+
+/**
+ * How long until an instant that has not happened yet.
+ *
+ * `ago()` collapses every future date into "in the future", which is exactly
+ * the fact an EXPIRY needs stated precisely: "expires in 4 d" and "expires in
+ * 340 d" are different decisions. A date already past says so rather than
+ * pretending to be a countdown.
+ */
+function until(iso) {
+  if (!iso) return "no date";
+  const s = (new Date(iso).getTime() - Date.now()) / 1000;
+  if (!Number.isFinite(s)) return "no date";
+  if (s <= 0) return "already lapsed";
+  if (s < 5400) return "in " + Math.round(s / 60) + " min";
+  if (s < 172800) return "in " + (s / 3600).toFixed(1) + " hr";
+  return "in " + Math.round(s / 86400) + " d";
+}
+
+/** The suppression record in force on this alert, as prose an operator can act
+ *  on: why, who, and when it stops. */
+function suppressionRecordHtml(sp) {
+  const expiry = sp.neverExpires
+    ? `<b>never expires</b> &#8212; permanent, and only a revoke ends it`
+    : sp.expiresAt
+      ? `expires <b>${esc(String(sp.expiresAt).replace("T", " ").slice(0, 16))}</b> (${until(sp.expiresAt)})`
+      : `<b>no expiry recorded</b>`;
+  return `<div class="rec">
+    <div class="rh"><b>${esc(sp.scope)}-scoped${sp.ruleId ? `: ${esc(sp.ruleId)}` : ""}</b>
+      <span class="prov" style="margin:0">by ${esc(sp.createdBy || "unattributed")} &#183;
+        ${ago(sp.createdAt)}${sp.intent ? ` &#183; intent: ${esc(sp.intent)}` : ""}</span></div>
+    <div class="why">&#8220;${esc(sp.reason)}&#8221;</div>
+    <div class="why">${expiry}.
+      ${sp.includeCriticalHigh
+        ? `This record absorbs critical and high too &#8212; the safety valve is OFF for it.`
+        : `Critical and high are never absorbed by it.`}</div>
+  </div>`;
+}
+
+/** Result banner inside the surface, in the shape the brightness path uses:
+ *  the server's own words, good or bad. */
+function showAlertResult(html, kind) {
+  const el = $("#awout");
+  if (!el) return;
+  el.className = `banner ${kind === "bad" ? "bad" : "warn"}`;
+  el.innerHTML = html;
+  el.style.display = "";
+}
+
+/**
+ * What this suppression would cover, from the rows this console is holding.
+ *
+ * Deliberately NOT a prediction of the split. The server owns which alerts get
+ * absorbed and which are held back, and re-deriving that rule in the browser is
+ * the exact mistake the dormant band's comment records. So this counts the
+ * scope, then names the severities the SERVER says it never absorbs — read from
+ * `policy.neverAbsorbedSeverities`, not from a constant of our own — and leaves
+ * the arithmetic to the response.
+ */
+function suppressScopeCount(a, ruleScoped) {
+  const pool = (S.alerts || []).concat(Array.isArray(S.alertsSup) ? S.alertsSup : []);
+  const inScope = pool.filter((x) =>
+    x.deviceId === a.deviceId && (!ruleScoped || (x.ruleId || null) === (a.ruleId || null)));
+  const never = (S.sup && S.sup.policy && S.sup.policy.neverAbsorbedSeverities) || [];
+  const protectedRows = inScope.filter((x) => never.indexOf(x.severity) !== -1);
+  return { total: inScope.length, protectedRows: protectedRows.length, never };
+}
+
+/** The scope sentence, recomputed on every control change without repainting the
+ *  form — a repaint would throw away the reason the operator is halfway through
+ *  typing. */
+function suppressPreviewHtml(a) {
+  const ruleScoped = ($("#awscope") || {}).value === "rule";
+  const inc = !!(($("#awcrit") || {}).checked);
+  const c = suppressScopeCount(a, ruleScoped);
+  const short = (S.trunc || {}).alerts || (S.trunc || {}).alertsSup;
+  return `<b>${c.total}</b> open alert(s) on this scope are in the lists this console holds` +
+    (short ? ` (a lower bound &#8212; a band came up short this load)` : "") + `. ` +
+    (c.protectedRows
+      ? (ruleScoped && inc
+          ? `<b>${c.protectedRows}</b> of them are ${c.never.join("/")} and this record would
+             absorb them too, because you have turned the safety valve off.`
+          : `<b>${c.protectedRows}</b> of them are ${c.never.join("/")}, which the server never
+             absorbs &#8212; expect those to be HELD BACK into the incident list.`)
+      : `None of them are ${c.never.join("/")}.`) +
+    ` The server decides the split and reports it; the exact numbers appear here once it has.`;
+}
+
+function paintAlertWork() {
+  const w = S.awork;
+  if (!w) return;
+  const a = w.alert;
+  if (!a) {
+    $("#awnm").textContent = "Alert unavailable";
+    $("#awsev").textContent = "—";
+    $("#awsev").className = "tag";
+    $("#awloc").textContent = "";
+    $("#awbody").innerHTML = `<div class="empty">Could not read this alert:
+      ${esc(w.err || "unknown reason")}. Nothing has been changed.</div>`;
+    return;
+  }
+  const pol = (S.sup && S.sup.policy) || null;
+  // The API enforces this; the form must enforce the SAME number rather than a
+  // magic one of its own, or a reason the operator was allowed to type comes
+  // back as a 400 they cannot explain.
+  const minLen = pol && typeof pol.minReasonLength === "number" ? pol.minReasonLength : null;
+  const defDays = pol && typeof pol.defaultExpiryDays === "number" ? pol.defaultExpiryDays : null;
+  const maxDays = pol && typeof pol.maxExpiryDays === "number" ? pol.maxExpiryDays : null;
+  const sp = a.suppression || null;
+
+  $("#awnm").textContent = a.title || a.ruleId || a.id;
+  $("#awsev").textContent = a.severity;
+  $("#awsev").className = "tag " +
+    (a.severity === "critical" ? "bad" : a.severity === "high" ? "warn" : "net");
+  $("#awloc").innerHTML =
+    `${esc(a.deviceName || a.deviceId)}${a.location ? ` &#183; &#128205; ${esc(a.location)}` : ""}
+     &#183; <em>${esc(a.ruleId || "(no rule id)")}</em>
+     &#183; opened ${ago(a.openedAt)} &#183; last fired ${ago(a.lastFiredAt || a.openedAt)}
+     &#183; <span class="prov" style="margin:0;display:inline">read ${ago(new Date(w.readAt || Date.now()).toISOString())}</span>`;
+
+  const claimBlock = a.acknowledgedAt
+    ? `<div class="aw-f"><span class="who">Claimed by
+         <b>${esc(a.acknowledgedBy || "someone unnamed")}</b> &#183; ${ago(a.acknowledgedAt)}</span>
+       <button class="btn sm" id="awrel">Release this claim</button></div>
+       <div class="prov">A claim is a self-declared name, not a verified identity &#8212; there is no
+         login behind this console. Releasing appends to the history; it never erases the claim.</div>`
+    : `<div class="aw-f"><span class="who">Unclaimed</span>
+         <button class="btn sm pri" id="awack">Claim this alert</button></div>
+       <div class="prov">Claiming records your name against this alert so a second technician can
+         see it is being worked. It is undone by Release.</div>`;
+
+  const suppressionBlock = (a.suppressed && sp)
+    ? suppressionRecordHtml(sp) +
+      `<div class="aw-f">
+         <input type="text" id="awrevwhy" maxlength="2000" placeholder="Why is the mute coming off? (optional)">
+         <button class="btn sm" id="awrev">Revoke this suppression</button></div>
+       <div class="prov">Revoking returns the matching alerts to the incident list at their normal
+         rank. They were never closed, so nothing re-opens and nothing re-fires.</div>`
+    : (sp && !a.suppressed)
+      ? suppressionRecordHtml(sp) +
+        `<div class="note"><b>This alert matched that suppression and was kept in the incident
+           list anyway.</b> That is the safety valve, not a bug: the severities the server never
+           absorbs stay visible even on a muted device. Suppressing again will not hide it.</div>`
+      : !pol
+        ? `<div class="note na"><b>The suppression policy could not be read</b>, so this form is not
+             offered. It would otherwise have to invent a minimum reason length and an expiry cap,
+             and a client-side rule that disagrees with the server's is worse than no form.</div>`
+        : `<div class="aw-f" style="margin-bottom:9px">
+             <label for="awscope">Scope</label>
+             <select id="awscope">
+               <option value="device">Everything on ${esc(a.deviceName || a.deviceId)}</option>
+               <option value="rule">Only ${esc(a.ruleId || "(no rule id)")} on this device</option>
+             </select>
+             <label for="awintent">Why does this asset exist?</label>
+             <select id="awintent">
+               <option value="">not recorded</option>
+               ${(pol.intentKinds || []).map((k) =>
+                 `<option value="${esc(k)}">${esc(k)}</option>`).join("")}
+             </select>
+           </div>
+           <div class="aw-f">
+             <textarea id="awreason" maxlength="2000"
+               placeholder="Why is this being suppressed? Another technician reads this in six weeks."></textarea>
+           </div>
+           <div class="chk" id="awrcount">A reason is mandatory &#8212; at least ${minLen} characters.</div>
+           <div class="aw-f" style="margin-top:10px">
+             <label for="awexp">Expiry</label>
+             <select id="awexp">
+               <option value="${defDays}">${defDays} days &#8212; the API default</option>
+               <option value="7">7 days</option>
+               <option value="90">90 days</option>
+               <option value="${maxDays}">${maxDays} days &#8212; the cap</option>
+               <option value="custom">a number of days I choose</option>
+               <option value="never">NEVER &#8212; permanent suppression</option>
+             </select>
+             <input type="number" id="awexpd" min="1" max="${maxDays}" value="${defDays}"
+               style="display:none;width:90px" aria-label="Expiry in days">
+             <label id="awcritwrap" style="display:none">
+               <input type="checkbox" id="awcrit">
+               absorb ${(pol.neverAbsorbedSeverities || []).join(" and ")} too
+             </label>
+           </div>
+           <div id="awexpsay" class="prov"></div>
+           <div class="prov" id="awprev">${suppressPreviewHtml(a)}</div>
+           <div class="aw-f" style="margin-top:11px">
+             <button class="btn pri" id="awsup" disabled>Suppress&#8230;</button></div>`;
+
+  $("#awbody").innerHTML =
+    `<div class="aw-sec"><h4>Who has this</h4>${claimBlock}</div>
+     <div class="aw-sec"><h4>History &#8212; append-only</h4>
+       ${alertHistoryHtml(a)}
+       <div class="aw-f" style="margin-top:11px">
+         <textarea id="awnote" maxlength="4000"
+           placeholder="Add a note &#8212; what you found, who you called, when you are back."></textarea>
+         <button class="btn sm" id="awnoteb" disabled>Add note</button></div>
+       <div class="prov">Notes cannot be edited or deleted, here or in the API. That is the point:
+         an editable note is worth nothing as a record. Write it as you would a ticket entry.</div>
+     </div>
+     <div class="aw-sec"><h4>${a.suppressed ? "Suppressed" : "Suppress"}</h4>${suppressionBlock}</div>`;
+
+  wireAlertWork(a, minLen, defDays, maxDays);
+}
+
+/** Re-read this alert and repaint the surface WITHOUT clearing the result
+ *  banner. A write must leave its own outcome on screen; refetching the alert
+ *  and wiping "12 suppressed, 8 held back" in the same tick is how an operator
+ *  ends up unsure whether anything happened. */
+async function refreshAlertWork(id) {
+  if (!S.awork || S.awork.id !== id) return;
+  const res = await api("/api/alerts/" + encodeURIComponent(id)).catch((e) => ({ _err: e.message }));
+  if (!S.awork || S.awork.id !== id) return;
+  if (res && !res._err && res.data) {
+    S.awork.alert = res.data;
+    S.awork.readAt = Date.now();
+    S.awork.err = null;
+  } else {
+    // The write may well have succeeded; only the re-read failed. Say exactly
+    // that rather than implying the alert is gone.
+    S.awork.err = ((res && res._err) || "the alert could not be re-read") +
+      " — the write above reported its own outcome; this screen may be behind it";
+    S.awork.alert = null;
+  }
+  paintAlertWork();
+}
+
+/** Every control on the work surface. Rebuilt with the surface on each paint,
+ *  so handlers always attach to the elements now on screen — the same rule the
+ *  filter selects follow. */
+function wireAlertWork(a, minLen, defDays, maxDays) {
+  const on = (id, ev, fn) => { const e = $("#" + id); if (e) e.addEventListener(ev, fn); };
+
+  on("awack", "click", () => claimAlert(a.id, $("#awack")));
+  on("awrel", "click", () => releaseAlert(a.id, $("#awrel")));
+
+  /* ---- notes: append-only, so adding one is confirmed ---- */
+  const noteBox = $("#awnote");
+  const noteBtn = $("#awnoteb");
+  if (noteBox && noteBtn) {
+    noteBox.addEventListener("input", () => { noteBtn.disabled = noteBox.value.trim().length === 0; });
+    noteBtn.addEventListener("click", async () => {
+      const body = noteBox.value.trim();
+      if (!body) return;
+      const by = actorName();
+      if (!by) return;
+      if (!window.confirm(
+        "Add this note?\n\n" + body + "\n\n" +
+        "Notes are append-only: neither this console nor the API can edit or " +
+        "delete one afterwards. It will be attributed to \"" + by + "\".")) return;
+      noteBtn.disabled = true;
+      noteBtn.textContent = "Adding…";
+      const r = await alertWrite("/api/alerts/" + encodeURIComponent(a.id) + "/notes", { body, by });
+      if (!r.ok) {
+        showAlertResult(`<span>&#9888;&#65039;</span><span><b>The note was not saved.</b> ` +
+          `${esc(r.error || ("HTTP " + r.status))} &#8212; nothing was written, so retype or retry.</span>`, "bad");
+        noteBtn.disabled = false;
+        noteBtn.textContent = "Add note";
+        return;
+      }
+      showAlertResult(`<span>&#9989;</span><span><b>Note added</b> as ${esc(by)}. ` +
+        `It is now in the history below and cannot be edited.</span>`, "warn");
+      await reloadAlertBands();
+      await refreshAlertWork(a.id);
+    });
+  }
+
+  /* ---- revoke, from the alert that is muted ---- */
+  on("awrev", "click", async () => {
+    const sp = a.suppression;
+    if (!sp) return;
+    const by = actorName();
+    if (!by) return;
+    const why = ($("#awrevwhy") || {}).value || "";
+    if (!window.confirm(
+      "Revoke this suppression?\n\n" +
+      "Scope: " + sp.scope + (sp.ruleId ? " (" + sp.ruleId + ")" : "") + "\n" +
+      "Created by " + (sp.createdBy || "unattributed") + ": \"" + sp.reason + "\"\n\n" +
+      "Every alert it is muting returns to the incident list immediately. The record " +
+      "is not deleted — it is marked revoked with your name on it.")) return;
+    const btn = $("#awrev");
+    if (btn) { btn.disabled = true; btn.textContent = "Revoking…"; }
+    const r = await alertWrite(
+      "/api/alerts/suppressions/" + encodeURIComponent(sp.id) + "/revoke",
+      { by, ...(why.trim() ? { reason: why.trim() } : {}) });
+    if (!r.ok) {
+      showAlertResult(`<span>&#9888;&#65039;</span><span><b>The suppression was not revoked.</b> ` +
+        `${esc(r.error || ("HTTP " + r.status))} &#8212; it is still in force.</span>`, "bad");
+      if (btn) { btn.disabled = false; btn.textContent = "Revoke this suppression"; }
+      return;
+    }
+    const d = r.data || {};
+    showAlertResult(`<span>&#9989;</span><span><b>Suppression revoked</b> by
+      ${esc(d.revokedBy || by)} &#8212; <b>${d.alertsReturned == null ? "an unreported number of" : d.alertsReturned}</b>
+      alert(s) returned to the incident list. The record is kept, marked revoked.</span>`, "warn");
+    await reloadAlertBands();
+    await refreshAlertWork(a.id);
+  });
+
+  /* ---- the suppress form ---- */
+  const reason = $("#awreason");
+  const supBtn = $("#awsup");
+  const expSel = $("#awexp");
+  const expDays = $("#awexpd");
+  const scope = $("#awscope");
+  const crit = $("#awcrit");
+  if (!reason || !supBtn || !expSel) return;
+
+  /** The chosen expiry, as the two things the operator must see: how many days,
+   *  and the date it lands on. `null` days means permanent. */
+  const chosen = () => {
+    if (expSel.value === "never") return { days: null, never: true };
+    const days = expSel.value === "custom"
+      ? Number((expDays && expDays.value) || NaN)
+      : Number(expSel.value);
+    return { days, never: false };
+  };
+
+  const say = () => {
+    const c = chosen();
+    const el = $("#awexpsay");
+    if (!el) return;
+    if (c.never) {
+      // Amber, and in as many words. A permanent mute is the one choice on this
+      // form that no amount of waiting undoes.
+      el.innerHTML = `<div class="perm"><b>&#9888;&#65039; Permanent &#8212; this never expires.</b>
+        Nothing returns these alerts to the incident list except a person revoking the record.
+        You chose it from the expiry control rather than ticking a box, which is deliberate:
+        every other option here fixes itself.</div>`;
+      return;
+    }
+    if (!Number.isFinite(c.days) || c.days < 1 || (maxDays != null && c.days > maxDays)) {
+      el.innerHTML = `<span class="chk short">Enter a whole number of days between 1 and
+        ${maxDays == null ? "the API cap" : maxDays}.</span>`;
+      return;
+    }
+    const at = new Date(Date.now() + c.days * 86400e3);
+    el.innerHTML = `Expires <b>${esc(at.toISOString().slice(0, 10))}</b> (in ${c.days} day(s)).
+      After that the matching alerts return to the incident list on their own, and the record shows
+      as lapsed in the panel above.`;
+  };
+
+  const check = () => {
+    const n = reason.value.trim().length;
+    const c = chosen();
+    const okReason = minLen == null ? n > 0 : n >= minLen;
+    const okExp = c.never ||
+      (Number.isFinite(c.days) && c.days >= 1 && (maxDays == null || c.days <= maxDays));
+    const cnt = $("#awrcount");
+    if (cnt) {
+      cnt.className = "chk" + (okReason ? "" : " short");
+      cnt.textContent = minLen == null
+        ? `${n} character(s). A reason is mandatory.`
+        : `${n} / ${minLen} characters minimum — the API's own policy.minReasonLength, not a number this console picked.`;
+    }
+    supBtn.disabled = !(okReason && okExp);
+    supBtn.textContent = c.never ? "Suppress permanently…" : "Suppress…";
+    const prev = $("#awprev");
+    if (prev) prev.innerHTML = suppressPreviewHtml(a);
+    say();
+  };
+
+  reason.addEventListener("input", check);
+  expSel.addEventListener("change", () => {
+    if (expDays) expDays.style.display = expSel.value === "custom" ? "" : "none";
+    check();
+  });
+  if (expDays) expDays.addEventListener("input", check);
+  if (scope) scope.addEventListener("change", () => {
+    // includeCriticalHigh requires a ruleId; the API refuses it on a whole-device
+    // record, so the control does not exist on that scope rather than being
+    // offered and rejected.
+    const wrap = $("#awcritwrap");
+    if (wrap) wrap.style.display = scope.value === "rule" ? "" : "none";
+    if (crit && scope.value !== "rule") crit.checked = false;
+    check();
+  });
+  if (crit) crit.addEventListener("change", check);
+  check();
+
+  supBtn.addEventListener("click", async () => {
+    const by = actorName();
+    if (!by) return;
+    const c = chosen();
+    const why = reason.value.trim();
+    const ruleScoped = scope && scope.value === "rule";
+    const absorb = !!(crit && crit.checked && ruleScoped);
+    if (minLen != null && why.length < minLen) return;
+    if (!window.confirm(
+      "Suppress " + (ruleScoped ? (a.ruleId || "this rule") + " on " : "everything on ") +
+      "\"" + (a.deviceName || a.deviceId) + "\"?\n\n" +
+      "Reason: \"" + why + "\"\n" +
+      "Expiry: " + (c.never
+        ? "NEVER — permanent, until somebody revokes it"
+        : c.days + " day(s), " + new Date(Date.now() + c.days * 86400e3).toISOString().slice(0, 10)) + "\n" +
+      (absorb ? "Critical and high WILL be absorbed by this record.\n" : "") + "\n" +
+      "Matching open alerts move out of the incident queue into the suppressed band. " +
+      "Nothing is deleted and nothing is closed: the count stays on screen and one " +
+      "click away, and another technician can see this record and your name on it.")) return;
+    supBtn.disabled = true;
+    supBtn.textContent = "Creating…";
+    const r = await alertWrite("/api/alerts/suppressions", {
+      deviceId: a.deviceId,
+      ...(ruleScoped ? { ruleId: a.ruleId } : {}),
+      reason: why,
+      ...(($("#awintent") || {}).value ? { intent: $("#awintent").value } : {}),
+      includeCriticalHigh: absorb,
+      ...(c.never ? { neverExpires: true } : { expiresInDays: c.days }),
+      by,
+    });
+    if (!r.ok) {
+      showAlertResult(`<span>&#9888;&#65039;</span><span><b>No suppression was created.</b> ` +
+        `${esc(r.error || ("HTTP " + r.status))} &#8212; nothing is muted, and the form still holds
+         what you typed.</span>`, "bad");
+      supBtn.disabled = false;
+      supBtn.textContent = c.never ? "Suppress permanently…" : "Suppress…";
+      return;
+    }
+    const d = r.data || {};
+    /* Both numbers, always. "8 held back" is the safety valve reporting that it
+       fired, and it is the single most useful sentence on this screen: the
+       operator learns it at the moment they act instead of by noticing later. */
+    showAlertResult(`<span>&#9989;</span><span>
+      <b>Suppression created</b> &#183; ${esc(d.scope || (ruleScoped ? "rule" : "device"))}-scoped &#183;
+      ${d.neverExpires ? "<b>never expires</b>" : d.expiresAt
+        ? `expires ${esc(String(d.expiresAt).slice(0, 10))} (${until(d.expiresAt)})`
+        : "no expiry reported"}.<br>
+      <b>${d.alertsSuppressed == null ? "?" : d.alertsSuppressed}</b> alert(s) suppressed,
+      <b>${d.alertsHeldBack == null ? "?" : d.alertsHeldBack}</b> held back.
+      ${d.alertsHeldBack ? `Held back means those alerts matched this record and were kept in the
+         incident list anyway, because the server never absorbs
+         ${(((S.sup || {}).policy || {}).neverAbsorbedSeverities || ["critical", "high"]).join(" or ")}.
+         They are still your problem.` : ""}
+      ${d.supersededId ? `<br>This replaced an existing record for the same scope, which was revoked
+         (never deleted) and is still readable in the audit trail.` : ""}
+      ${d.bands ? `<br>Bands now: ${d.bands.incidents} incident, ${d.bands.suppressed} suppressed,
+         ${d.bands.totalOpen} open in total.` : ""}</span>`, "warn");
+    await reloadAlertBands();
+    await refreshAlertWork(a.id);
+  });
+}
+
+/**
+ * Revoke from the rollup panel, where the operator is looking at the RECORD
+ * rather than at one alert. Same confirmation and the same reported outcome:
+ * the number of alerts that came back is the only proof the revoke did anything.
+ */
+async function revokeSuppression(id, label, reason) {
+  const by = actorName();
+  if (!by) return;
+  if (!window.confirm(
+    "Revoke this suppression?\n\n" + label + "\n" +
+    (reason ? "Reason it was created: \"" + reason + "\"\n" : "") + "\n" +
+    "Every alert it is muting returns to the incident list immediately. The record is " +
+    "not deleted — it is marked revoked, with your name on it.")) return;
+  const r = await alertWrite("/api/alerts/suppressions/" + encodeURIComponent(id) + "/revoke", { by });
+  if (!r.ok) {
+    window.alert("The suppression was NOT revoked.\n\n" + (r.error || ("HTTP " + r.status)) +
+      "\n\nIt is still in force.");
+    return;
+  }
+  const d = r.data || {};
+  window.alert("Suppression revoked by " + (d.revokedBy || by) + ".\n\n" +
+    (d.alertsReturned == null
+      ? "The API did not report how many alerts returned."
+      : d.alertsReturned + " alert(s) returned to the incident list."));
+  await reloadAlertBands();
+}
+
+/**
+ * The suppression rollup: what is muted, what each record is actually doing,
+ * what has LAPSED and what is INERT.
+ *
+ * The last two are the reason this panel exists. A suppression that has quietly
+ * stopped applying is how a fault gets missed: `lapsed` records have already
+ * handed alerts back (`returnedAlertCount` says how many), and an inert record
+ * is one matching nothing at all — which either means the fault cleared, or
+ * means the record no longer describes the device it was written for.
+ *
+ * These chips are the SERVER'S rollup and are labelled as such, and they are
+ * deliberately not clickable. The clickable, count-what-you-filter pills live in
+ * renderAlertBands() over the arrays this console holds; a second filtering
+ * surface with its own numbers is exactly how the header/chips/rows invariant
+ * broke three times.
+ */
+function renderSuppressions() {
+  const host = $("#suppanel");
+  if (!host) return;
+  const v = S.sup;
+  if (!v) {
+    host.innerHTML = `<div class="note na"><b>The suppression rollup could not be read.</b>
+      So this console cannot say what is muted, what has lapsed or what is matching nothing.
+      The band pills above count only the rows it holds &#8212; they are not a statement that
+      nothing is suppressed.</div>`;
+    return;
+  }
+  const sb = v.suppressed || {};
+  const recs = Array.isArray(sb.byRecord) ? sb.byRecord : [];
+  const lapsed = Array.isArray(v.lapsed) ? v.lapsed : [];
+  const inc = (v.incidents && v.incidents.total) || 0;
+  const supd = (sb.total) || 0;
+  // The server states this identity; if it ever fails to hold, the honest move
+  // is to print the disagreement rather than pick a side.
+  const reconciles = typeof v.totalOpen === "number" && inc + supd === v.totalOpen;
+  const held = Array.isArray(sb.heldBackAlertIds) ? sb.heldBackAlertIds.length : null;
+
+  /* Relabelled on purpose, and this is not cosmetic.
+     The rollup's "incidents" chip means NOT SUPPRESSED (291 here). The band pill
+     twenty pixels above it also says "incidents" and means not suppressed AND
+     not dormant (89 here). Two different numbers under one word on one screen is
+     the contradiction this file keeps being fixed for, so the panel names its own
+     axis -- suppressed vs not -- and the line beneath reconciles the two splits
+     out loud. The counts are the server's, untouched. */
+  const chips = (v.chips || []).map((c) =>
+    `<span class="fp" style="cursor:default"
+       title="From the server's suppression rollup: the suppression axis only">
+       <b>${c.count}</b> ${c.key === "suppressed" ? "suppressed" : "not suppressed"}</span>`).join("");
+  // The bridge between the two splits, computed from the ONE band split so it
+  // cannot disagree with the pills it is explaining.
+  const b = alertBands();
+  const bridge = `The rollup splits open alerts on the suppression axis only.
+    The pills above split the ${b.incidents.length + b.dormant.length} not-suppressed alert(s)
+    further into <b>${b.incidents.length}</b> incident(s) and <b>${b.dormant.length}</b> dormant,
+    which is a different question and a different number under the same word.`;
+
+  const lapsedHtml = lapsed.map((l) => `
+    <div class="rec lapse">
+      <div class="rh"><b>Lapsed: ${esc(l.lapsedBecause)}</b>
+        <span class="prov" style="margin:0">device ${esc(l.deviceId)}${l.ruleId ? ` &#183; ${esc(l.ruleId)}` : ""}</span></div>
+      <div class="why">&#8220;${esc(l.reason)}&#8221;</div>
+      <div class="why"><b>${l.returnedAlertCount}</b> alert(s) came back into the incident list because
+        this record stopped applying. Nobody was told; this line is the telling.</div>
+    </div>`).join("");
+
+  const recHtml = recs.map((rr) => {
+    const label = `${rr.ruleId ? "rule" : "device"}-scoped on ${rr.deviceId}` +
+      (rr.ruleId ? ` (${rr.ruleId})` : "");
+    return `<div class="rec${rr.alertCount === 0 ? " inert" : ""}">
+      <div class="rh"><b>${esc(label)}</b>
+        <span class="prov" style="margin:0">by ${esc(rr.createdBy || "unattributed")} &#183;
+          ${ago(rr.createdAt)}${rr.intent ? ` &#183; intent: ${esc(rr.intent)}` : ""}</span>
+        <span class="rr"><button class="btn sm" data-suprev="${esc(rr.suppressionId)}"
+          data-suplabel="${esc(label)}" data-supwhy="${esc(rr.reason)}">Revoke</button></span></div>
+      <div class="why">&#8220;${esc(rr.reason)}&#8221;</div>
+      <div class="why">${rr.neverExpires
+        ? `<b>Never expires.</b> Only a revoke ends it.`
+        : rr.expiresAt
+          ? `Expires ${esc(String(rr.expiresAt).slice(0, 10))} &#8212; ${until(rr.expiresAt)}.`
+          : `<b>No expiry recorded.</b>`}
+        ${rr.alertCount === 0
+          ? ` <b>Suppressing nothing right now.</b> Either the fault cleared, or this record no
+              longer describes the device it was written for &#8212; and a mute nobody can see the
+              effect of is a mute nobody remembers to remove.`
+          : ` Suppressing <b>${rr.alertCount}</b> open alert(s).`}</div>
+    </div>`;
+  }).join("");
+
+  const nothing = recs.length === 0 && lapsed.length === 0;
+  host.innerHTML =
+    `<div class="pills" style="padding-top:0">${chips}
+       <span class="fp" style="cursor:default"><b>${v.totalOpen}</b> open in total</span>
+       ${held ? `<span class="fp" style="cursor:default"
+         title="Matched a suppression and kept in the incident list anyway"><b>${held}</b> held back</span>` : ""}
+     </div>` +
+    (reconciles ? "" : `<div class="note"><b>The rollup does not add up.</b> ${inc} incident +
+       ${supd} suppressed &#8800; ${v.totalOpen} open. Reported as found rather than reconciled here.</div>`) +
+    `<div class="prov" style="padding:0 16px 8px">${bridge}</div>` +
+    (nothing
+      ? `<div class="prov" style="padding:0 16px 12px">${(v.notes || [])
+           .map((n) => esc(n)).join(" ")}</div>`
+      : `<div style="padding:0 16px 12px">
+           ${lapsedHtml}
+           ${recHtml}
+           ${v.inertRecords
+             ? `<div class="prov"><b>${v.inertRecords}</b> of ${recs.length} record(s) in force are
+                  suppressing nothing (dashed above).</div>`
+             : ""}
+           ${(v.notes || []).length
+             ? `<div class="prov">${(v.notes || []).map((n) => esc(n)).join(" ")}</div>` : ""}
+         </div>`);
+
+  host.querySelectorAll("[data-suprev]").forEach((b) =>
+    b.addEventListener("click", () =>
+      revokeSuppression(b.dataset.suprev, b.dataset.suplabel, b.dataset.supwhy)));
 }
 
 /* ===================================================================
@@ -5128,7 +6150,16 @@ setInterval(() => { if (S.fresh) renderFreshness(); }, 15_000);
 /* ---- wiring ------------------------------------------------------ */
 $("#dx").addEventListener("click", closeDevice);
 $("#scrim").addEventListener("click", closeDevice);
-addEventListener("keydown", (e) => { if (e.key === "Escape") closeDevice(); });
+// Escape closes the TOP layer. The alert work surface sits above the device
+// drawer, so closing the drawer underneath it would leave the surface stranded
+// over an empty page.
+addEventListener("keydown", (e) => {
+  if (e.key !== "Escape") return;
+  if (alertWorkOpen()) closeAlertWork();
+  else closeDevice();
+});
+$("#awx").addEventListener("click", closeAlertWork);
+$("#ascrim").addEventListener("click", closeAlertWork);
 // Both renderers, for the reason the Alerts search states below: the status
 // chips, the header and the rows all count the SEARCHED set, so they have to
 // move in the same tick.
@@ -5180,7 +6211,12 @@ $("#exportbtn").addEventListener("click", () => {
     healthScore: h && { score: h.score, counted: h.dims, excluded: h.excluded },
     fleet: S.summary && S.summary.snapshot,
     sla: S.sla,
-    openAlerts: S.alerts.length,
+    // Named by band, because "openAlerts: 291" over a console that asked for
+    // band=incident is a figure that outlives the tab that qualified it.
+    openAlerts: { incidents: S.alerts.length,
+                  suppressed: Array.isArray(S.alertsSup) ? S.alertsSup.length : null,
+                  suppressedRollup: (S.sup && S.sup.suppressed && S.sup.suppressed.total) ?? null,
+                  totalOpen: (S.sup && S.sup.totalOpen) ?? null },
     compliance: { scored: S.compliance.length, devices: S.devices.length },
     // An exported figure outlives the banner that qualified it, so the
     // shortfall travels with the file. Empty object = every collection complete.
@@ -5207,9 +6243,27 @@ async function load() {
     // NOTE: every entry added below must also be NAMED in this destructuring
     // array, in the same position — a missing name silently shifts every payload
     // after it into the wrong variable.
-    const [summary, alerts, hygiene, devices, compliance, pipeline, sla, slaCap, brief, shots, remediation, correlation, pop, plan, pipeHealth, trends] = await Promise.all([
+    const [summary, alerts, alertsSup, suppressions, hygiene, devices, compliance, pipeline, sla, slaCap, brief, shots, remediation, correlation, pop, plan, pipeHealth, trends] = await Promise.all([
       api("/api/fleet/summary"),
-      apiAll("/api/alerts"),
+      /* THE INCIDENT QUEUE, opted into EXPLICITLY (US-8.2.3).
+         The API still defaults to band=all on purpose: moving the server default
+         would make every suppressed alert vanish from any client that had not
+         been updated, which is a worse failure than a console showing too much.
+         So the opt-in lives here, in the client that knows how to show the other
+         band — and the suppressed count is never merely absent, it is a pill one
+         click away in renderAlertBands(). */
+      apiAll("/api/alerts?band=incident"),
+      /* The suppressed band, fetched as its OWN collection rather than sliced
+         out of a band=all list. Two arrays means each pill counts the rows it
+         renders, and neither side has to reproduce the server's banding rule —
+         the mistake the dormant band's alertIds comment records. Allowed to
+         fail: null then means "could not ask", which the band renders as such
+         rather than as "nothing is suppressed". */
+      apiAll("/api/alerts?band=suppressed").catch(() => null),
+      // The suppression rollup: chips, per-record effect, lapsed and inert
+      // records, and the policy the suppress form enforces instead of inventing
+      // its own minimum reason length. Allowed to fail; the panel says so.
+      api("/api/alerts/suppressions").catch(() => null),
       // Alert hygiene: which alerts are today's incidents vs a dormant band on
       // long-dead canvases. Allowed to fail — the raw list still renders.
       api("/api/alerts/hygiene").catch(() => null),
@@ -5247,15 +6301,16 @@ async function load() {
     // no surface can print a count over a short collection without the mark.
     // Rebuilt wholesale every load: a shortfall that has cleared must not linger.
     S.trunc = {};
-    for (const [key, res] of [["alerts", alerts], ["devices", devices], ["compliance", compliance]]) {
-      if (res && res.truncated) {
-        S.trunc[key] = { loaded: res.loaded, total: res.total, cap: res.cap,
-                         capped: res.capped, pagesFetched: res.pagesFetched,
-                         pagesAvailable: res.pagesAvailable };
-      }
+    for (const [key, res] of [["alerts", alerts], ["alertsSup", alertsSup],
+                              ["devices", devices], ["compliance", compliance]]) {
+      noteShortfall(key, res);
     }
     S.lastLoadAt = Date.now();
     S.alerts = alerts.data;
+    // null, not [] — a failed walk is not an empty band. alertBands() and the
+    // band pill both read the difference.
+    S.alertsSup = alertsSup ? alertsSup.data : null;
+    S.sup = suppressions && suppressions.data;
     S.hyg = hygiene && hygiene.data;
     S.devices = devices.data;
     // The site axis's own provenance. Taken from page 1's envelope, so only the
@@ -5300,13 +6355,25 @@ async function load() {
         ? `Lower bound: ${truncSentence(key).replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim()}`
         : "";
     };
+    // The incident queue, which is what this console now asks for. The
+    // suppressed band is counted separately and is one click away; a badge that
+    // silently added them back would contradict the tab it links to.
     badge("#nb-alerts", S.alerts.length, "alerts");
+    {
+      const nb = $("#nb-alerts");
+      const supN = (S.sup && S.sup.suppressed && S.sup.suppressed.total) || 0;
+      if (supN) {
+        nb.title = (nb.title ? nb.title + " " : "") +
+          `Incident queue only. ${supN} further open alert(s) are in the suppressed band ` +
+          `on the Alerts tab.`;
+      }
+    }
     $("#nb-alerts").classList.toggle("hot", S.alerts.some((a) => a.severity === "critical"));
     badge("#nb-devices", S.devices.length, "devices");
     badge("#nb-comp", S.compliance.length, "compliance");
     renderOverview();
     renderBrief();
-    renderAlertFilters(); renderAlerts(); renderInert();
+    renderAlertFilters(); renderAlerts(); renderInert(); renderSuppressions();
     renderDeviceFilters(); renderDevices();
     renderCompliance(); renderSla();
     renderActions();
