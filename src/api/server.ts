@@ -33,6 +33,7 @@ import { registerRollupRoutes } from "./routes/rollups.js";
 import { registerActionPlanRoutes } from "./routes/action-plan.js";
 import { registerTrendRoutes } from "./routes/trends.js";
 import { registerAuditRoutes } from "./routes/audit.js";
+import { registerReportRoutes } from "./routes/reports.js";
 
 export interface BuildServerOptions {
   pool: Pool;
@@ -165,6 +166,7 @@ export async function buildServer(options: BuildServerOptions): Promise<FastifyI
   await registerActionPlanRoutes(app, ctx);
   await registerTrendRoutes(app, ctx);
   await registerAuditRoutes(app, ctx);
+  await registerReportRoutes(app, ctx);
   await registerHealthRoutes(app, ctx);
 
   return app;
