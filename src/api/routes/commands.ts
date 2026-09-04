@@ -36,6 +36,12 @@ import {
 import { verifyBlackScreenClaim } from "../../intelligence/screen-verify.js";
 import { auditOutcomeForBrightness, resolveActor } from "./audit.js";
 import type { DeviceActionEntry } from "../../db/repository.js";
+import {
+  dedupeDeviceIds, executeBulkApply, planBulkApply,
+  BULK_APPLICABLE_ACTIONS, BULK_CONCURRENCY, BULK_MAX_DEVICES,
+} from "../../videri/bulk-apply.js";
+import { mapSettled } from "../../pipeline/batching.js";
+import { recordedIntentByDevice, type SuppressionRecord } from "../../alerting/suppression.js";
 
 type Risk = "read" | "disruptive" | "unverified";
 
@@ -123,6 +129,28 @@ const BrightnessBody = z.object({
    * arms live control once, then streams values.
    */
   mode: z.enum(["verify", "live"]).default("verify"),
+});
+
+/**
+ * Bulk apply — Epic 8.3. See the route for why the action list has one member.
+ *
+ * `deviceIds` is validated for shape here and for SIZE in the route, so the
+ * over-cap answer can explain the cap instead of reading as a schema violation.
+ */
+const BulkBrightnessBody = z.object({
+  /** Defaulted so the common call is short; still checked against the allowlist. */
+  action: z.string().min(1).max(64).default("set_brightness"),
+  // 1-100. 0 is display-off and is deliberately not reachable via brightness.
+  brightnessPercent: z.coerce.number().int().min(1).max(100),
+  deviceIds: z.array(z.string().min(1).max(100)).min(1),
+  /** Required to apply. Never required to preview — a dry run touches nothing. */
+  confirm: z.boolean().optional(),
+  dryRun: z.boolean().default(false),
+  /**
+   * What the caller believes it is committing to, taken from the dry run a human
+   * just approved. Mismatch = refuse the whole batch. Optional.
+   */
+  expectedAttemptCount: z.coerce.number().int().min(0).optional(),
 });
 
 /**
@@ -802,6 +830,360 @@ export async function registerCommandRoutes(app: FastifyInstance, ctx: ApiContex
         durationMs: Date.now() - startedAt,
       },
       freshness,
+    );
+  });
+
+  /**
+   * BULK brightness apply — one proven action, many devices (Epic 8.3).
+   *
+   * `/api/remediation` returns ~283 recommendations that are really a handful of
+   * actions: the two largest cohorts are 98 and 90 devices. The correct operator
+   * move is one reviewed push; the product offered 98 drawer visits, each firing
+   * its own live device reads.
+   *
+   * Deliberately NOT a generic bulk command proxy. The only verb it will
+   * multiply is the brightness write, because it is the only write we hold with
+   * a preflight → verify → rollback cycle. `reboot_device` (rejected by the
+   * hardware), `power_display` (no documented params contract) and the power
+   * schedule / nightly-reboot drifts that motivated this endpoint are all out of
+   * scope, and the 400 below says so in words rather than failing obscurely —
+   * see videri/bulk-apply.ts for the full reasoning.
+   *
+   * Every device keeps its own cycle, its own outcome and its own audit row.
+   * There is no aggregate verdict: `results` is per device, which is the entire
+   * difference between this and "fire 98 writes and hope".
+   *
+   * Mounted at /api/bulk/... rather than /api/devices/bulk/... so it can never
+   * shadow a device whose id happens to be the literal string "bulk".
+   */
+  app.post("/api/bulk/brightness", async (request, reply) => {
+    const parsed = BulkBrightnessBody.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({
+        error: "bad_request",
+        message: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; "),
+      });
+    }
+    const body = parsed.data;
+
+    // The narrow scope, stated at the API surface. Checked as a string against
+    // the allowlist rather than as a zod enum so the answer to "why can't I bulk
+    // the power schedule?" is this paragraph and not "invalid enum value".
+    if (!(BULK_APPLICABLE_ACTIONS as readonly string[]).includes(body.action)) {
+      return reply.code(400).send({
+        error: "action_not_bulk_applicable",
+        message:
+          `"${body.action}" cannot be applied in bulk. The only bulk-appliable action is ` +
+          `${BULK_APPLICABLE_ACTIONS.join(", ")}, because it is the only write we hold ` +
+          `with a preflight → verify → rollback cycle. reboot_device is accepted by the ` +
+          `gateway and refused by the hardware; power_display has no documented params ` +
+          `contract; and the "Power schedule enabled" / "Nightly reboot enabled" drifts ` +
+          `that make this endpoint worth having have no verified write at all, which is ` +
+          `why remediation already marks them manual. Apply those through the platform.`,
+        bulkAppliableActions: BULK_APPLICABLE_ACTIONS,
+      });
+    }
+
+    const { ids, duplicatesRemoved } = dedupeDeviceIds(body.deviceIds);
+    if (ids.length === 0) {
+      return reply.code(400).send({
+        error: "bad_request",
+        message: "deviceIds contained no usable device id.",
+      });
+    }
+    if (ids.length > BULK_MAX_DEVICES) {
+      return reply.code(400).send({
+        error: "too_many_devices",
+        message:
+          `${ids.length} devices requested; the cap is ${BULK_MAX_DEVICES}. The cap exists ` +
+          `so a dry run stays short enough for a human to actually read before ` +
+          `committing, and so the worst-case batch finishes in a time an operator can ` +
+          `wait out. Split the list and review each batch.`,
+        cap: BULK_MAX_DEVICES,
+        requested: ids.length,
+      });
+    }
+
+    // A dry run touches nothing, so it does NOT need a device client — a
+    // read-only deployment can still show an operator the blast radius. A commit
+    // does, and gets the same 503 as every other write path.
+    if (!body.dryRun && !ctx.videri) {
+      return reply.code(503).send({
+        error: "commands_unavailable",
+        message: "This server has no Videri credentials, so it cannot reach a device.",
+      });
+    }
+
+    const now = new Date();
+    const [devices, suppressions] = await Promise.all([
+      // The SAME projection /api/remediation reads, so the plan can never
+      // disagree with the list the operator selected from — and it carries the
+      // derived presence status `isReachableStatus` is defined against.
+      ctx.queries.remediationDevices(),
+      // Active records only; expiry is judged in the pure planner with `now`.
+      ctx.repo.listSuppressions(),
+    ]);
+    const deviceById = new Map(devices.map((d) => [d.id, d]));
+    const recordedIntent = recordedIntentByDevice(suppressions, now);
+    const suppressionsByDevice = new Map<string, SuppressionRecord[]>();
+    for (const record of suppressions) {
+      const list = suppressionsByDevice.get(record.deviceId);
+      if (list) list.push(record);
+      else suppressionsByDevice.set(record.deviceId, [record]);
+    }
+
+    /**
+     * Addressability, one cheap primary-key lookup per device.
+     *
+     * If ANY of them fails we abandon the whole request rather than proceed.
+     * A database error while building the plan would otherwise be reported as
+     * "this device has no JID" — a hundred fabricated refusals from one failed
+     * query, which is precisely the kind of confident wrong answer this codebase
+     * refuses to give.
+     */
+    const targets = await mapSettled(ids, 8, async (id) => ({
+      id,
+      target: await ctx.repo.commandTarget(id),
+    }));
+    if (targets.failures.length > 0) {
+      return reply.code(503).send({
+        error: "plan_incomplete",
+        message:
+          `Could not read addressability for ${targets.failures.length} of ${ids.length} ` +
+          `device(s), so the blast radius cannot be computed honestly and nothing was ` +
+          `attempted. First error: ${targets.failures[0]!.error.message}`,
+      });
+    }
+    const targetById = new Map(targets.ok.map((t) => [t.id, t.target]));
+
+    const plan = planBulkApply(
+      ids.map((id) => {
+        const device = deviceById.get(id);
+        return {
+          deviceId: id,
+          device: device ? { name: device.name, status: device.status } : null,
+          addressable: Boolean(targetById.get(id)?.deviceJid),
+          recordedIntent: recordedIntent.get(id) ?? null,
+          suppressions: suppressionsByDevice.get(id) ?? [],
+        };
+      }),
+      now,
+    );
+
+    const limits = {
+      maxDevices: BULK_MAX_DEVICES,
+      concurrency: BULK_CONCURRENCY,
+      requiresConfirm: true,
+    };
+
+    /**
+     * DRY RUN — the blast radius, computed and returned, with nothing touched.
+     *
+     * No device command, and deliberately NO audit rows: nothing happened to any
+     * panel, and 100 rows saying so per preview would bury the writes the log
+     * exists to record. This is also how the write path is verified without
+     * firing a write.
+     */
+    if (body.dryRun) {
+      const freshness = await ctx.freshness();
+      return reply.send(
+        envelope(
+          {
+            dryRun: true,
+            action: body.action,
+            brightnessPercent: body.brightnessPercent,
+            requestedRaw: brightnessRawFromPercent(body.brightnessPercent),
+            duplicatesRemoved,
+            plan: plan.items,
+            counts: plan.counts,
+            limits,
+            /** False on a read-only deployment: the preview is real, the commit would 503. */
+            canCommit: ctx.videri != null,
+            note:
+              "Nothing was sent to any device and nothing was logged. Re-send with " +
+              "dryRun:false and confirm:true to apply, optionally passing " +
+              `expectedAttemptCount:${plan.counts.attempt} so the commit is refused if the ` +
+              "fleet has changed since this preview.",
+          },
+          freshness,
+        ),
+      );
+    }
+
+    /**
+     * The confirm handshake, mirroring the single-device write.
+     *
+     * Not audited, and that is a deliberate divergence from the single-device
+     * path (which logs its handshake because it is one row): at batch scale the
+     * same policy writes up to 100 rows recording that nothing happened. The
+     * response carries the counts so the console can show the blast radius on
+     * the confirm screen without a second call.
+     */
+    if (body.confirm !== true) {
+      return reply.code(409).send({
+        error: "confirmation_required",
+        message:
+          `This would write brightness to ${plan.counts.attempt} device(s) and refuse ` +
+          `${plan.counts.refuse}. A bulk write is the most consequential thing this ` +
+          `product does. Re-send with confirm:true, or with dryRun:true to see the ` +
+          `per-device blast radius first.`,
+        counts: plan.counts,
+        limits,
+      });
+    }
+
+    /**
+     * Optional second half of the handshake: the caller states how many devices
+     * it expects to be written to, from the dry run it just showed a human. If
+     * the fleet has moved since — a device came back online, a suppression
+     * lapsed — the commit is refused rather than quietly writing to a set nobody
+     * reviewed. Optional so the plain `confirm:true` handshake still works.
+     */
+    if (
+      body.expectedAttemptCount !== undefined &&
+      body.expectedAttemptCount !== plan.counts.attempt
+    ) {
+      return reply.code(409).send({
+        error: "plan_changed",
+        message:
+          `You confirmed ${body.expectedAttemptCount} device(s) but the plan now attempts ` +
+          `${plan.counts.attempt}. Nothing was sent. Re-run the dry run and confirm again.`,
+        counts: plan.counts,
+      });
+    }
+
+    const batchId = crypto.randomUUID();
+    const actorHeader = request.headers["x-vfi-actor"];
+    // Resolved ONCE for the batch: every row carries the same actor because it
+    // was the same request, and re-deriving it per device could not disagree
+    // without lying about one of them.
+    const actor = resolveActor({
+      actorHeader: Array.isArray(actorHeader) ? actorHeader[0] : actorHeader,
+      authorization: request.headers.authorization,
+      allowAnonymous: ctx.allowAnonymous,
+    });
+    const startedAt = Date.now();
+
+    const batch = await executeBulkApply(plan, body.brightnessPercent, batchId, {
+      concurrency: BULK_CONCURRENCY,
+      // One runner per device, built from the target we already looked up during
+      // planning — no second round trip, and a device that reached this point is
+      // known addressable.
+      runnerFor: (deviceId) => {
+        const target = targetById.get(deviceId)!;
+        return async (arg) => {
+          const r = await ctx.videri!.request<{
+            response_code?: string; message?: string;
+            responses?: Array<{ params?: { response_code?: string } }>;
+          }>("messaging", "/messaging/sync_command", {
+            method: "POST",
+            body: {
+              device_id: target!.deviceId, device_jid: target!.deviceJid,
+              player_id: target!.playerId ?? target!.deviceId,
+              command_name: "demo_command", command_params: { arg },
+              message_id: crypto.randomUUID(),
+            },
+          });
+          const code = r.response_code ?? r.responses?.[0]?.params?.response_code ?? "UNKNOWN";
+          return { code, message: r.message ?? "" };
+        };
+      },
+      /**
+       * One audit row per device, tied to the batch by `detail.batchId`.
+       *
+       * `action` is its own verb (`bulk_brightness_write`) rather than reusing
+       * `brightness_write`, so "what did that bulk push do?" is one query the
+       * existing audit endpoint already supports — `GET /api/audit?action=
+       * bulk_brightness_write&since=…` — and `detail.batchId` says which push.
+       * The trade is that a device's brightness history now spans two `action`
+       * values; the reviewer note calls this out.
+       *
+       * This throws on a failed insert ON PURPOSE: `executeBulkApply` catches it
+       * per device and records `audited: false`, so a broken audit table costs
+       * one honest flag per row and neither stops the batch nor lets a write be
+       * reported as logged when it was not.
+       */
+      record: async (event) => {
+        const failure = (await ctx.repo.recordDeviceAction({
+          action: "bulk_brightness_write",
+          verb: "set_brightness",
+          deviceId: event.deviceId,
+          outcome: event.outcome,
+          requestedValue: `${event.requestedPercent}%`,
+          // Honest null: unread stays null and never becomes 0, which on this
+          // scale is a display-off panel.
+          observedValue:
+            event.result && event.result.observedRaw !== null
+              ? `${brightnessPercentFromRaw(event.result.observedRaw)}%`
+              : null,
+          params:
+            event.refusedBecause === null
+              ? { arg: `set_brightness:=${event.result?.requestedRaw ?? ""}` }
+              : {},
+          detail: {
+            bulk: true,
+            batchId: event.batchId,
+            batchSize: event.batchSize,
+            mode: "verify",
+            refusedBecause: event.refusedBecause,
+            state: event.result?.state ?? null,
+            requestedRaw: event.result?.requestedRaw ?? null,
+            originalRaw: event.result?.originalRaw ?? null,
+            observedRaw: event.result?.observedRaw ?? null,
+            applied: event.result?.applied ?? false,
+            message: event.explanation,
+          },
+          actor,
+          actorIp: request.ip ?? null,
+          startedAt: event.startedAt,
+          durationMs: event.durationMs,
+          // `verified` and `no_change` are the only non-error outcomes; a
+          // refusal carries its reason here so the row explains itself.
+          error:
+            event.outcome === "verified" || event.outcome === "no_change"
+              ? null
+              : event.explanation,
+        })).error;
+        if (failure) {
+          request.log.error(
+            { auditError: failure, batchId: event.batchId, deviceId: event.deviceId, outcome: event.outcome },
+            "bulk audit row failed — the device outcome itself was unaffected",
+          );
+          throw new Error(failure);
+        }
+      },
+    });
+
+    if (batch.needsAttention.length > 0) {
+      request.log.error(
+        { batchId, devices: batch.needsAttention },
+        "bulk brightness: rollback could not be confirmed — these panels need a direct check",
+      );
+    }
+
+    const freshness = await ctx.freshness();
+    /**
+     * 200 for a batch that RAN, whatever the devices said.
+     *
+     * There is no aggregate verdict to encode in the status line — that is the
+     * point of the endpoint. A single 502 because one of 98 panels timed out
+     * would be exactly the "aggregate verdict" this design refuses to produce.
+     * The outcome of each device is in its own record, and `counts.byOutcome`
+     * keeps `refused` and `failed` apart.
+     */
+    return reply.send(
+      envelope(
+        {
+          dryRun: false,
+          action: body.action,
+          duplicatesRemoved,
+          ...batch,
+          refused: plan.items.filter((i) => i.decision === "refuse"),
+          limits,
+          durationMs: Date.now() - startedAt,
+        },
+        freshness,
+      ),
     );
   });
 }
