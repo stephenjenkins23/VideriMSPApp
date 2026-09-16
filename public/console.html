@@ -638,6 +638,7 @@ table.dt td .prov{display:block;margin-top:2px;white-space:normal;max-width:34ch
   <button aria-selected="false" data-v="actions">&#128736;&#65039; Actions <span class="nb" id="nb-actions">0</span></button>
   <button aria-selected="false" data-v="devices">&#128421; Devices <span class="nb" id="nb-devices">0</span></button>
   <button aria-selected="false" data-v="compliance">&#128737; Compliance <span class="nb" id="nb-comp">0</span></button>
+  <button aria-selected="false" data-v="audit">&#128220; Audit</button>
   <button aria-selected="false" data-v="brief">&#10024; AI Brief</button>
   <button aria-selected="false" data-v="insights">&#128200; Insights</button>
   <button aria-selected="false" data-v="trends">&#8599;&#65039; Trends</button>
@@ -798,6 +799,32 @@ table.dt td .prov{display:block;margin-top:2px;white-space:normal;max-width:34ch
         <div class="r"><span class="prov" id="compsub"></span></div></div>
       <div id="comptable"></div>
       <div id="ctrunc"></div>
+    </div>
+  </section>
+
+  <!-- ============ AUDIT (what WE changed) ============ -->
+  <section id="v-audit" class="hide">
+    <div class="card">
+      <div class="chd">
+        <h2>&#128220; Device action log <span class="cnt" id="audcount">?</span></h2>
+        <div class="r"><span class="prov" id="audsub"></span>
+          <button class="btn" id="audreload">&#8635; Refresh</button></div>
+      </div>
+      <div class="tbar" id="audctl"></div>
+      <div class="pills" id="audfp"></div>
+      <!-- WHY the outcome pills carry no numbers. Static markup, like the
+           truncation banner: it is the sentence that keeps the header count
+           honest, and a re-render must never be able to drop it. -->
+      <div class="prov" style="padding:0 16px 10px">The pills above are
+        server-side filters and deliberately carry no counts. This endpoint
+        filters and pages in the database, so a per-outcome tally taken from the
+        rows on screen would be a count of ONE PAGE wearing the clothes of a
+        count of the log. The number beside the heading counts the rows in the
+        table below it, and nothing else.</div>
+      <div id="audlist"><div class="skel"><span class="sk row"></span><span class="sk row"></span>
+        <span class="sk row"></span></div></div>
+      <div id="audpager"></div>
+      <div id="audnote"></div>
     </div>
   </section>
 
@@ -1148,6 +1175,16 @@ const S = { summary: null, alerts: [], devices: [], compliance: [], pipeline: nu
             /* The open work surface: { id, alert, busy, err }. `alert` carries
                the detail payload including its append-only `events`. */
             awork: null,
+            /* Epic 8.7 read half — the audit log of OUR OWN writes.
+               `audit` is one PAGE of /api/audit (the endpoint filters and pages
+               server-side), `audPage` its `meta.page`, `audAt` when we read it.
+               `audit: null` with `audErr` set means the log could not be READ,
+               which is never rendered as "nothing was changed". `aud` holds the
+               filters, and they are query parameters rather than a client-side
+               pass over the rows on screen: filtering here means refetching, so
+               the header count and the rows can only ever be one page. */
+            audit: null, audPage: null, audErr: null, audLoading: false, audAt: 0,
+            aud: { page: 1, outcome: "all", action: "all", actor: null, deviceId: null },
             /* Who is claiming. `acknowledge` requires `by` and there is no user
                model behind the shared token, so this is a self-declared name,
                remembered locally and recorded as the claim it is — never
@@ -1170,6 +1207,7 @@ const PAGES = {
   brief:      ["AI Fleet Brief", "Generated from the live fleet, with its own coverage gaps declared"],
   insights:   ["Analytics & Insights", "Derived from the live fleet; impossible modules stay visible"],
   sla:        ["SLA Measurement", "What can honestly be claimed, and what cannot be measured"],
+  audit:      ["Device Action Log", "Every write VFI attempted on this estate — what changed, who asked, and how it ended"],
   trends:     ["Change Over Time", "Measured against the time we actually observed — with a stated refusal where we did not observe enough"],
 };
 
@@ -3468,7 +3506,8 @@ function renderDevices() {
    DEVICE DRAWER -- one click from any alert or row
    =================================================================== */
 const DTABS = [["overview", "&#128203; Overview"], ["network", "&#128246; Network"],
-               ["display", "&#128421; Display"], ["compliance", "&#128737; Compliance"]];
+               ["display", "&#128421; Display"], ["compliance", "&#128737; Compliance"],
+               ["audit", "&#128220; Audit"]];
 
 async function openDevice(id) {
   $("#scrim").classList.add("on");
@@ -3778,6 +3817,13 @@ function paintDevice() {
   // timeouts to learn what presence already told us).
   if (isOnline && S.dev._telemetry === undefined && !S.dev._telLoading) loadTelemetry(d.id);
 
+  // The device's own slice of the action log, read LAZILY for the same reason:
+  // it is a query nothing else in the drawer needs, and most drawer opens never
+  // leave Overview. A failed read is kept as a failure, not as an empty list.
+  if (S.dtab === "audit" && S.dev._audit === undefined && !S.dev._auditLoading) {
+    loadDeviceAudit(d.id);
+  }
+
   // Network detail is read LAZILY — only when the Network subtab is actually being
   // viewed. It costs three more device commands, so paying that on every drawer
   // open (when most people never leave Overview) would be waste.
@@ -3817,11 +3863,15 @@ function paintDevice() {
     b.addEventListener("click", () => { S.dtab = b.dataset.t; paintDevice(); }));
 
   $("#dbody").innerHTML =
-    ({ overview: tabOverview, network: tabNetwork, display: tabDisplay, compliance: tabCompliance })[S.dtab](d);
+    ({ overview: tabOverview, network: tabNetwork, display: tabDisplay,
+       compliance: tabCompliance, audit: tabAudit })[S.dtab](d);
   wireSliders();
   // The "Capture fresh" button lives in the overview's screen-evidence block.
   const cap = $("#shotcap");
   if (cap) { cap.addEventListener("click", captureFresh); applyCaptureCooldown(); }
+  // The audit subtab's handover to the fleet log, filtered to this device.
+  const audAll = $("#audall");
+  if (audAll) audAll.addEventListener("click", () => auditForDevice(d.id));
 }
 
 /**
@@ -5642,6 +5692,469 @@ function renderTrends() {
 }
 
 /* ===================================================================
+   AUDIT -- what VFI changed on this estate, and who asked for it.
+
+   `device_action_log` and GET /api/audit were built BEFORE the bulk write
+   surface on purpose, and then nothing read them: a technician could push
+   brightness across a customer's estate and had no screen to see it on
+   afterwards. This is that screen. Read-only, always.
+
+   Two properties of the endpoint shape everything below.
+
+   It FILTERS AND PAGES IN THE DATABASE. So the only count taken from the
+   rows is a count of the rows on screen, said in those words and next to
+   the server's own totalItems for the match -- and the filter pills carry
+   no number at all, because a per-outcome tally over fifty rows would be a
+   count of one page dressed as a count of the log. Every page states that
+   it is a page.
+
+   And its NULLS ARE LOAD-BEARING. `requested_value` / `observed_value` are
+   NULL for "not applicable, or could not be read" and never 0 -- an
+   unreadable read-back is the entire reason the rollback cycle exists, and
+   on a brightness scale 0 is a dark panel. So every empty value here
+   renders as the REASON it is empty, and an em-dash is never used for one:
+   a dash reads as "nothing happened".
+   =================================================================== */
+
+/** The endpoint's own default page size; it clamps `limit` at 200. */
+const AUD_LIMIT = 50;
+
+/**
+ * The closed outcome vocabulary (migration 009's CHECK, in its order) and what
+ * each word MEANS, in the migration's own terms.
+ *
+ * The meanings are shown, not assumed: `refused` is "we declined and the panel
+ * was never touched" and `failed` is "we wrote and the device said no", and a
+ * reader who cannot tell those two apart cannot use this log at all.
+ */
+const AUD_OUTCOMES = [
+  ["verified", "grn", "Written, and confirmed by reading the value back."],
+  ["applied", "blu", "The device accepted the write. No rollback-guarded read-back was taken, so this is accepted but UNCONFIRMED."],
+  ["no_change", "gry", "Already at the requested value — nothing was written."],
+  ["rolled_back", "amb", "Did not verify; the original value was restored."],
+  ["rollback_failed", "red", "Did not verify AND the restore could not be confirmed. The one outcome that needs a human."],
+  ["refused", "gry", "WE declined to act (no confirmation, unreadable preflight, unaddressable device, command not allowed). The device was never touched."],
+  ["failed", "red", "Attempted and failed — the device rejected it, or the transport did."],
+];
+
+/** "Everything that failed", which the log has an index for. `refused` is
+ *  deliberately NOT in it: a refusal means the panel was never touched, so
+ *  folding it in would inflate "what went wrong on the estate". */
+const AUD_ATTENTION = ["failed", "rollback_failed", "rolled_back"];
+
+/** The action names this build writes (src/api/routes/commands.ts). The filter
+ *  is a server-side exact match, so this is a convenience list over a vocabulary
+ *  we know -- NOT a closed set. "All actions" is the default, so a row written
+ *  by some future writer still shows up rather than being filtered out of
+ *  existence by a list that had not heard of it. */
+const AUD_ACTIONS = [
+  ["all", "All actions"],
+  ["brightness_write", "Brightness write (single, verified)"],
+  ["bulk_brightness_write", "Brightness write (bulk push)"],
+  ["device_command", "Device command"],
+];
+
+/** The query string for one audit read. Takes an override WITHOUT mutating the
+ *  filters, so the device drawer can ask about one device while the fleet view
+ *  keeps whatever the operator had set. */
+function auditQuery(over) {
+  const f = Object.assign({}, S.aud, over || {});
+  const p = ["page=" + Math.max(1, Number(f.page) || 1), "limit=" + AUD_LIMIT];
+  // The endpoint takes outcomes comma-separated and validates them against the
+  // closed vocabulary, so "everything that failed" is one request.
+  if (f.outcome === "attention") p.push("outcome=" + AUD_ATTENTION.join(","));
+  else if (f.outcome && f.outcome !== "all") p.push("outcome=" + encodeURIComponent(f.outcome));
+  if (f.action && f.action !== "all") p.push("action=" + encodeURIComponent(f.action));
+  if (f.actor) p.push("actor=" + encodeURIComponent(f.actor));
+  if (f.deviceId) p.push("deviceId=" + encodeURIComponent(f.deviceId));
+  return p.join("&");
+}
+
+/**
+ * Read one page of the log.
+ *
+ * Filtering refetches rather than slicing what is on screen: the rows here are
+ * one page of a server-side match, so a client-side filter would narrow a page
+ * and then count it as if it were the log.
+ */
+async function loadAudit(over) {
+  if (over) Object.assign(S.aud, over);
+  S.audLoading = true;
+  renderAudit();
+  try {
+    const res = await api("/api/audit?" + auditQuery());
+    S.audit = res.data;
+    S.audPage = (res.meta && res.meta.page) || null;
+    S.audAt = Date.now();
+    S.audErr = null;
+  } catch (e) {
+    // null, never []. "We could not read the log" and "the log is empty" are
+    // different facts, and rendering the first as the second would tell a
+    // technician that nothing was done to an estate we simply failed to ask
+    // about. renderAudit() prints "?" for the count, not 0.
+    S.audit = null;
+    S.audPage = null;
+    S.audErr = e.message;
+  }
+  S.audLoading = false;
+  renderAudit();
+}
+
+/** An outcome's dot and its meaning. An outcome this console has never heard of
+ *  is shown as itself: the column is CHECK-constrained server-side, so it can
+ *  only mean the vocabulary grew, and styling it as a normal success would be
+ *  the one wrong guess available. */
+function auditOutcome(key) {
+  const found = AUD_OUTCOMES.find((o) => o[0] === key);
+  if (found) return { key: found[0], dot: found[1], why: found[2] };
+  return {
+    key: key || "outcome not recorded",
+    dot: "gry",
+    why: "An outcome this console does not know, shown exactly as the log holds it.",
+  };
+}
+
+/**
+ * WHY a value column is empty, in the log's own terms.
+ *
+ * Never "0" and never a bare dash: 0% brightness is a dark panel, and an
+ * em-dash in this column reads as "nothing happened" when the truth is "we
+ * could not read it" -- which is the finding, not the absence of one.
+ */
+function auditWhyNoValue(row, which) {
+  if (which === "requested") {
+    return row.action === "device_command"
+      ? "No value requested — this verb carries no argument."
+      : "No requested value recorded on this row.";
+  }
+  if (row.outcome === "refused") {
+    return "Never read back — we declined to write, so the device was not touched.";
+  }
+  if (row.outcome === "applied") {
+    return "Accepted but unconfirmed — no read-back was taken.";
+  }
+  if (row.outcome === "failed") {
+    return "Not read back — the write did not succeed.";
+  }
+  return "Could not be read back from the device.";
+}
+
+/**
+ * The value the device was AT before we wrote, when the row carries one.
+ *
+ * `detail.originalRaw` is the device's own 0-255 brightness scale, and it is
+ * reported in that scale rather than converted: the percent conversion lives
+ * server-side (`brightnessPercentFromRaw`) and a second copy of it here would be
+ * a second answer to "what was it before". A row that has the key but holds null
+ * is the preflight finding itself, so it says so.
+ */
+function auditFromValue(row) {
+  const d = row.detail || {};
+  if (!("originalRaw" in d)) {
+    return `<span class="unres">prior value not recorded for this action</span>`;
+  }
+  if (d.originalRaw == null) {
+    return `<span class="unres">original value could not be read — which is why this row exists</span>`;
+  }
+  return `<span title="The device's own 0-255 brightness scale, exactly as the log stores it.">raw ${esc(d.originalRaw)}/255</span>`;
+}
+
+/**
+ * One table of audit rows.
+ *
+ * Shared by the fleet view and the device drawer so the two surfaces cannot
+ * describe the same row differently. `opts.device` adds the device column (the
+ * drawer already knows which device it is) and `opts.actorFilter` the per-actor
+ * filter button, which only the fleet view can act on.
+ */
+function auditTable(rows, opts) {
+  const o = opts || {};
+  return `<div class="tblwrap"><table class="dt"><thead><tr>
+      <th>When</th>${o.device ? "<th>Device</th>" : ""}<th>Action</th>
+      <th>Value: from &#8594; requested</th><th>Actor</th><th>Outcome</th>
+    </tr></thead><tbody>` +
+    rows.map((r) => {
+      const out = auditOutcome(r.outcome);
+      const req = r.requestedValue != null
+        ? `<b>${esc(r.requestedValue)}</b>`
+        : `<span class="unres">${esc(auditWhyNoValue(r, "requested"))}</span>`;
+      const obs = r.observedValue != null
+        ? `<b>${esc(r.observedValue)}</b>`
+        : `<span class="unres">${esc(auditWhyNoValue(r, "observed"))}</span>`;
+      /* A null deviceName is not a blank we forgot to fill in: the table has no
+         foreign key on purpose, so an audit row outlives the device it
+         describes. The id still stands, and only a device that RESOLVED gets a
+         button to open -- offering one for an id that no longer exists would
+         promise a drawer that cannot open. */
+      const dev = r.deviceName
+        ? `<button class="btn sm" data-auddev="${esc(r.deviceId)}">${esc(r.deviceName)}</button>
+           <div class="prov">${esc(r.deviceId)}</div>`
+        : `<b>${esc(r.deviceId)}</b>
+           <div class="unres">Name not held — an audit row outlives the device record
+             by design, so this id may no longer resolve.</div>`;
+      const batch = r.detail && r.detail.bulk
+        ? `<div class="prov">bulk push ${esc(String(r.detail.batchId || "id unrecorded"))} ·
+             ${r.detail.batchSize == null
+               ? `<span class="unres">batch size unrecorded</span>`
+               : esc(r.detail.batchSize + " device(s)")}</div>`
+        : "";
+      // `detail.reason` is why WE refused; it is the whole content of a refusal
+      // row and there is no `error` prose on most of them.
+      const reason = r.detail && r.detail.reason
+        ? `<div class="prov">reason: ${esc(String(r.detail.reason))}</div>`
+        : "";
+      return `<tr>
+        <td class="n">${ago(r.startedAt)}
+          <div class="prov">${esc(String(r.startedAt).replace("T", " ").slice(0, 19))} UTC ·
+            ${r.durationMs == null
+              ? `<span class="unres">duration not recorded</span>`
+              : esc("took " + r.durationMs + " ms")}</div></td>
+        ${o.device ? `<td>${dev}</td>` : ""}
+        <td>${esc(r.action)}${batch}
+          <div class="prov">${r.verb
+            ? "on the wire: " + esc(r.verb)
+            : `<span class="unres">nothing went on the wire for this row</span>`}</div></td>
+        <td>${auditFromValue(r)} &#8594; ${req}
+          <div class="prov">read back: ${obs}</div></td>
+        <td>${esc(r.actor)}${o.actorFilter
+            ? ` <button class="btn sm" data-audactor="${esc(r.actor)}"
+                  title="Show only this actor">only</button>` : ""}
+          <div class="prov">${r.actorIp
+            ? esc(r.actorIp)
+            : `<span class="unres">no caller address recorded</span>`}</div></td>
+        <td><span class="d ${out.dot}"></span> ${esc(out.key)}
+          <div class="prov">${esc(out.why)}</div>${reason}
+          ${r.error ? `<div class="prov">${esc(r.error)}</div>` : ""}</td>
+      </tr>`;
+    }).join("") + `</tbody></table></div>`;
+}
+
+/** The filter controls. Rebuilt on every render, so the handlers are attached to
+ *  the elements that are now on screen (the pattern renderAlertFilters() uses).
+ *  Every control REFETCHES: these are query parameters, not a client-side pass. */
+function renderAuditFilters() {
+  const ctl = $("#audctl");
+  if (ctl) {
+    ctl.innerHTML =
+      `<label for="audaction">Action</label><select id="audaction">` +
+      AUD_ACTIONS.map(([k, label]) =>
+        `<option value="${esc(k)}"${k === S.aud.action ? " selected" : ""}>${esc(label)}</option>`).join("") +
+      `</select>` +
+      (S.aud.deviceId
+        ? `<button class="fp" id="auddevclr">&#10005; device ${esc(S.aud.deviceId)}</button>` : "") +
+      (S.aud.actor
+        ? `<button class="fp" id="audactorclr">&#10005; actor ${esc(S.aud.actor)}</button>` : "");
+    const sel = $("#audaction");
+    if (sel) sel.addEventListener("change", () => loadAudit({ action: sel.value, page: 1 }));
+    const dc = $("#auddevclr");
+    if (dc) dc.addEventListener("click", () => loadAudit({ deviceId: null, page: 1 }));
+    const ac = $("#audactorclr");
+    if (ac) ac.addEventListener("click", () => loadAudit({ actor: null, page: 1 }));
+  }
+  const fp = $("#audfp");
+  if (!fp) return;
+  // No counts on these, and the reason is stated in the markup beneath them.
+  const pills = [["all", "All outcomes"], ["attention", "Needs attention"]]
+    .concat(AUD_OUTCOMES.map((x) => [x[0], x[0]]));
+  fp.innerHTML = pills.map(([k, label]) => {
+    const why = k === "all"
+      ? "Every outcome the log holds."
+      : k === "attention"
+        ? `${AUD_ATTENTION.join(", ")} — the writes that did not end where they were asked to. A refusal is excluded: there, the device was never touched.`
+        : auditOutcome(k).why;
+    return `<button class="fp" data-audout="${esc(k)}"
+      aria-pressed="${String(S.aud.outcome === k)}" title="${esc(why)}">${esc(label)}</button>`;
+  }).join("");
+  fp.querySelectorAll("[data-audout]").forEach((b) =>
+    b.addEventListener("click", () => loadAudit({ outcome: b.dataset.audout, page: 1 })));
+}
+
+function renderAudit() {
+  const host = $("#audlist");
+  if (!host) return;
+  const count = $("#audcount");
+  const sub = $("#audsub");
+  const pager = $("#audpager");
+  const note = $("#audnote");
+  renderAuditFilters();
+
+  if (S.audLoading) {
+    count.textContent = "…";
+    count.title = "Reading the action log…";
+    sub.textContent = "Reading the action log…";
+    host.innerHTML = `<div class="skel"><span class="sk row"></span><span class="sk row"></span>
+      <span class="sk row"></span></div>`;
+    pager.innerHTML = ""; note.innerHTML = "";
+    return;
+  }
+  if (!S.audit) {
+    /* "?" and not 0. A zero here would be a claim about the estate -- that
+       nothing was ever done to it -- made on the strength of a failed request. */
+    count.textContent = "?";
+    count.title = "The action log could not be read, so there is no count. This is not zero.";
+    sub.textContent = "unread";
+    host.innerHTML = `<div class="note"><b>The action log could not be read.</b>
+      ${esc(S.audErr || "The request failed and gave no reason.")}
+      So this console cannot say what VFI changed on this estate — which is
+      <b>not</b> the same as saying nothing was changed. Nothing below this line is
+      a statement about the fleet.</div>`;
+    pager.innerHTML = ""; note.innerHTML = "";
+    return;
+  }
+
+  const v = S.audit;
+  const rows = Array.isArray(v.actions) ? v.actions : [];
+  const pg = S.audPage;
+  /* THE ONE COUNT TAKEN FROM THE ROWS, and it is taken from the very array the
+     table below is built from -- the invariant this file has broken three
+     times. Everything else on this screen is the server's own totalItems for
+     the match, and #audsub says which is which in words. */
+  count.textContent = String(rows.length);
+  count.title = "Rows in the table below. The log is paged server-side; see the line beneath the table.";
+
+  const named = [];
+  if (S.aud.deviceId) named.push("device " + S.aud.deviceId);
+  if (S.aud.outcome === "attention") named.push("outcome in " + AUD_ATTENTION.join(", "));
+  else if (S.aud.outcome !== "all") named.push("outcome " + S.aud.outcome);
+  if (S.aud.action !== "all") named.push("action " + S.aud.action);
+  if (S.aud.actor) named.push("actor " + S.aud.actor);
+  const where = named.length ? named.join(" · ") : "no filter applied";
+  const first = pg ? (pg.page - 1) * pg.limit + 1 : 1;
+  sub.textContent = (rows.length === 0
+    ? "0 rows on this page"
+    : `rows ${first}–${first + rows.length - 1} of ${pg ? pg.totalItems : rows.length} matching` +
+      (pg ? ` · page ${pg.page} of ${pg.totalPages}` : "")) + ` · ${where}`;
+
+  host.innerHTML = rows.length === 0
+    /* WHICH empty this is, in the server's own words: "nothing has ever been
+       logged" and "your filter matched nothing" are different facts, and the
+       endpoint distinguishes them so this view does not have to guess. */
+    ? `<div class="note na"><b>No rows.</b>
+        ${esc(v.emptyReason || "The log returned no rows and gave no reason, which is itself worth reporting.")}</div>`
+    : auditTable(rows, { device: true, actorFilter: true });
+
+  host.querySelectorAll("[data-auddev]").forEach((b) =>
+    b.addEventListener("click", () => openDevice(b.dataset.auddev)));
+  host.querySelectorAll("[data-audactor]").forEach((b) =>
+    b.addEventListener("click", () => loadAudit({ actor: b.dataset.audactor, page: 1 })));
+
+  /* Say that this is a page. A truncated list that looks complete is the bug
+     class this console already has a banner for; here the shortfall is not a
+     failure but the endpoint's normal shape, so it is stated on every page. */
+  pager.innerHTML = !pg
+    ? `<div class="pg"><span>The response carried no page meta, so this console
+         <b>cannot say</b> whether more rows exist. Treat this list as possibly
+         partial rather than complete.</span></div>`
+    // Nothing matched at all: the empty note above already says which empty
+    // this is, and "page 1 of 1" underneath it is noise. A page PAST THE END of
+    // a non-empty match keeps its controls, because the reader needs the way
+    // back to the rows that do exist.
+    : rows.length === 0 && pg.totalItems === 0
+      ? ""
+      : `<div class="pg"><span>Showing <b>${rows.length}</b> of <b>${pg.totalItems}</b> matching
+         action(s), newest first — page ${pg.page} of ${pg.totalPages}, ${pg.limit} rows a page.
+         ${pg.totalPages > 1
+           ? "<b>This page is not the whole match</b>; page through it or narrow the filters."
+           : "This page is the whole match."}</span>
+       <button class="btn sm" id="audprev"${pg.page <= 1 ? " disabled" : ""}>&#8592; Newer</button>
+       <button class="btn sm" id="audnext"${pg.page >= pg.totalPages ? " disabled" : ""}>Older &#8594;</button>
+       </div>`;
+  const prev = $("#audprev");
+  if (prev) prev.addEventListener("click", () => loadAudit({ page: Math.max(1, S.aud.page - 1) }));
+  const next = $("#audnext");
+  if (next) next.addEventListener("click", () => loadAudit({ page: S.aud.page + 1 }));
+
+  const ret = v.retention || null;
+  note.innerHTML =
+    `<div class="note na"><b>What this log is.</b> One row per action VFI
+       <b>attempted</b> on a device — append-only, written whatever the outcome,
+       including the writes we refused to make and the ones we rolled back. It is
+       not the platform's history and nothing in it is inferred or backfilled, so a
+       device with no rows has had nothing done to it <b>by us</b>.
+     <div class="prov">${v.newestActionAt
+        ? `The matched rows run from ${esc(String(v.oldestActionAt).slice(0, 10))} to
+           ${esc(String(v.newestActionAt).slice(0, 10))}; the newest is ${ago(v.newestActionAt)}.`
+        : `<span class="unres">No matched row, so there is no span to report.</span>`}
+       Read from the log ${ago(new Date(S.audAt || Date.now()).toISOString())} — this view
+       is a direct read, not the poll snapshot the rest of this console carries, so the
+       freshness pill in the header does not describe it.</div>
+     <div class="prov">${ret
+        ? `Retention: bounded at ${esc(ret.retainDays)} days as a ceiling. ` + (ret.enforced
+            ? `Pruning is active, so an action older than that may have been deleted.`
+            : `Pruning is not wired up, so nothing has aged out: the absence of a row
+               means the action was not logged, not that it expired.`)
+        : `<span class="unres">The response carried no retention statement, so this console
+             cannot say whether old rows are deleted.</span>`}</div></div>`;
+}
+
+/**
+ * Read the open device's own slice of the log. Lazy, like the Network subtab:
+ * it is a database read nothing else on the page needs, so it is paid for when
+ * somebody actually looks.
+ */
+async function loadDeviceAudit(id) {
+  if (!S.dev || S.dev.id !== id) return;
+  S.dev._auditLoading = true;
+  // A FAILURE IS RECORDED AS ONE. The `{}` fallback the telemetry loaders use
+  // would render here as "nothing was ever done to this device", which is the
+  // single wrong answer an audit view must never give.
+  const res = await api("/api/audit?" + auditQuery({ deviceId: id, page: 1 }))
+    .then((r) => ({ data: r.data, page: (r.meta && r.meta.page) || null, error: null }))
+    .catch((e) => ({ data: null, page: null, error: e.message }));
+  if (!S.dev || S.dev.id !== id) return;          // drawer changed underneath us
+  S.dev._audit = res;
+  S.dev._auditLoading = false;
+  if (S.dtab === "audit") paintDevice();
+}
+
+/**
+ * Hand the fleet log this one device and go there.
+ *
+ * Clears the other filters on the way in, for the reason drillToDevices() does:
+ * a view whose heading says "this device" must not still be silently narrowed to
+ * one outcome.
+ */
+function auditForDevice(id) {
+  Object.assign(S.aud, { deviceId: id, outcome: "all", action: "all", actor: null, page: 1 });
+  switchTab("audit");
+  // switchTab() may have triggered the tab's first load already -- with these
+  // filters, because they were set above. Only ask again if it did not.
+  if (!S.audLoading) loadAudit();
+}
+
+/** The drawer's audit tab: what VFI did to THIS device, newest first. */
+function tabAudit(d) {
+  const a = S.dev._audit;
+  if (S.dev._auditLoading || a === undefined) {
+    return `<div class="grp"><p class="glb">Reading this device's action log…</p></div>`;
+  }
+  if (a.error || !a.data) {
+    return `<div class="note"><b>This device's action log could not be read.</b>
+      ${esc(a.error || "The request failed and gave no reason.")} So this drawer cannot say
+      what VFI has done to ${esc(d.name || d.id)} — which is not the same as saying
+      nothing was done.</div>`;
+  }
+  const rows = Array.isArray(a.data.actions) ? a.data.actions : [];
+  const pg = a.page;
+  const total = pg ? pg.totalItems : rows.length;
+  return `<div class="grp">
+      <p class="glb">What VFI changed on this device (${rows.length} shown)</p>
+      ${rows.length === 0
+        ? `<div class="note na"><b>No rows for this device.</b>
+            ${esc(a.data.emptyReason || "The log returned no rows and gave no reason.")}</div>`
+        : auditTable(rows, { device: false, actorFilter: false }) +
+          `<div class="pg"><span>${rows.length} of ${total} logged action(s) for this device,
+             newest first${pg && pg.totalPages > 1
+               ? ` — <b>page 1 of ${pg.totalPages}</b>, so this is not the whole history`
+               : ""}.</span>
+             <button class="btn sm" id="audall">Open the full log for this device</button></div>`}
+      ${rows.length === 0
+        ? `<div class="pg"><button class="btn sm" id="audall">Open the full log for this device</button></div>`
+        : ""}
+    </div>`;
+}
+
+/* ===================================================================
    COMMAND PALETTE — the "one click to anything" promise made literal.
    ⌘K (or /) then type: any device by name, id, serial or city; any tab;
    refresh. No index to maintain: it searches the state already loaded.
@@ -6036,6 +6549,7 @@ function palIndex() {
     { kind: "view", name: "Alerts", act: () => switchTab("alerts") },
     { kind: "view", name: "Devices", act: () => switchTab("devices") },
     { kind: "view", name: "Insights", act: () => switchTab("insights") },
+    { kind: "view", name: "Audit — what VFI changed", act: () => switchTab("audit") },
     { kind: "action", name: "Refresh data", act: () => load() },
   ];
   const devices = S.devices.map((d) => ({
@@ -6185,7 +6699,7 @@ $("#aq").addEventListener("input", (e) => {
 });
 $("#reload").addEventListener("click", () => load());
 
-const VIEWS_ALL = ["overview", "alerts", "actions", "devices", "compliance", "brief", "insights", "sla", "trends"];
+const VIEWS_ALL = ["overview", "alerts", "actions", "devices", "compliance", "brief", "insights", "sla", "trends", "audit"];
 document.querySelectorAll("#nav button").forEach((b) => b.addEventListener("click", () => {
   document.querySelectorAll("#nav button").forEach((x) =>
     x.setAttribute("aria-selected", String(x === b)));
@@ -6198,7 +6712,13 @@ document.querySelectorAll("#nav button").forEach((b) => b.addEventListener("clic
   $("#phead").textContent = h;
   $("#psub").textContent = s;
   window.scrollTo({ top: 0, behavior: "instant" });
+  /* The action log is fetched when its tab is OPENED, not by load(): it is a
+     paged read of an append-only table that no other surface consumes, and the
+     two-minute refresh has no business walking it. The Refresh button and every
+     filter change re-read it. */
+  if (v === "audit" && !S.audit && !S.audLoading) loadAudit();
 }));
+$("#audreload").addEventListener("click", () => loadAudit({ page: 1 }));
 
 document.querySelectorAll("[data-goto]").forEach((b) =>
   b.addEventListener("click", () => switchTab(b.dataset.goto)));
