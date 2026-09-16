@@ -1,5 +1,4 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
-import type { Pool } from "pg";
 import { z } from "zod";
 import { envelope } from "../freshness.js";
 import {
@@ -70,38 +69,6 @@ const Query = z.object({
   /** Bucket size for the collector-coverage check. Same bounds as /api/trends/churn. */
   bucketSeconds: z.coerce.number().int().min(60).max(3600).default(300),
 });
-
-/**
- * Distinct buckets in which ANY device reported, inside the window between the
- * two reads — the bucket STARTS, not their count, because the gate needs the
- * shape of the blind runs and not only their total size.
- *
- * This is a verbatim sibling of `observedBucketStarts` in
- * `src/api/routes/trends.ts`, and the duplication is a known debt rather than a
- * choice: both belong in `ReadQueries` next to `availabilityBuckets`, and
- * neither that file nor trends.ts is this change's to edit. The two copies MUST
- * stay identical — a different definition of "observed" here would let the same
- * window clear the gate on one endpoint and fail it on the other.
- */
-async function observedBucketStarts(
-  pool: Pool,
-  fromIso: string,
-  toIso: string,
-  bucketSeconds: number,
-): Promise<number[]> {
-  const { rows } = await pool.query<{ bucket: Date }>(
-    `SELECT DISTINCT time_bucket(make_interval(secs => $3::int), hs.observed_at) AS bucket
-       FROM health_samples hs
-       JOIN devices d ON d.id = hs.device_id AND d.retired_at IS NULL
-      WHERE hs.source = 'status'
-        AND hs.presence IS NOT NULL
-        AND hs.observed_at >= $1::timestamptz
-        AND hs.observed_at <  $2::timestamptz
-      ORDER BY bucket`,
-    [fromIso, toIso, bucketSeconds],
-  );
-  return rows.map((row) => row.bucket.getTime());
-}
 
 export async function registerRemediationRoutes(app: FastifyInstance, ctx: ApiContext): Promise<void> {
   /**
@@ -243,7 +210,7 @@ export async function registerRemediationRoutes(app: FastifyInstance, ctx: ApiCo
     const windowTo = now.toISOString();
     let bucketStarts: number[];
     try {
-      bucketStarts = await observedBucketStarts(context.pool, windowFrom, windowTo, bucketSeconds);
+      bucketStarts = await context.queries.observedBucketStarts(windowFrom, windowTo, bucketSeconds);
     } catch (error) {
       // Our own collection is what the gates are judged from. If we cannot read
       // it we do not know whether we were watching, and every cause below would

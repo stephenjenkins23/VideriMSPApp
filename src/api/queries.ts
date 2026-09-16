@@ -1673,6 +1673,42 @@ export class ReadQueries {
   }
 
   /**
+   * Distinct buckets in which ANY device reported, inside a window — the bucket
+   * STARTS (epoch ms, ascending), not their count.
+   *
+   * Same definition of "observed" as `availabilityBuckets`' `fleet` row, and
+   * deliberately the same SQL predicates, because it answers the same question
+   * for a different consumer: the churn observation gate needs the SHAPE of the
+   * blind runs and not only their size. Over a week, a one-hour hole is 0.6% of
+   * the buckets and invisible to a ratio, so a count cannot tell "we were
+   * sampling thinly throughout" from "we stopped looking for an hour".
+   *
+   * This lives here, next to `availabilityBuckets`, because it used to exist
+   * verbatim in BOTH `routes/trends.ts` and `routes/remediation.ts`. Two
+   * definitions of "observed" is how the same window clears the gate on one
+   * endpoint and fails it on the other — which would make the two endpoints
+   * disagree about whether a number is claimable at all. One copy, one verdict.
+   */
+  async observedBucketStarts(
+    fromIso: string,
+    toIso: string,
+    bucketSeconds: number,
+  ): Promise<number[]> {
+    const { rows } = await this.pool.query<{ bucket: Date }>(
+      `SELECT DISTINCT time_bucket(make_interval(secs => $3::int), hs.observed_at) AS bucket
+         FROM health_samples hs
+         JOIN devices d ON d.id = hs.device_id AND ${ACTIVE_DEVICES}
+        WHERE hs.source = 'status'
+          AND hs.presence IS NOT NULL
+          AND hs.observed_at >= $1::timestamptz
+          AND hs.observed_at <  $2::timestamptz
+        ORDER BY bucket`,
+      [fromIso, toIso, bucketSeconds],
+    );
+    return rows.map((row) => row.bucket.getTime());
+  }
+
+  /**
    * Raw storage readings per device over a window, oldest first.
    *
    * Returns the POINTS, not a slope: gap detection, span gates and the least

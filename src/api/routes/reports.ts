@@ -72,6 +72,7 @@ import {
   type MeasurabilityAssessment,
 } from "../../sla/measurability.js";
 import { BASIS as PROOF_OF_PLAY_BASIS } from "../../intelligence/proof-of-play.js";
+import { makeFigureOf, type Figure as SharedFigure } from "../../intelligence/figure.js";
 import { AUDIT_RETAIN_DAYS, type DeviceActionRow } from "../../db/repository.js";
 import type { ApiContext } from "../server.js";
 
@@ -82,6 +83,10 @@ import type { ApiContext } from "../server.js";
  * in this report are genuinely different things — screens, time buckets, alerts,
  * actions, SLA dimensions — and a bare "142 of 248" invites the reader to assume
  * screens.
+ *
+ * The vocabulary is this report's; the wrapper it labels is shared. See
+ * `src/intelligence/figure.ts` for why the two were separated, and why the
+ * shared half lives under `intelligence/` rather than here.
  */
 export type FigureUnit = "screens" | "time-buckets" | "alerts" | "actions" | "dimensions";
 
@@ -93,58 +98,11 @@ const UNIT_LABEL: Record<FigureUnit, string> = {
   dimensions: "measurement dimension(s)",
 };
 
-export interface FigureCoverage {
-  /** Units the figure could actually be computed from. */
-  measured: number;
-  /** Units in scope — the denominator the customer is entitled to see. */
-  inScope: number;
-  unit: FigureUnit;
-  /** `measured / inScope`, or null when there is nothing in scope to divide by. */
-  share: number | null;
-  note: string;
-}
+/** This report's figure: the shared wrapper, narrowed to this report's units. */
+export type Figure<T> = SharedFigure<T, FigureUnit>;
+export type FigureCoverage = Figure<unknown>["coverage"];
 
-/**
- * One reportable number plus what it was computed from.
- *
- * Deliberately a wrapper rather than a sibling `notes` block: a consumer that
- * renders `value` gets `basis` and `coverage` in the same object and cannot
- * accidentally print the figure without them. The invariant a test enforces is
- * that EVERY figure in the payload has a non-empty basis and a coverage block.
- */
-export interface Figure<T> {
-  value: T;
-  basis: string;
-  coverage: FigureCoverage;
-}
-
-const shareOf = (measured: number, inScope: number): number | null =>
-  inScope === 0 ? null : Number((measured / inScope).toFixed(4));
-
-export function figureOf<T>(
-  value: T,
-  basis: string,
-  measured: number,
-  inScope: number,
-  unit: FigureUnit,
-  note?: string,
-): Figure<T> {
-  const label = UNIT_LABEL[unit];
-  const resolvedNote =
-    note ??
-    (inScope === 0
-      ? `There are no ${label} in scope, so there was nothing to measure.`
-      : measured === inScope
-        ? `Computed from all ${inScope} ${label} in scope.`
-        : `Computed from ${measured} of ${inScope} ${label} in scope; the other ` +
-          `${inScope - measured} could not be measured and are excluded from this figure, ` +
-          `never counted as zero.`);
-  return {
-    value,
-    basis,
-    coverage: { measured, inScope, unit, share: shareOf(measured, inScope), note: resolvedNote },
-  };
-}
+export const figureOf = makeFigureOf(UNIT_LABEL);
 
 /** The common case: a figure measured over screens. */
 export const figure = <T>(

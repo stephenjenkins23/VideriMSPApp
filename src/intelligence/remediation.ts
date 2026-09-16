@@ -51,11 +51,17 @@ import { resolveIntent, type DeviceIntent, type RecordedIntent } from "./device-
  */
 import type {
   ChurnDepartureCause,
-  ChurnFigure,
+  ChurnFigureUnit,
   ChurnObservationVerdict,
   ChurnRead,
   ChurnReport,
 } from "./churn.js";
+/**
+ * The figure wrapper itself, from the module that owns the one definition of it.
+ * A plain type import of a types-and-one-factory module: nothing in this file
+ * calls the factory, so this adds no runtime edge.
+ */
+import type { Figure } from "./figure.js";
 
 /** The assembled per-device facts the engine reasons over. Honest nulls throughout. */
 export interface DeviceView {
@@ -698,7 +704,7 @@ export interface RemediationByCauseAvailable {
   /** e.g. 20 → 2, both ends counted from the `kind` set only. */
   movement: { from: number; to: number; net: number };
   /** `value` plus its basis and the coverage it was measured under. */
-  figure: ChurnFigure<Record<ChurnDepartureCause, number>>;
+  figure: Figure<Record<ChurnDepartureCause, number>, ChurnFigureUnit>;
   /** How much of the window between the two reads we were actually collecting. */
   window: ChurnObservationVerdict;
   /** One sentence, built from the tally so the prose cannot drift from it. */

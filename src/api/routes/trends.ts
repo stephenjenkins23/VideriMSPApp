@@ -1,5 +1,4 @@
 import type { FastifyInstance } from "fastify";
-import type { Pool } from "pg";
 import { z } from "zod";
 import { envelope } from "../freshness.js";
 import {
@@ -123,39 +122,6 @@ const ChurnBody = z.object({
     .max(3000)
     .optional(),
 });
-
-/**
- * Distinct five-minute-equivalent buckets in which ANY device reported, inside
- * the window between the two reads.
- *
- * Same definition as `WindowRef.fleetObservedBuckets` — a bucket with no reading
- * is time we were not looking — but it returns the bucket STARTS rather than a
- * count, because the churn gate needs the gap's shape and not only its size: over
- * a week, a one-hour hole is 0.6% of the buckets and invisible to a ratio.
- *
- * The SQL lives here rather than in `ReadQueries` only because this change does
- * not own that file; it is a straight sibling of `availabilityBuckets` and
- * belongs there. `retired_at IS NULL` mirrors that method's `ACTIVE_DEVICES`.
- */
-async function observedBucketStarts(
-  pool: Pool,
-  fromIso: string,
-  toIso: string,
-  bucketSeconds: number,
-): Promise<number[]> {
-  const { rows } = await pool.query<{ bucket: Date }>(
-    `SELECT DISTINCT time_bucket(make_interval(secs => $3::int), hs.observed_at) AS bucket
-       FROM health_samples hs
-       JOIN devices d ON d.id = hs.device_id AND d.retired_at IS NULL
-      WHERE hs.source = 'status'
-        AND hs.presence IS NOT NULL
-        AND hs.observed_at >= $1::timestamptz
-        AND hs.observed_at <  $2::timestamptz
-      ORDER BY bucket`,
-    [fromIso, toIso, bucketSeconds],
-  );
-  return rows.map((row) => row.bucket.getTime());
-}
 
 export async function registerTrendRoutes(app: FastifyInstance, ctx: ApiContext): Promise<void> {
   /**
@@ -384,7 +350,7 @@ export async function registerTrendRoutes(app: FastifyInstance, ctx: ApiContext)
     // Fetched before attribution because it decides which causes are claimable.
     const windowFrom = watermark.at.toISOString();
     const windowTo = observedNow.toISOString();
-    const bucketStarts = await observedBucketStarts(ctx.pool, windowFrom, windowTo, bucketSeconds);
+    const bucketStarts = await ctx.queries.observedBucketStarts(windowFrom, windowTo, bucketSeconds);
     const verdict = judgeObservation(
       observationFrom(windowFrom, windowTo, bucketSeconds, bucketStarts),
     );

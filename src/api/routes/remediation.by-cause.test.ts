@@ -83,6 +83,17 @@ interface Body {
         movement?: { from: number; to: number; net: number };
         baseline?: { observedAt: string; attestedBy: string; count: number };
         window?: { clearsGates: boolean };
+        figure?: {
+          value: Record<string, number>;
+          basis: string;
+          coverage: {
+            measured: number;
+            inScope: number;
+            unit: string;
+            share: number | null;
+            note: string;
+          };
+        };
         headline?: string;
       };
     };
@@ -143,6 +154,28 @@ test("a usable baseline fills in the tally, the movement and the window it was m
   assert.equal(block.baseline?.attestedBy, "caller", "it is the caller's read, labelled as such");
   assert.equal(block.baseline?.observedAt, since);
   assert.equal(block.window?.clearsGates, true);
+});
+
+test("the tally travels with its basis and coverage — no bare number on the wire", async () => {
+  // The route-level half of the invariant the engine test pins: what the HTTP
+  // payload carries, not only what the fold returns. Added when a deliberate
+  // mutation of the shared `Figure<T>` (src/intelligence/figure.ts) was caught by
+  // every other consumer of it and not by this file, which asserted `value` and
+  // `movement` but never the coverage that is what makes `value` claimable.
+  const { body } = await get(
+    `?since=${encodeURIComponent(HOUR_AGO())}&previous=${encodeURIComponent("dev-1::display-off")}`,
+  );
+  const figure = body.data.summary.byCause.figure;
+  assert.ok(figure, "an available tally is served with the figure it was read off");
+  assert.ok(figure.basis.length > 20, "the basis is a sentence, not a label");
+  assert.ok(figure.coverage, "the denominator travels with the number");
+  assert.equal(figure.coverage.unit, "recommendations");
+  assert.equal(typeof figure.coverage.measured, "number");
+  assert.equal(typeof figure.coverage.inScope, "number");
+  assert.ok(figure.coverage.note.length > 20, "and it says in words what it was measured over");
+  // The convenient shallow read is the figure's own value, never a recount
+  // beside it — the two cannot drift apart.
+  assert.deepEqual(body.data.summary.byCause.value, figure.value);
 });
 
 test("an explicitly empty previous= is a baseline, not a missing one", async () => {

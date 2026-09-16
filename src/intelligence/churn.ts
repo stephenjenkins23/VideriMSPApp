@@ -69,16 +69,21 @@ import {
 } from "./screen-state.js";
 import type { DeviceView, RecommendationKind, Severity } from "./remediation.js";
 import type { Recommendation } from "./remediation.js";
+import { makeFigureOf, type Figure } from "./figure.js";
 
 // ── figures: a number is never served on its own ─────────────────────────────
 
 /**
- * Deliberately the same shape as `Figure<T>` in `src/api/routes/reports.ts:115`
- * — same field names, same `coverage` block — so one UI component renders both.
- * It is redeclared rather than imported because `src/intelligence/` is engine
- * land and must not depend on a route module; the durable fix is to lift
- * `Figure<T>` into a shared module and have both sides import it, which touches
- * a file this change does not own. Until then this comment is the contract.
+ * What a churn figure was measured over — this engine's vocabulary for the
+ * shared `Figure<T>` wrapper in `./figure.js`.
+ *
+ * The wrapper used to be redeclared here field-for-field as `ChurnFigure<T>`,
+ * because `src/intelligence/` is engine land and must not depend on the route
+ * module the original lived in. It is now lifted into `./figure.js`, which both
+ * sides import downwards, so there is one definition of how a number states its
+ * basis. Only the vocabulary stayed local: `time-buckets` here means the window
+ * between the two reads, which is not the report's window, so the two labels are
+ * legitimately different sentences.
  */
 export type ChurnFigureUnit = "recommendations" | "time-buckets" | "screens";
 
@@ -88,50 +93,7 @@ const UNIT_LABEL: Record<ChurnFigureUnit, string> = {
   screens: "screen(s)",
 };
 
-export interface ChurnFigureCoverage {
-  /** Units the figure could actually be computed from. */
-  measured: number;
-  /** Units in scope — the denominator the reader is entitled to see. */
-  inScope: number;
-  unit: ChurnFigureUnit;
-  /** `measured / inScope`, or null when there is nothing in scope to divide by. */
-  share: number | null;
-  note: string;
-}
-
-export interface ChurnFigure<T> {
-  value: T;
-  basis: string;
-  coverage: ChurnFigureCoverage;
-}
-
-const shareOf = (measured: number, inScope: number): number | null =>
-  inScope === 0 ? null : Number((measured / inScope).toFixed(4));
-
-export function churnFigure<T>(
-  value: T,
-  basis: string,
-  measured: number,
-  inScope: number,
-  unit: ChurnFigureUnit,
-  note?: string,
-): ChurnFigure<T> {
-  const label = UNIT_LABEL[unit];
-  const resolvedNote =
-    note ??
-    (inScope === 0
-      ? `There are no ${label} in scope, so there was nothing to measure.`
-      : measured === inScope
-        ? `Computed from all ${inScope} ${label} in scope.`
-        : `Computed from ${measured} of ${inScope} ${label} in scope; the other ` +
-          `${inScope - measured} could not be measured and are excluded from this figure, ` +
-          `never counted as zero.`);
-  return {
-    value,
-    basis,
-    coverage: { measured, inScope, unit, share: shareOf(measured, inScope), note: resolvedNote },
-  };
-}
+export const churnFigure = makeFigureOf(UNIT_LABEL);
 
 // ── the cause vocabulary ─────────────────────────────────────────────────────
 
@@ -988,7 +950,7 @@ export interface ChurnReport {
   /** How much of the window between the reads we watched, and whether it is enough. */
   window: ChurnObservationVerdict;
   /** Net movement, e.g. 20 → 2. Both ends counted from the same filtered sets. */
-  movement: ChurnFigure<{ from: number; to: number; net: number }>;
+  movement: Figure<{ from: number; to: number; net: number }, ChurnFigureUnit>;
   left: DepartedItem[];
   entered: ArrivedItem[];
   /**
@@ -1003,8 +965,8 @@ export interface ChurnReport {
    * The breakdown, counted over exactly the `left` array above. `null` when the
    * window was blind — never a map of zeros, which is the shape of a lie here.
    */
-  byCause: ChurnFigure<Record<ChurnDepartureCause, number>> | null;
-  byArrivalCause: ChurnFigure<Record<ChurnArrivalCause, number>> | null;
+  byCause: Figure<Record<ChurnDepartureCause, number>, ChurnFigureUnit> | null;
+  byArrivalCause: Figure<Record<ChurnArrivalCause, number>, ChurnFigureUnit> | null;
   /** One sentence an operator can read instead of the whole payload. */
   headline: string;
   notes: string[];
@@ -1420,7 +1382,7 @@ export interface FirstLookReport {
   observedAt: string;
   /** Every id in the tracked set. Nothing is filtered out for not being new. */
   ids: string[];
-  total: ChurnFigure<number>;
+  total: Figure<number, ChurnFigureUnit>;
   newSince: null;
   newSinceReason: string;
   headline: string;
