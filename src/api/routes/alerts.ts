@@ -613,6 +613,17 @@ export async function registerAlertRoutes(app: FastifyInstance, ctx: ApiContext)
       return reply.code(404).send({ error: "not_found", message: "No such suppression." });
     }
 
+    // What this record was ACTUALLY suppressing, read while it is still active.
+    // After the UPDATE below the record suppresses nothing, so its effect is
+    // unrecoverable — the count has to be taken first. This mirrors the create
+    // path, which recomputes the view to state the real effect rather than the
+    // intended one.
+    const before = await loadSuppressionView(ctx.repo);
+    const wasSuppressing = Math.max(
+      0,
+      before.suppressed.byRecord.find((r) => r.suppressionId === existing.id)?.alertCount ?? 0,
+    );
+
     const actor = actorFor(ctx, request, parsed.data.by);
     const revoked = await ctx.repo.revokeSuppression(
       request.params.id, actor, parsed.data.reason ?? null,
@@ -646,8 +657,25 @@ export async function registerAlertRoutes(app: FastifyInstance, ctx: ApiContext)
       data: {
         id: existing.id,
         revokedBy: actor,
-        /** Alerts back in the incident list at their normal rank, right now. */
-        alertsReturned: returned.length,
+        /**
+         * Alerts back in the incident list at their normal rank, right now.
+         *
+         * This is what the record was SUPPRESSING, not what its scope covers —
+         * the two differ whenever the safety valve held something back. A
+         * whole-device record leaves criticals and highs in the incident list,
+         * and an alert that never left cannot return, so counting the scope
+         * overstates the effect of the revoke. An already-EXPIRED record reports
+         * 0 for the same reason: those alerts came back when it lapsed.
+         */
+        alertsReturned: wasSuppressing,
+        /**
+         * Open alerts on this scope that this record was not suppressing, so
+         * nothing changed for them — the valve's criticals and highs, plus
+         * anything a different record was covering. Stated so an operator can
+         * reconcile `alertsReturned` against the count the device still shows
+         * instead of reading the difference as a missing alert.
+         */
+        alertsUnaffected: Math.max(0, returned.length - wasSuppressing),
       },
     });
   });

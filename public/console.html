@@ -2905,9 +2905,15 @@ function wireAlertWork(a, minLen, defDays, maxDays) {
       return;
     }
     const d = r.data || {};
+    // `alertsReturned` is what the record was SUPPRESSING, so it can be smaller
+    // than the device's open-alert count. State the remainder rather than let the
+    // operator read the difference as a missing alert.
+    const unaffected = d.alertsUnaffected;
     showAlertResult(`<span>&#9989;</span><span><b>Suppression revoked</b> by
       ${esc(d.revokedBy || by)} &#8212; <b>${d.alertsReturned == null ? "an unreported number of" : d.alertsReturned}</b>
-      alert(s) returned to the incident list. The record is kept, marked revoked.</span>`, "warn");
+      alert(s) returned to the incident list.${unaffected ? ` <b>${unaffected}</b> alert(s) on this
+      scope were never suppressed &#8212; the safety valve had kept them in the queue, so nothing
+      changed for them.` : ""} The record is kept, marked revoked.</span>`, "warn");
     await reloadAlertBands();
     await refreshAlertWork(a.id);
   });
@@ -3078,7 +3084,11 @@ async function revokeSuppression(id, label, reason) {
   window.alert("Suppression revoked by " + (d.revokedBy || by) + ".\n\n" +
     (d.alertsReturned == null
       ? "The API did not report how many alerts returned."
-      : d.alertsReturned + " alert(s) returned to the incident list."));
+      : d.alertsReturned + " alert(s) returned to the incident list." +
+        (d.alertsUnaffected
+          ? "\n\n" + d.alertsUnaffected + " alert(s) on this scope were never suppressed " +
+            "(the safety valve kept them in the queue), so nothing changed for them."
+          : "")));
   await reloadAlertBands();
 }
 

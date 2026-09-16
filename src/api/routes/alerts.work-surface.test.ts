@@ -419,11 +419,58 @@ test("revoking returns the alerts, counts them, and never deletes the record", a
     payload: { reason: "unit went back into production service", by: "jo" },
   });
   assert.equal(res.statusCode, 200);
+  // Both alerts here are `info`, so the record really was suppressing both and
+  // both really do come back. The valve case is the next test.
   assert.equal(res.json().data.alertsReturned, 2);
+  assert.equal(res.json().data.alertsUnaffected, 0);
   assert.equal(written.revoked[0]?.by, "api:jo");
   assert.match(written.revoked[0]!.reason!, /back into production service/);
   // The un-suppression is on each alert's own record too.
   assert.equal(written.events.filter((e) => e.kind === "unsuppress").length, 2);
+});
+
+test("revoking counts what was SUPPRESSED, never the whole scope", async () => {
+  // The same shape as the create-path valve test: one info alert the record was
+  // suppressing, one critical it was never allowed to touch. Only the info alert
+  // can come back — the critical never left the incident list, and reporting it
+  // as "returned" tells the operator two alerts moved when one did.
+  const { server } = await build({
+    openAlerts: [openAlert({ id: A1 }), openAlert({ id: A2, severity: "critical" })],
+    suppressions: [suppression()],
+  });
+  const res = await server.inject({
+    method: "POST", url: `/api/alerts/suppressions/${S1}/revoke`, headers: auth,
+    payload: { by: "jo" },
+  });
+  assert.equal(res.statusCode, 200);
+  const data = res.json().data;
+  assert.equal(data.alertsReturned, 1, "only the suppressed alert returns");
+  assert.equal(
+    data.alertsUnaffected, 1,
+    "the held-back critical is reported as unchanged, not as returned",
+  );
+  // The revoke's own arithmetic must close against the scope, so neither number
+  // can drift without the other being wrong too.
+  assert.equal(data.alertsReturned + data.alertsUnaffected, 2);
+});
+
+test("revoking an already-EXPIRED record returns 0 — they came back when it lapsed", async () => {
+  // A record can expire without being revoked, and revoking it afterwards is a
+  // bookkeeping act, not a release: the alerts re-entered the incident list at
+  // expiry. Claiming they return now would double-count the same event.
+  const { server, written } = await build({
+    openAlerts: [openAlert({ id: A1 }), openAlert({ id: A2 })],
+    suppressions: [suppression({ expiresAt: new Date(NOW - DAY) })],
+  });
+  const res = await server.inject({
+    method: "POST", url: `/api/alerts/suppressions/${S1}/revoke`, headers: auth,
+    payload: { by: "jo" },
+  });
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.json().data.alertsReturned, 0);
+  assert.equal(res.json().data.alertsUnaffected, 2);
+  // Still recorded as a revocation — who closed the record out, and when.
+  assert.equal(written.revoked[0]?.by, "api:jo");
 });
 
 test("a second revoke is a 409 that names the original revoker", async () => {
