@@ -421,6 +421,27 @@ table.dt td.n{font-variant-numeric:tabular-nums}
 .btn.dark{background:var(--bar);border-color:var(--bar);color:var(--bar-tx)}
 .btn.dark:hover{opacity:.88;color:var(--bar-tx)}
 
+/* ── export popover (US-8.4.2). The scope block at the top is not decoration:
+     every artefact this menu writes states the same scope inside the file, and
+     the menu shows it first so the operator exports knowing what they asked
+     for. Counts come from the same arrays the lists render. ── */
+.xwrap{position:relative}
+.xmenu{position:absolute;right:0;top:calc(100% + 6px);z-index:60;width:400px;max-width:92vw;
+  background:var(--card);border:1px solid var(--bd);border-radius:11px;box-shadow:var(--sh-2);
+  padding:12px 13px;display:none;text-align:left}
+.xmenu.on{display:block}
+.xmenu h4{font-size:11px;font-weight:700;margin:0 0 7px;letter-spacing:.05em;
+  text-transform:uppercase;color:var(--tx-2)}
+.xscope{font-size:11.5px;color:var(--tx-2);line-height:1.5;background:var(--card-2);
+  border:1px solid var(--bd-2);border-radius:8px;padding:8px 9px;margin-bottom:9px}
+.xscope b{color:var(--tx)}
+.xscope ul{margin:4px 0 0;padding-left:15px}
+.xrow{display:flex;gap:8px;align-items:center;padding:8px 0;border-top:1px solid var(--bd-2)}
+.xrow .xl{flex:1;font-size:12.5px;line-height:1.35}
+.xrow.here{background:var(--blue-2);border-radius:7px;padding-left:7px;padding-right:7px}
+.xnote{font-size:11px;color:var(--tx-3);line-height:1.5;margin-top:9px;
+  border-top:1px solid var(--bd-2);padding-top:8px}
+
 /* ── widget grid ── */
 .wgrid{display:grid;grid-template-columns:repeat(12,1fr);gap:14px;align-items:start}
 .w{background:var(--card);border:1px solid var(--bd);border-radius:11px;box-shadow:var(--sh);overflow:hidden}
@@ -652,7 +673,17 @@ table.dt td .prov{display:block;margin-top:2px;white-space:normal;max-width:34ch
       <div class="ps" id="psub">Everything measurable, and everything that is not</div></div>
     <div class="pr">
       <button class="btn" id="gapsbtn">&#128683; What we cannot see</button>
-      <button class="btn dark" id="exportbtn">&#8681; Export report</button>
+      <!-- Export is SCOPED (US-8.4.2): the menu offers the lists as they are
+           filtered right now, and every file states that scope inside itself.
+           The whole-fleet JSON is still there, named as such, because a figure
+           taken from an unscoped export and pasted into a spreadsheet is the
+           failure this menu exists to prevent. -->
+      <div class="xwrap">
+        <button class="btn dark" id="exportbtn" aria-haspopup="dialog"
+                aria-expanded="false" aria-controls="exportmenu">&#8681; Export&#8230;</button>
+        <div class="xmenu" id="exportmenu" role="dialog"
+             aria-label="Export what is on screen"></div>
+      </div>
     </div>
   </div>
 
@@ -661,6 +692,12 @@ table.dt td .prov{display:block;margin-top:2px;white-space:normal;max-width:34ch
        freshness banner re-renders every 15s and would otherwise wipe it, and an
        "authentication is not going to succeed" message must not disappear. -->
   <div id="authbanner"></div>
+  <!-- What a shared link asked for and could not be given (US-8.4.1). Its own
+       container for the same reason as the banners around it: the freshness
+       banner re-renders every 15s, and "the link named a device that is not
+       here" must not be wiped by a repaint -- a deep link that silently opens
+       something else is BUG-1 in a new costume. -->
+  <div id="linkbanner"></div>
   <!-- Our own collector's health. Separate container from #staleness because the
        freshness banner re-renders every 15s and would otherwise wipe it. -->
   <div id="pipebanner"></div>
@@ -1189,7 +1226,470 @@ const S = { summary: null, alerts: [], devices: [], compliance: [], pipeline: nu
                model behind the shared token, so this is a self-declared name,
                remembered locally and recorded as the claim it is — never
                invented, and never sent as somebody else. */
-            actor: null };
+            actor: null,
+            /* Epic 8.4 — the URL is the view.
+               `view` is the tab on screen (the nav used to be the only record
+               of it, in an aria attribute); `devOpen` is the device id the
+               drawer is open ON, held separately from `dev` because the drawer
+               opens on the click and the detail payload lands a round trip
+               later — a link copied while it was still loading must still name
+               the device. `trpin` records that the trend window was CHOSEN
+               rather than auto-escalated, so a link only carries a window
+               somebody picked. `link` is what the address bar asked for and
+               whether we could honour it. */
+            view: "overview", devOpen: null, trpin: false, link: null };
+
+
+/* ===================================================================
+   URL STATE (US-8.4.1) -- the view lives in the address bar.
+
+   WHAT WAS WRONG. There was no `pushState`, no hash and no URLSearchParams
+   anywhere in this file, so NOTHING could be linked into a ticket. "Offline
+   at Kungsgatan, open more than thirty days, this canvas" was a sequence of
+   clicks a technician had to describe in prose to a colleague, who then
+   reproduced it by hand and hoped they had reproduced the same thing.
+
+   FOUR RULES.
+
+   1. ONE VOCABULARY, DECLARED ONCE. URL_DEFAULTS is the whole parameter
+      surface. A parameter sitting at its default is ABSENT from the link, so
+      a shared URL carries only what was actually chosen -- `?v=devices&
+      status=offline` pastes into a ticket and reads as a sentence.
+
+   2. THESE ARE PAGE PARAMETERS, NOT API PARAMETERS. Nothing here is
+      forwarded to /api/*. The device and alert filters are client-side
+      passes over collections this console already holds, and /api/alerts now
+      rejects any query parameter it does not know with a 400 -- so a URL
+      vocabulary that leaked into a request would not degrade, it would break
+      the page. The two vocabularies are kept deliberately separate and
+      deliberately differently named (`status`, not `state`; `sev`, not
+      `severity`) so that neither can be mistaken for the other.
+
+   3. A LINK THAT NAMES SOMETHING GONE SAYS SO. A device id that is not in
+      the loaded fleet does not open a neighbour and does not open nothing in
+      silence: urlResolveLink() checks it against the collections we actually
+      hold and renderLinkNotes() prints what the link asked for and why it
+      could not be honoured. That is BUG-1's lesson (never show one device's
+      data under another's name) applied to deep links.
+
+   4. TRUNCATION IN A LINK IS STILL TRUNCATION. The only state that can
+      outgrow a URL is the device-id drilldown, so it is carried up to
+      URL_DRILL_CAP ids and the link records the TRUE count. A receiver who
+      opens a shortened drilldown is told they are looking at a subset --
+      hitting the cap must never be indistinguishable from carrying all of it.
+
+   replaceState vs pushState: typing in a search box, moving a chip, choosing
+   a select option is INCIDENTAL -- thirty keystrokes must not cost thirty
+   Back presses. Changing tab, opening the device drawer and opening the alert
+   work surface are things a person expects Back to undo, so those push.
+   =================================================================== */
+
+/**
+ * Every parameter this console reads or writes, in the order a link writes
+ * them, with the value that means "not set".
+ *
+ * `trwin` and the `aud*` group default to the empty string, which means NOT
+ * PINNED rather than "the default value": both of those controls refetch, and
+ * a link that pins neither must not force the receiver's console into a
+ * window or a log page that nobody chose. See urlReadParams().
+ */
+const URL_DEFAULTS = {
+  v: "overview",
+  // Devices
+  q: "", status: "all", site: "all", sort: "status", dir: "asc",
+  drill: "", drilln: "", drilllabel: "",
+  // Alerts
+  band: "incidents", sev: "all", aq: "", rule: "all", age: "all", asort: "sev",
+  // The open layers, drawer tab included
+  device: "", dtab: "overview", alert: "",
+  // Trends / Insights / our own pipeline
+  trwin: "", trdir: "all", plane: "all",
+  // Audit. These ARE server-side filters, but they are named separately here
+  // for rule 2 above: `audout` is this page's word, `outcome` is the API's.
+  audout: "", audact: "", audactor: "", auddev: "", audpage: "",
+};
+
+/**
+ * How many drilldown ids a link carries.
+ *
+ * A correlated finding can name 43 devices and the ids on this tenant run to
+ * ~26 characters, so the whole set is not always a sane URL. 50 covers every
+ * finding this fleet has produced; past it the link says how many it dropped
+ * and the receiving table says it is showing a subset. The one thing that must
+ * not happen is a shortened drilldown looking like a complete one.
+ */
+const URL_DRILL_CAP = 50;
+
+/** The age windows the alert queue offers. DUPLICATED from the `AGES` table
+ *  inside alertBands() on purpose: that table is declared inside the function
+ *  because the console-invariant tests lift alertBands() in isolation, and a
+ *  top-level constant it referenced would be undefined there. A test pins this
+ *  list against that one by source text, so the two cannot drift. */
+const URL_ALERT_AGES = ["all", "1h", "24h", "7d", "o7d", "o30d"];
+/** The alert sort keys, duplicated from `SORTS_A` inside alertBands() for the
+ *  same reason and pinned by the same test. */
+const URL_ALERT_SORTS = ["sev", "recent", "oldest", "device", "rule"];
+/** The alert bands. Derived from nothing: the three names are the console's
+ *  own, and alertBands() maps anything else onto "incidents". */
+const URL_ALERT_BANDS = ["incidents", "dormant", "suppressed"];
+/** Trend direction filter, and the lane-status filter for our own collector.
+ *  Lane statuses are derived from LANE_DOT so a new lane status cannot be
+ *  rejected by a stale copy here. */
+const URL_TREND_DIRS = ["all", "regression", "recovery"];
+
+/**
+ * The link for a state. PURE: reads the state object it is handed, touches no
+ * history, no document and no globals.
+ *
+ * Returns a plain object of parameter -> string with every default omitted.
+ */
+function urlParamsFor(s) {
+  const out = {};
+  // `idle` is the set of values that mean "nothing was chosen here". It is
+  // usually just the default, but the audit filters have two spellings of
+  // idle ("" before the tab is opened, "all" after it) and both must produce
+  // the same link -- otherwise opening the Audit tab silently changes the URL.
+  const put = (k, v, idle) => {
+    const text = v == null ? "" : String(v);
+    if (text === "") return;
+    if ((idle || [String(URL_DEFAULTS[k])]).includes(text)) return;
+    out[k] = text;
+  };
+  put("v", s.view);
+  put("q", String(s.q || "").trim());
+  put("status", s.cls);
+  put("site", s.dsite);
+  put("sort", s.sort && s.sort.key);
+  put("dir", s.sort && s.sort.dir === -1 ? "desc" : "asc");
+  /* The drilldown, and its own truncation. `drilln` is the TRUE size of the
+     set; when it exceeds what `drill` carries, the receiver is told. */
+  const drill = s.dids && s.dids.ids ? [...s.dids.ids] : [];
+  if (drill.length) {
+    put("drill", drill.slice(0, URL_DRILL_CAP).join(","));
+    // `total` when we have it, so RE-SHARING a link that was already shortened
+    // carries the drilldown's true size rather than the size of the subset —
+    // otherwise 3-of-213 quietly becomes 3-of-3 on the second hop.
+    put("drilln", String((s.dids && s.dids.total) || drill.length));
+    // The label WITHOUT the truncation sentence, which urlReadParams re-derives.
+    // Sending the augmented one appended a second copy on every hop.
+    put("drilllabel", (s.dids && s.dids.baseLabel) || s.dids.label);
+  }
+  put("band", s.aband);
+  put("sev", s.sev);
+  put("aq", String(s.aq || "").trim());
+  put("rule", s.arule);
+  put("age", s.aage);
+  put("asort", s.asort);
+  // `devOpen` rather than `S.dev.id`: the drawer is open from the click, and
+  // the detail payload only arrives a round trip later. A link copied while
+  // the drawer was still loading must still name the device being opened.
+  put("device", s.devOpen);
+  if (out.device) put("dtab", s.dtab);
+  put("alert", s.awork && s.awork.id);
+  // Only a window the operator CHOSE is pinned. trendsAutoWindow() escalating
+  // past a refusal is not a choice and must not travel in a link.
+  put("trwin", s.trpin ? s.trwin : "");
+  put("trdir", s.trdir);
+  put("plane", s.plane);
+  const aud = s.aud || {};
+  put("audout", aud.outcome, ["", "all"]);
+  put("audact", aud.action, ["", "all"]);
+  put("audactor", aud.actor, [""]);
+  put("auddev", aud.deviceId, [""]);
+  put("audpage", aud.page, ["", "1"]);
+  return out;
+}
+
+/** The query string for a state, including the leading "?", or "" when the
+ *  state is the default view. Pure. */
+function urlQueryFor(s) {
+  const obj = urlParamsFor(s);
+  const p = new URLSearchParams();
+  // Written in URL_DEFAULTS order, so the same view always yields the same
+  // link and two people comparing links compare like with like.
+  for (const k of Object.keys(URL_DEFAULTS)) if (obj[k] != null) p.set(k, obj[k]);
+  const qs = p.toString();
+  return qs ? "?" + qs : "";
+}
+
+/**
+ * Parse a query string into a state patch and the problems worth SAYING.
+ *
+ * Total and pure: it never throws, and it never guesses. An option this
+ * console does not have is dropped AND reported -- a link asking for
+ * `status=offlien` must not quietly render the whole fleet as though that is
+ * what was shared. Free-text vocabularies (a site id, a rule id, a status
+ * word) come from the DATA rather than from this file, so they are accepted
+ * here and checked against the loaded collections later, by urlResolveLink().
+ */
+function urlReadParams(query) {
+  const p = new URLSearchParams(String(query || "").replace(/^\?/, ""));
+  const problems = [];
+  const get = (k) => { const v = p.get(k); return v == null ? null : v.trim(); };
+  const pick = (k, allowed, what) => {
+    const v = get(k);
+    if (v == null || v === "") return null;
+    if (allowed.includes(v)) return v;
+    problems.push(`${what} "${v}", which is not an option this console has, so it was ignored.`);
+    return null;
+  };
+  const patch = {};
+  patch.view = pick("v", Object.keys(PAGES), "The link asked for the view") || URL_DEFAULTS.v;
+  patch.q = get("q") || "";
+  patch.cls = get("status") || URL_DEFAULTS.status;
+  patch.dsite = get("site") || URL_DEFAULTS.site;
+  patch.sort = {
+    key: pick("sort", Object.keys(SORTS), "The link asked to sort the devices by") || URL_DEFAULTS.sort,
+    dir: (pick("dir", ["asc", "desc"], "The link asked for a sort direction") || "asc") === "desc" ? -1 : 1,
+  };
+  /* The drilldown. `drilln` is what the sharer actually had; when it is larger
+     than the ids the link carries, the LABEL says so -- that sentence is what
+     the Devices table prints above the rows, so a subset can never read as the
+     whole finding. */
+  const ids = (get("drill") || "").split(",").map((x) => x.trim()).filter(Boolean);
+  if (ids.length) {
+    const claimed = Number(get("drilln"));
+    const total = Number.isFinite(claimed) && claimed > ids.length ? claimed : ids.length;
+    const label = get("drilllabel") || `${ids.length} device(s) named by a shared link`;
+    patch.dids = {
+      ids: new Set(ids),
+      // `baseLabel` is what the sharer's finding called it; `label` is that plus
+      // the subset sentence, and it is `label` the Devices table prints.
+      baseLabel: label,
+      label: total > ids.length
+        ? `${label} — this link carried ${ids.length} of ${total} device ids (a link holds at most ${URL_DRILL_CAP})`
+        : label,
+      carried: ids.length,
+      total,
+    };
+    if (total > ids.length) {
+      problems.push(
+        `The drilldown that was shared named ${total} devices; a link carries at most ` +
+        `${URL_DRILL_CAP}, so the table below is a subset of ${ids.length} of them. ` +
+        `Re-open the finding on the Actions tab for the full set.`);
+    }
+  } else {
+    patch.dids = null;
+  }
+  patch.aband = pick("band", URL_ALERT_BANDS, "The link asked for the alert band") || URL_DEFAULTS.band;
+  patch.sev = pick("sev", ["all", ...SEV.map((x) => x[0])], "The link asked for severity") || URL_DEFAULTS.sev;
+  patch.aq = get("aq") || "";
+  patch.arule = get("rule") || URL_DEFAULTS.rule;
+  patch.aage = pick("age", URL_ALERT_AGES, "The link asked for the age window") || URL_DEFAULTS.age;
+  patch.asort = pick("asort", URL_ALERT_SORTS, "The link asked to sort the alerts by") || URL_DEFAULTS.asort;
+  patch.device = get("device") || "";
+  patch.dtab = pick("dtab", DTABS.map((x) => x[0]), "The link asked for the drawer tab") || URL_DEFAULTS.dtab;
+  patch.alert = get("alert") || "";
+  // A window that refetches, so it is applied only when the link pins one.
+  const win = Number(get("trwin"));
+  patch.trwin = TR_WINDOWS.includes(win) ? win : null;
+  if (get("trwin") && patch.trwin == null) {
+    problems.push(
+      `The link asked for a ${get("trwin")}-day trend window; this console offers ` +
+      `${TR_WINDOWS.join(", ")} days, so the window it opened on is its own.`);
+  }
+  patch.trdir = pick("trdir", URL_TREND_DIRS, "The link asked for a trend direction") || URL_DEFAULTS.trdir;
+  patch.plane = pick("plane", ["all", ...Object.keys(LANE_DOT)], "The link asked for a lane status")
+    || URL_DEFAULTS.plane;
+  /* The audit filters. Only the keys the link actually pins are returned: the
+     log is a server-side read, and defaulting the absent ones would turn a
+     Back press into a refetch of a page nobody asked for. */
+  const aud = {};
+  const audout = get("audout");
+  if (audout) aud.outcome = audout;
+  const audact = get("audact");
+  if (audact) aud.action = audact;
+  if (get("audactor")) aud.actor = get("audactor");
+  if (get("auddev")) aud.deviceId = get("auddev");
+  const page = Number(get("audpage"));
+  if (Number.isFinite(page) && page >= 1) aud.page = Math.floor(page);
+  patch.aud = Object.keys(aud).length ? aud : null;
+  /* Parameters we do not know. Reported rather than dropped in silence: a link
+     from a newer console, or a truncated paste, is a thing the reader can act
+     on once they are told. */
+  const unknown = [...p.keys()].filter((k) => !(k in URL_DEFAULTS));
+  if (unknown.length) {
+    problems.push(
+      `This link carries ${unknown.length} parameter(s) this console does not know ` +
+      `(${unknown.join(", ")}). They were ignored — the view below may not be the whole ` +
+      `of what was shared.`);
+  }
+  return { patch, problems };
+}
+
+/* ---- URL state: the IO half ---------------------------------------
+   Everything above is pure and unit-tested. Everything below touches
+   history, the document and the network, and does nothing else. */
+
+/** True while a popstate is being applied. Every history write checks it: the
+ *  Back press that closes the drawer must not push a new entry as it goes. */
+let URL_SUSPEND = false;
+
+/**
+ * Write the current state to the address bar.
+ *
+ * `mode` is "push" only where a Back press should undo the thing that just
+ * happened (a tab change, a drawer opening). Everything else replaces, so the
+ * link is always shareable without Back becoming a list of keystrokes.
+ * `layer` tags the entry so closeDevice()/closeAlertWork() can tell whether
+ * the entry on top is one they pushed.
+ */
+function urlSync(mode, layer) {
+  if (URL_SUSPEND) return;
+  const next = location.pathname + urlQueryFor(S);
+  // The same link must never stack a second entry: renderers run on a timer.
+  const push = mode === "push" && next !== location.pathname + location.search;
+  /* The layer tag is written ONLY on a real push, and that is load-bearing.
+     It means "there is an entry underneath this one that we put here", which
+     is the only condition under which closeDevice() may step back through it.
+     Tagging a REPLACE too was a bug found in the browser: a deep-linked drawer
+     had the tag without an entry beneath it, so closing it called back() on the
+     first entry in the tab — nothing moved, and the address bar kept naming a
+     device that was no longer open. */
+  const state = { vfi: urlParamsFor(S), vfiLayer: push ? (layer || null) : null };
+  if (push) history.pushState(state, "", next);
+  else history.replaceState(state, "", next);
+}
+
+/** Apply a parsed patch to S. No fetch and no render: the caller owns both,
+ *  because a fresh load renders once at the end and a Back press repaints
+ *  immediately. */
+function urlApplyPatch(patch) {
+  S.view = patch.view;
+  S.q = patch.q; S.cls = patch.cls; S.dsite = patch.dsite; S.sort = patch.sort;
+  S.dids = patch.dids;
+  S.aband = patch.aband; S.sev = patch.sev; S.aq = patch.aq;
+  S.arule = patch.arule; S.aage = patch.aage; S.asort = patch.asort;
+  S.dtab = patch.dtab; S.trdir = patch.trdir; S.plane = patch.plane;
+  if (patch.trwin != null) { S.trwin = patch.trwin; S.trpin = true; }
+  if (patch.aud) Object.assign(S.aud, patch.aud);
+  // The two search boxes hold their own value, so they are written too -- a
+  // restored search with an empty box would be a filter with no visible cause.
+  const box = $("#q");
+  if (box) box.value = S.q;
+  const abox = $("#aq");
+  if (abox) abox.value = S.aq;
+}
+
+/** Show one view. The nav buttons, the command palette and popstate all come
+ *  through here; only the first two write history. */
+function showView(v) {
+  document.querySelectorAll("#nav button").forEach((x) =>
+    x.setAttribute("aria-selected", String(x.dataset.v === v)));
+  for (const name of VIEWS_ALL) {
+    const el = document.getElementById("v-" + name);
+    if (el) el.classList.toggle("hide", name !== v);
+  }
+  const [h, sub] = PAGES[v] || ["", ""];
+  $("#phead").textContent = h;
+  $("#psub").textContent = sub;
+  S.view = v;
+  /* The action log is fetched when its tab is OPENED, not by load(): it is a
+     paged read of an append-only table that no other surface consumes, and the
+     two-minute refresh has no business walking it. */
+  if (v === "audit" && !S.audit && !S.audLoading) loadAudit();
+}
+
+/** Repaint every surface a link can address. Used by popstate only: a fresh
+ *  load already renders everything once the fetches land. */
+function urlRepaint() {
+  renderAlertWidget(); renderAlertFilters(); renderAlerts();
+  renderDeviceFilters(); renderDevices();
+  renderTrends(); renderPipelineWidget();
+}
+
+/** What the link asked for and did not get. */
+function renderLinkNotes() {
+  const el = $("#linkbanner");
+  if (!el) return;
+  const notes = (S.link && S.link.problems) || [];
+  if (!notes.length) { el.innerHTML = ""; return; }
+  el.innerHTML =
+    `<div class="banner warn"><span>&#128279;</span>
+       <span><b>This link could not be reproduced in full.</b> Everything below is what
+       the link asked for; what follows is what it asked for and could not have.
+       <ul>${notes.map((n) => `<li>${esc(n)}</li>`).join("")}</ul></span></div>`;
+}
+
+/**
+ * Apply the link in the address bar, BEFORE the first fetch.
+ *
+ * Filters are applied synchronously so the first paint is already the shared
+ * view rather than the default one flashing past it. The deep links that need
+ * data to exist first -- a device id, an alert id -- are held in S.link and
+ * resolved by urlResolveLink() once load() has something to check them
+ * against.
+ */
+function urlBoot() {
+  const { patch, problems } = urlReadParams(location.search);
+  urlApplyPatch(patch);
+  S.link = { device: patch.device, dtab: patch.dtab, alert: patch.alert, problems, resolved: false };
+  showView(S.view);
+  // Normalise what is on screen back into the address bar: a link carrying a
+  // parameter we ignored must not keep advertising it, or it gets shared on.
+  urlSync("replace");
+  renderLinkNotes();
+}
+
+/**
+ * The deep links that need the fleet to exist first. Runs once, after load().
+ *
+ * `device=` and `alert=` are checked against the collections we actually hold,
+ * so a link naming something that is gone SAYS SO rather than opening a
+ * neighbour or opening nothing. The filters are checked the same way: a link
+ * pinned to a site or a status that nothing on this tenant matches renders an
+ * empty table, and an empty table with no explanation reads as an empty fleet.
+ */
+function urlResolveLink() {
+  const L = S.link;
+  if (!L || L.resolved) return;
+  L.resolved = true;
+  const notes = L.problems;
+  const devices = S.devices || [];
+  if (S.dsite !== "all" && S.dsite !== "unplaced"
+      && !devices.some((d) => d.site && d.site.id === S.dsite)) {
+    notes.push(
+      `This link is filtered to site "${S.dsite}", which no loaded device belongs to. ` +
+      `The table is empty for that reason, not because the site has no screens.`);
+  }
+  if (S.cls !== "all" && !devices.some((d) => d.status === S.cls)) {
+    notes.push(`This link is filtered to status "${S.cls}", which no loaded device reports.`);
+  }
+  if (L.drillMissing == null && S.dids) {
+    const missing = [...S.dids.ids].filter((id) => !devices.some((d) => d.id === id));
+    L.drillMissing = missing.length;
+    if (missing.length) {
+      notes.push(
+        `${missing.length} of the ${S.dids.ids.size} device id(s) in this link are not in the ` +
+        `loaded fleet list (${missing.slice(0, 3).join(", ")}${missing.length > 3 ? ", …" : ""}). ` +
+        `They are counted in the link and absent from the table; nothing has been substituted.`);
+    }
+  }
+  if (L.device) {
+    if (devices.some((d) => d.id === L.device)) openDevice(L.device, { tab: L.dtab, fromLink: true });
+    else {
+      notes.push(
+        `This link opens device "${L.device}", which is not among the ` +
+        `${devices.length} device(s) loaded. Nothing was opened — no other device's data ` +
+        `is shown under that id.`);
+    }
+  }
+  if (L.alert) {
+    const held = [...(S.alerts || []), ...(S.alertsSup || [])];
+    // Opened against the API, not against the band on screen: an alert can be
+    // real and simply not in the band this link also pinned. But if we hold
+    // the bands and it is in neither, say so rather than opening a spinner.
+    if (held.some((a) => a.id === L.alert) || !Array.isArray(S.alertsSup)) {
+      openAlertWork(L.alert, { fromLink: true });
+    } else {
+      notes.push(
+        `This link opens alert "${L.alert}", which is in neither the incident nor the ` +
+        `suppressed band we loaded. It may have been resolved since the link was made; ` +
+        `nothing was opened.`);
+    }
+  }
+  renderLinkNotes();
+}
 
 /* ===================================================================
    Freshness. This is the first thing rendered and the loudest thing on
@@ -1938,7 +2438,9 @@ function renderAlertFilters() {
     // now on screen.
     const on = (id) => {
       const e = $("#" + id);
-      if (e) e.addEventListener("change", () => { S[id] = e.value; renderAlertFilters(); renderAlerts(); });
+      if (e) e.addEventListener("change", () => {
+        S[id] = e.value; renderAlertFilters(); renderAlerts(); urlSync("replace");
+      });
     };
     on("arule"); on("aage"); on("asort");
     const clear = filtered || active.sev !== "all" ? $("#aclear") : null;
@@ -1946,7 +2448,7 @@ function renderAlertFilters() {
       S.aq = ""; S.arule = "all"; S.aage = "all"; S.sev = "all";
       const box = $("#aq");
       if (box) box.value = "";
-      renderAlertFilters(); renderAlerts();
+      renderAlertFilters(); renderAlerts(); urlSync("replace");
     });
   }
 
@@ -1973,7 +2475,7 @@ function renderAlertFilters() {
     b.setAttribute("aria-pressed", String(S.sev === sev));
     b.addEventListener("click", () => {
       S.sev = S.sev === sev ? "all" : sev;
-      renderAlertFilters(); renderAlerts();
+      renderAlertFilters(); renderAlerts(); urlSync("replace");
     });
     wrap.appendChild(b);
   }
@@ -2304,6 +2806,7 @@ function renderAlertBands() {
       renderAlertWidget();
       renderAlertFilters();
       renderAlerts();
+      urlSync("replace");
     }));
   host.querySelectorAll("[data-neverseen]").forEach((b) =>
     b.addEventListener("click", () => openDevice(b.dataset.neverseen)));
@@ -2598,9 +3101,13 @@ async function releaseAlert(id, btn) {
 /* ---- the surface --------------------------------------------------- */
 
 function closeAlertWork() {
+  const was = S.awork;
   S.awork = null;
   $("#ascrim").classList.remove("on");
   $("#amodal").classList.remove("on");
+  if (URL_SUSPEND) return;
+  if (was && history.state && history.state.vfiLayer === "alert") history.back();
+  else urlSync("replace");
 }
 
 /** Is the alert work surface the top layer right now? Escape must close the
@@ -2609,8 +3116,11 @@ function alertWorkOpen() {
   return !!S.awork;
 }
 
-async function openAlertWork(id) {
+async function openAlertWork(id, opts) {
   S.awork = { id, alert: null, err: null, readAt: null };
+  // Same contract as the device drawer: opening pushes, and the entry is
+  // tagged so closing can step back through it.
+  urlSync(opts && opts.fromLink ? "replace" : "push", "alert");
   $("#ascrim").classList.add("on");
   $("#amodal").classList.add("on");
   $("#awnm").textContent = "Loading…";
@@ -3301,7 +3811,9 @@ function renderDeviceFilters() {
     b.className = "fp";
     b.innerHTML = `<span class="sdot ${key === "all" ? "unknown" : key}"></span><b>${n}</b> ${label}`;
     b.setAttribute("aria-pressed", String(S.cls === key));
-    b.addEventListener("click", () => { S.cls = key; renderDeviceFilters(); renderDevices(); });
+    b.addEventListener("click", () => {
+      S.cls = key; renderDeviceFilters(); renderDevices(); urlSync("replace");
+    });
     wrap.appendChild(b);
   }
 
@@ -3347,18 +3859,18 @@ function renderDeviceFilters() {
   const sel = $("#dsitesel");
   if (sel) sel.addEventListener("change", () => {
     S.dsite = sel.value;
-    renderDeviceFilters(); renderDevices();
+    renderDeviceFilters(); renderDevices(); urlSync("replace");
   });
   const dd = $("#ddclear");
   if (dd) dd.addEventListener("click", () => {
-    S.dids = null; renderDeviceFilters(); renderDevices();
+    S.dids = null; renderDeviceFilters(); renderDevices(); urlSync("replace");
   });
   const clr = $("#dclear");
   if (clr) clr.addEventListener("click", () => {
     S.dsite = "all"; S.cls = "all"; S.q = ""; S.dids = null;
     const box = $("#q");
     if (box) box.value = "";
-    renderDeviceFilters(); renderDevices();
+    renderDeviceFilters(); renderDevices(); urlSync("replace");
   });
 }
 
@@ -3499,6 +4011,7 @@ function renderDevices() {
       if (S.sort.key === key) S.sort.dir = -S.sort.dir;
       else S.sort = { key, dir: 1 };
       renderDevices();
+      urlSync("replace");
     }));
 }
 
@@ -3509,7 +4022,22 @@ const DTABS = [["overview", "&#128203; Overview"], ["network", "&#128246; Networ
                ["display", "&#128421; Display"], ["compliance", "&#128737; Compliance"],
                ["audit", "&#128220; Audit"]];
 
-async function openDevice(id) {
+/**
+ * Open the drawer on one device.
+ *
+ * `opts.tab` opens it on a named tab (a shared link can point at Network);
+ * `opts.fromLink` means the address bar already says this device, so the open
+ * must not add a history entry for a state the browser is already in.
+ */
+async function openDevice(id, opts) {
+  // Recorded BEFORE the fetch, so a link copied while the drawer is still
+  // loading names the device being opened rather than the last one.
+  S.devOpen = id;
+  S.dtab = (opts && opts.tab) || "overview";
+  // An opened drawer is something a Back press should close, so it pushes —
+  // tagged as a drawer entry so closeDevice() can tell it is ours to step back
+  // through rather than a dead-end entry it should overwrite.
+  urlSync(opts && opts.fromLink ? "replace" : "push", "device");
   $("#scrim").classList.add("on");
   $("#modal").classList.add("on");
   $("#dnm").textContent = "Loading…";
@@ -3531,14 +4059,26 @@ async function openDevice(id) {
     S.dev._alerts = alerts.data || [];
     S.dev._health = health && health.data;
     S.dev._shot = shot && shot.data;
-    S.dtab = "overview";
+    // S.dtab was set by openDevice() above — from opts.tab when a link named a
+    // tab, "overview" otherwise. Re-defaulting it here would drop the tab the
+    // link asked for on the floor the moment the payload landed.
     paintDevice();
   } catch (e) {
     $("#dbody").innerHTML = `<div class="empty">Could not load device: ${esc(e.message)}</div>`;
   }
 }
 function closeDevice() {
+  const was = S.devOpen;
+  S.devOpen = null;
   $("#scrim").classList.remove("on"); $("#modal").classList.remove("on");
+  if (URL_SUSPEND) return;   // this close IS the Back press being applied
+  // If the entry on top is the one WE pushed to open the drawer, step back
+  // through it: closing with X should leave the history where opening found
+  // it, not leave an entry behind whose Back press does nothing visible.
+  // popstate then re-applies the earlier link, which closes this again (the
+  // drawer is already shut, so that is a no-op).
+  if (was && history.state && history.state.vfiLayer === "device") history.back();
+  else urlSync("replace");
 }
 
 /* Commands the platform genuinely exposes vs. ones it does not. The disabled
@@ -3860,7 +4400,13 @@ function paintDevice() {
   $("#dtabs").innerHTML = DTABS.map(([k, l]) =>
     `<button data-t="${k}" aria-selected="${k === S.dtab}">${l}</button>`).join("");
   $("#dtabs").querySelectorAll("button").forEach((b) =>
-    b.addEventListener("click", () => { S.dtab = b.dataset.t; paintDevice(); }));
+    b.addEventListener("click", () => {
+      S.dtab = b.dataset.t;
+      paintDevice();
+      // Incidental within an already-linkable drawer: the tab travels in the
+      // link, but a Back press should close the drawer, not walk its tabs.
+      urlSync("replace");
+    }));
 
   $("#dbody").innerHTML =
     ({ overview: tabOverview, network: tabNetwork, display: tabDisplay,
@@ -5194,6 +5740,7 @@ function renderPipelineWidget() {
   pills.querySelectorAll(".fp").forEach((b) => b.addEventListener("click", () => {
     S.plane = b.dataset.st;
     renderPipelineWidget();
+    urlSync("replace");
   }));
 
   const healthy = by.healthy || 0;
@@ -5276,6 +5823,10 @@ let TR_USER_PICKED = false;
 
 async function loadTrends(days) {
   TR_USER_PICKED = true;
+  // A window the operator CHOSE. Only a chosen window travels in a link:
+  // trendsAutoWindow() escalating past a refusal is not a choice, and pinning
+  // it would make every shared link force a window nobody picked.
+  S.trpin = true;
   S.trwin = days;
   S.trloading = true;
   S.trdir = "all";
@@ -5623,7 +6174,7 @@ function renderTrends() {
     `<button data-d="${d}" aria-pressed="${S.trwin === d}"${S.trloading ? " disabled" : ""}>
        ${d} day${d === 1 ? "" : "s"}</button>`).join("");
   $("#trwin").querySelectorAll("button").forEach((b) =>
-    b.addEventListener("click", () => loadTrends(Number(b.dataset.d))));
+    b.addEventListener("click", () => { loadTrends(Number(b.dataset.d)); urlSync("replace"); }));
   const winWords = S.trwin === 1 ? ["the last day", "the day before"]
     : [`the last ${S.trwin} days`, `the previous ${S.trwin} days`];
   /* WHICH window we opened on, and WHY (GAP-6). A default that silently lands
@@ -5688,7 +6239,9 @@ function renderTrends() {
       : "");
   const pills = $("#trpills");
   if (pills) pills.querySelectorAll(".fp").forEach((b) =>
-    b.addEventListener("click", () => { S.trdir = b.dataset.dir; renderTrends(); }));
+    b.addEventListener("click", () => {
+      S.trdir = b.dataset.dir; renderTrends(); urlSync("replace");
+    }));
 }
 
 /* ===================================================================
@@ -5798,6 +6351,9 @@ async function loadAudit(over) {
   }
   S.audLoading = false;
   renderAudit();
+  // Written after the read, so the link never names a filter this console did
+  // not actually ask the log for.
+  urlSync("replace");
 }
 
 /** An outcome's dot and its meaning. An outcome this console has never heard of
@@ -6244,6 +6800,10 @@ function drillToDevices(ids, label) {
   if (box) box.value = "";
   switchTab("devices");
   renderDeviceFilters(); renderDevices();
+  // The ids are in the link too, up to URL_DRILL_CAP, so a finding's device
+  // list can be pasted into a ticket. switchTab() has already pushed the tab
+  // change; this replaces that entry with the one that carries the drilldown.
+  urlSync("replace");
 }
 
 function renderActions() {
@@ -6671,75 +7231,523 @@ document.addEventListener("visibilitychange", () => {
 });
 setInterval(() => { if (S.fresh) renderFreshness(); }, 15_000);
 
-/* ---- wiring ------------------------------------------------------ */
-$("#dx").addEventListener("click", closeDevice);
-$("#scrim").addEventListener("click", closeDevice);
-// Escape closes the TOP layer. The alert work surface sits above the device
-// drawer, so closing the drawer underneath it would leave the surface stranded
-// over an empty page.
-addEventListener("keydown", (e) => {
-  if (e.key !== "Escape") return;
-  if (alertWorkOpen()) closeAlertWork();
-  else closeDevice();
-});
-$("#awx").addEventListener("click", closeAlertWork);
-$("#ascrim").addEventListener("click", closeAlertWork);
-// Both renderers, for the reason the Alerts search states below: the status
-// chips, the header and the rows all count the SEARCHED set, so they have to
-// move in the same tick.
-$("#q").addEventListener("input", (e) => {
-  S.q = e.target.value;
-  renderDeviceFilters(); renderDevices();
-});
-// Both renderers, because the severity chips and the header count the searched
-// set: the chips, the header and the rows have to move in the same tick.
-$("#aq").addEventListener("input", (e) => {
-  S.aq = e.target.value;
-  renderAlertFilters(); renderAlerts();
-});
-$("#reload").addEventListener("click", () => load());
 
-const VIEWS_ALL = ["overview", "alerts", "actions", "devices", "compliance", "brief", "insights", "sla", "trends", "audit"];
-document.querySelectorAll("#nav button").forEach((b) => b.addEventListener("click", () => {
-  document.querySelectorAll("#nav button").forEach((x) =>
-    x.setAttribute("aria-selected", String(x === b)));
-  const v = b.dataset.v;
-  for (const name of VIEWS_ALL) {
-    const el = document.getElementById("v-" + name);
-    if (el) el.classList.toggle("hide", name !== v);
+/* ===================================================================
+   SCOPED EXPORT (US-8.4.2) -- the list you are looking at, as a file
+   that says what it is.
+
+   WHAT WAS WRONG. The only export in this product wrote one fleet-level
+   JSON blob: a health score, a snapshot, some counts. No device list, no
+   alert list, no advisory list, no CSV, and no scoping of any kind -- so a
+   technician looking at "offline canvases at one site" could export
+   everything except that.
+
+   THE RULE THIS SECTION EXISTS FOR. An export whose basis is unstated
+   becomes a wrong number in someone's spreadsheet a week later. Nobody
+   opening the file in a month will remember which chips were pressed. So
+   the scope is written INSIDE the artefact -- the filters, the site, the
+   band, the search, the row count, the collection shortfalls and the
+   figures we refuse to state -- and it is written from ONE object into both
+   formats, so the CSV preamble and the JSON header cannot disagree.
+
+   WHY THE ROWS ARE FILTERED HERE RATHER THAN REFETCHED. The set on screen
+   is not expressible as a server query: it is the fleet this console
+   loaded, narrowed by a search across eight joined fields, a site axis, a
+   status word, and sometimes an explicit id list handed over by a
+   correlated finding. An export that re-asked the API would be a different
+   set carrying the same name. The cost is that the device predicate now
+   exists in three places (both device renderers and exportDeviceRows); the
+   mitigation is a test asserting this function returns exactly the rows the
+   table rendered, which is the invariant that has broken three times here.
+
+   AND WHAT IT WILL NOT WRITE. No availability, uptime or SLA figure appears
+   in any file below. Our own collector observed 77% of the last measured
+   week (docs/14 C9, epic 6.5 -- ~38 hours with no reading from any screen),
+   so no availability number over that window is defensible, and a
+   clean-looking customer artefact over a 38-hour hole is exactly the thing
+   this codebase refuses to produce. The refusal is printed in the file with
+   the coverage figure that causes it, read live from /api/sla/coverage
+   rather than hardcoded.
+   =================================================================== */
+
+/** RFC 4180 line ending. Excel is the reader and it wants CRLF. */
+const CSV_EOL = "\r\n";
+
+/**
+ * Escape ONE field, RFC 4180. Deliberately identical in behaviour to
+ * `csvField()` in src/api/routes/reports.ts: the same artefact must not depend
+ * on whether it was written by the server or by this page.
+ *
+ * `null` and `undefined` become an EMPTY cell -- never `0` and never the string
+ * "null". That is the honest-null rule carried into a format that has no null,
+ * and the preamble states what an empty cell means so the reader never guesses.
+ *
+ * Leading or trailing whitespace forces quoting, which RFC 4180 does not
+ * require: this tenant has device names with trailing spaces, an unquoted
+ * trailing space is silently eaten by most readers, and then the name in the
+ * customer's spreadsheet is not the name on the platform.
+ */
+function csvField(value) {
+  if (value === null || value === undefined) return "";
+  let text;
+  if (typeof value === "string") text = value;
+  else if (typeof value === "boolean") text = value ? "true" : "false";
+  else if (typeof value === "number") text = Number.isFinite(value) ? String(value) : "";
+  else text = JSON.stringify(value) || "";
+  const needsQuote = text.includes(",") || text.includes('"') || text.includes("\n")
+    || text.includes("\r") || text !== text.trim();
+  return needsQuote ? `"${text.split('"').join('""')}"` : text;
+}
+
+/** Header row plus body, CRLF throughout, trailing newline. Pure. */
+function toCsvText(headers, rows) {
+  const lines = [headers.map(csvField).join(",")];
+  for (const row of rows) lines.push(row.map(csvField).join(","));
+  return lines.join(CSV_EOL) + CSV_EOL;
+}
+
+/** Characters a spreadsheet reads as the start of a formula. */
+const CSV_FORMULA_LEAD = /^[=+\-@\t\r]/;
+/** Values are never rewritten to make a spreadsheet behave -- mutating a device
+ *  name is the quiet falsification this file refuses -- so the risk is
+ *  DISCLOSED in the preamble instead. Same choice as reports.ts. */
+function csvFormulaRisk(rows) {
+  return rows.some((row) => row.some((c) => typeof c === "string" && CSV_FORMULA_LEAD.test(c)));
+}
+
+/* ---- the columns -------------------------------------------------
+   One list per dataset, each entry `[header, accessor]`. The CSV cells and
+   the JSON row objects are both derived from these same pairs, so the two
+   formats of one export cannot carry different columns or different values.
+   Every accessor returns `null` for "could not be read"; none returns 0. */
+
+/** Site and customer are the SAME axis on this platform: there is no customer
+ *  entity behind the API, a site is the customer unit, and the preamble says so
+ *  rather than leaving a reader to assume a column we do not have. */
+const EXPORT_DEVICE_COLUMNS = [
+  ["device_id", (d) => d.id],
+  ["name", (d) => d.name || null],
+  ["location", (d) => d.location || null],
+  ["site", (d) => (d.site && d.site.name) || null],
+  ["site_id", (d) => (d.site && d.site.id) || null],
+  ["customer", (d) => (d.site && d.site.name) || null],
+  // WHY the site cell is empty, in the API's own words. "The hierarchy could
+  // not be read" and "this canvas is in no group" are different facts and a
+  // blank cell conflates them.
+  ["site_note", (d, s) => ((s.dsites && s.dsites.available === false)
+    ? (s.dsites.reason || "the group hierarchy could not be read")
+    : (d.site && d.site.name) ? null : ((d.site && d.site.reason) || "no site reported by the platform"))],
+  ["group", (d) => d.groupName || null],
+  ["device_class", (d) => d.deviceClass || null],
+  ["status", (d) => d.status || null],
+  ["last_online_time", (d) => d.lastOnlineTime || null],
+  ["firmware_behind", (d) => (typeof d.firmwareBehind === "boolean" ? d.firmwareBehind : null)],
+  ["open_alerts_total", (d) => (d.openAlerts && typeof d.openAlerts.total === "number"
+    ? d.openAlerts.total : null)],
+  // Derived from the latest reading, and null when there is no reading -- not
+  // "off", which is a claim about the screen rather than about our data.
+  ["screen_state", (d) => {
+    const l = d.latest;
+    if (!l) return null;
+    if (l.nowPlayingId) return "playing";
+    if (l.showingLogo) return "logo-fallback";
+    if (l.isBlackScreen) return "black-screen";
+    return null;
+  }],
+  ["now_playing_id", (d) => (d.latest && d.latest.nowPlayingId) || null],
+  ["reading_observed_at", (d) => (d.latest && d.latest.observedAt) || null],
+];
+
+const EXPORT_ALERT_COLUMNS = [
+  ["alert_id", (a) => a.id],
+  ["device_id", (a) => a.deviceId || null],
+  ["device_name", (a) => a.deviceName || null],
+  ["site", (a, s) => { const d = (s.devices || []).find((x) => x.id === a.deviceId);
+    return (d && d.site && d.site.name) || null; }],
+  ["customer", (a, s) => { const d = (s.devices || []).find((x) => x.id === a.deviceId);
+    return (d && d.site && d.site.name) || null; }],
+  // The alert row carries `location` on only a handful, so the device record's
+  // own `location` fills the rest in -- the same field from the collection that
+  // has it. Never `city`, which is an account city and would put a Swedish
+  // canvas in London.
+  ["location", (a, s) => a.location
+    || ((s.devices || []).find((x) => x.id === a.deviceId) || {}).location || null],
+  ["severity", (a) => a.severity || null],
+  ["rule_id", (a) => a.ruleId || null],
+  ["title", (a) => a.title || null],
+  ["opened_at", (a) => a.openedAt || null],
+  ["last_fired_at", (a) => a.lastFiredAt || null],
+  ["claimed_by", (a) => a.acknowledgedBy || null],
+  ["claimed_at", (a) => a.acknowledgedAt || null],
+  ["note_count", (a) => (typeof a.noteCount === "number" ? a.noteCount : null)],
+  ["suppressed", (a) => (typeof a.suppressed === "boolean" ? a.suppressed : null)],
+  ["suppression_scope", (a) => (a.suppression && a.suppression.scope) || null],
+  ["suppression_expires_at", (a) => (a.suppression
+    ? (a.suppression.neverExpires ? "never" : a.suppression.expiresAt || null) : null)],
+  ["held_back_from_suppression", (a) => (typeof a.suppressionHeldBack === "boolean"
+    ? a.suppressionHeldBack : null)],
+];
+
+const EXPORT_ADVISORY_COLUMNS = [
+  ["recommendation_id", (r) => r.id],
+  ["kind", (r) => r.kind || null],
+  ["one_click", (r) => r.kind === "auto-safe"],
+  ["severity", (r) => r.severity || null],
+  ["category", (r) => r.category || null],
+  ["symptom", (r) => r.symptom || null],
+  ["action", (r) => r.action || null],
+  ["rationale", (r) => r.rationale || null],
+  ["confidence", (r) => (typeof r.confidence === "number" ? r.confidence : null)],
+  ["device_ids", (r) => (r.deviceIds || []).join(" ") || null],
+  ["device_label", (r) => r.deviceLabel || null],
+  ["site", (r, s) => { const d = (s.devices || []).find((x) => x.id === (r.deviceIds || [])[0]);
+    return (d && d.site && d.site.name) || null; }],
+  ["customer", (r, s) => { const d = (s.devices || []).find((x) => x.id === (r.deviceIds || [])[0]);
+    return (d && d.site && d.site.name) || null; }],
+  ["intent", (r) => (r.intent && r.intent.purpose) || null],
+  ["intent_source", (r) => (r.intent && r.intent.source) || null],
+  ["held_manual_by_intent", (r) => (typeof r.intentHeldManual === "boolean" ? r.intentHeldManual : null)],
+];
+
+/**
+ * The devices on screen, in screen order.
+ *
+ * The THIRD copy of the device predicate, and the comment in
+ * renderDeviceFilters() says why the copies exist: these functions are lifted
+ * by name and run in isolation by the console-invariant tests, so a shared
+ * top-level helper would be undefined there. If you change one, change all
+ * three -- a test asserts this function returns exactly the row set the table
+ * rendered, so a drift shows up as a failure rather than as an export that
+ * quietly disagrees with the screen above it.
+ */
+function exportDeviceRows(s) {
+  const q = String(s.q || "").trim().toLowerCase();
+  const ids = (s.dids && s.dids.ids) || null;
+  const rows = (s.devices || []).filter((d) => {
+    if (ids && !ids.has(d.id)) return false;
+    if (s.dsite && s.dsite !== "all") {
+      const sid = (d.site && d.site.id) || null;
+      if (s.dsite === "unplaced" ? sid !== null : sid !== s.dsite) return false;
+    }
+    if (s.cls !== "all" && d.status !== s.cls) return false;
+    if (!q) return true;
+    return [d.name, d.location, d.id, d.serialNo, d.deviceClass, d.city,
+            d.site && d.site.name, d.groupName]
+      .some((v) => v && String(v).toLowerCase().includes(q));
+  });
+  const acc = SORTS[s.sort.key] || SORTS.status;
+  rows.sort((a, b) => {
+    const x = acc(a), y = acc(b);
+    return (x < y ? -1 : x > y ? 1 : 0) * s.sort.dir;
+  });
+  return rows;
+}
+
+/**
+ * The figures this product will NOT put in an exported file, and why.
+ *
+ * Read live rather than hardcoded: the coverage that blocks an availability
+ * claim is a measurement, and a measurement quoted from memory in a customer
+ * artefact is the thing being guarded against. When /api/sla/coverage did not
+ * answer we say we cannot even state the denominator, which is a stronger
+ * refusal, not a weaker one.
+ */
+function exportRefusals(s) {
+  const cov = s.sla && typeof s.sla.fleetCollectionCoverage === "number"
+    ? s.sla.fleetCollectionCoverage : null;
+  const out = [];
+  const lead = "NO AVAILABILITY, UPTIME OR SLA FIGURE IS STATED IN THIS FILE.";
+  const win = cov == null ? "" : `(fleet collection coverage, /api/sla/coverage, `
+    + `${s.sla.windowHours} h at ${s.sla.bucketSeconds} s buckets)`;
+  /* Three cases, and they are three different statements. A coverage of
+     EXACTLY zero is not "0.0%" — printing a percentage there invites the
+     reader to treat it as a measurement of the estate, when it means we
+     observed no part of the window at all. The local database with a
+     twelve-day-old sample produces precisely this, which is how it was found. */
+  out.push(cov == null
+    ? `${lead} /api/sla/coverage did not answer, so this console cannot state how much of the `
+      + `window it observed — and a percentage whose denominator is unknown is worse than no `
+      + `percentage.`
+    : cov === 0
+      ? `${lead} Our own collector observed NONE of the measured window ${win} — not a low `
+        + `availability figure, no observation at all. Nothing in this file is evidence about `
+        + `uptime over that window.`
+      : `${lead} Our own collector observed ${(cov * 100).toFixed(1)}% of the measured window `
+        + `${win}. An availability figure over a window we did not watch in full is not `
+        + `defensible, and the shortfall is OUR collector rather than the estate.`);
+  out.push("Playback is SCHEDULED, NOT CONFIRMED: nothing in this file evidences rendered pixels — "
+    + "the platform exposes no readable render log at any scope.");
+  out.push("An empty cell or a JSON null means the value could not be read. It is never a zero.");
+  out.push("Every row is this console's most recent SNAPSHOT of the platform, not a live read; the "
+    + "age of that snapshot is stated above.");
+  return out;
+}
+
+/**
+ * ONE on-screen list, with the scope that produced it.
+ *
+ * `kind` is "devices" | "alerts" | "advisories". The returned `scope` block is
+ * what gets written into the artefact, and the filters it lists are only the
+ * ones that ACTUALLY applied to this dataset: the site axis narrows the device
+ * table and not the alert queue, so claiming a site scope on an alert export
+ * would be a false statement about a true file.
+ */
+function exportSet(kind, s) {
+  const st = s || S;
+  const filters = [];
+  const caveats = [];
+  const trunc = st.trunc || {};
+  let rows = [];
+  let columns = [];
+  let dataset = kind;
+  let title = "";
+  let scopeLabel = "the whole fleet, unfiltered";
+  let sourceCount = 0;
+  let sourceNoun = "";
+  let shortfallKey = null;
+  let shownOnScreen = null;
+
+  if (kind === "devices") {
+    columns = EXPORT_DEVICE_COLUMNS;
+    rows = exportDeviceRows(st);
+    title = "Devices, as filtered on screen";
+    sourceCount = (st.devices || []).length;
+    sourceNoun = "device(s) loaded by this console";
+    shortfallKey = "devices";
+    shownOnScreen = 200;
+    if (st.dids) filters.push(["device-id drilldown", st.dids.label
+      + ` (${st.dids.ids.size} id(s))`]);
+    if (st.dsite === "unplaced") filters.push(["site", "not placed at any site"]);
+    else if (st.dsite !== "all") {
+      const named = (st.devices || []).find((d) => d.site && d.site.id === st.dsite);
+      filters.push(["site", named ? `${named.site.name} (id ${st.dsite})`
+        : `id ${st.dsite} — no loaded device belongs to it`]);
+    }
+    if (st.cls !== "all") filters.push(["status", st.cls]);
+    if (String(st.q || "").trim()) filters.push(["search",
+      `"${String(st.q).trim()}" across name, location, id, serial, class, city, site and group`]);
+    filters.push(["sort", `${st.sort.key}, ${st.sort.dir === -1 ? "descending" : "ascending"}`]);
+  } else if (kind === "alerts") {
+    columns = EXPORT_ALERT_COLUMNS;
+    const b = alertBands();
+    rows = b.rows;
+    title = `Alerts (${b.band} band), as filtered on screen`;
+    sourceCount = b.scoped.length;
+    sourceNoun = `alert(s) in the ${b.band} band`;
+    shortfallKey = b.band === "suppressed" ? "alertsSup" : "alerts";
+    shownOnScreen = 200;
+    filters.push(["band", b.band
+      + (b.band === "incidents" ? " — today's incidents, excluding the dormant tail" : "")]);
+    if (b.active.sev !== "all") filters.push(["severity", b.active.sev]);
+    if (b.active.rule !== "all") filters.push(["rule", b.active.rule]);
+    if (b.active.age !== "all") filters.push(["age window", b.active.age]);
+    if (b.active.q) filters.push(["search",
+      `"${b.active.q}" across device name, device id, title, rule, severity and location`]);
+    filters.push(["sort", b.active.sort]);
+    // The alert queue has NO site filter on screen, so this file is not
+    // site-scoped even when the Devices tab is. Said out loud: a file that
+    // looks scoped and is not is the whole failure mode here.
+    caveats.push("The alert queue has no site filter on screen, so these rows are NOT scoped to a "
+      + "site even if the Devices tab was. The site and customer columns are joined in per row "
+      + "from the device record.");
+    if (!b.supKnown && b.band === "suppressed") {
+      caveats.push("The suppressed band could not be loaded, so this file holds none of it. That is "
+        + "not a statement that nothing is suppressed.");
+    }
+  } else {
+    columns = EXPORT_ADVISORY_COLUMNS;
+    const R = st.remediation;
+    rows = (R && Array.isArray(R.recommendations)) ? R.recommendations : [];
+    title = "Recommended actions, one-click and advisory";
+    sourceCount = rows.length;
+    sourceNoun = "recommendation(s) returned by the engine";
+    dataset = "advisories";
+    scopeLabel = "every recommendation the engine returned";
+    filters.push(["filter", "none — the Actions view offers no filter, so this is the whole list"]);
+    caveats.push(R && R.devicesConsidered != null
+      ? `Ranked from ${R.devicesConsidered} device(s) considered by the remediation engine.`
+      : "The engine did not report how many devices it considered, so the denominator behind this "
+        + "ranking is unknown.");
+    if (!R || !Array.isArray(R.recommendations)) {
+      caveats.push("The remediation service did not respond, so this file is EMPTY because we could "
+        + "not ask — not because the estate needs nothing.");
+    }
   }
-  const [h, s] = PAGES[v] || ["", ""];
-  $("#phead").textContent = h;
-  $("#psub").textContent = s;
-  window.scrollTo({ top: 0, behavior: "instant" });
-  /* The action log is fetched when its tab is OPENED, not by load(): it is a
-     paged read of an append-only table that no other surface consumes, and the
-     two-minute refresh has no business walking it. The Refresh button and every
-     filter change re-read it. */
-  if (v === "audit" && !S.audit && !S.audLoading) loadAudit();
-}));
-$("#audreload").addEventListener("click", () => loadAudit({ page: 1 }));
 
-document.querySelectorAll("[data-goto]").forEach((b) =>
-  b.addEventListener("click", () => switchTab(b.dataset.goto)));
-$("#gq").addEventListener("focus", () => { $("#gq").blur(); palOpen(); });
-$("#gq").addEventListener("click", palOpen);
-$("#shotLive").addEventListener("click", toggleLive);
-$("#gapsbtn").addEventListener("click", () => {
-  switchTab("overview");
-  setTimeout(() => $("#wgaps").scrollIntoView({ behavior: "smooth", block: "center" }), 60);
-});
-/* Export is a real download built from state already in the browser — no
-   server round trip, and it carries the freshness stamp so an exported report
-   can never be mistaken for live data. */
-$("#exportbtn").addEventListener("click", () => {
+  if (kind !== "advisories") {
+    scopeLabel = filters.length
+      ? filters.map(([k, v]) => `${k}: ${v}`).join(" · ")
+      : "no filter applied — the whole loaded collection";
+  }
+
+  // The collection this file was drawn from came up short, so every count in
+  // it is a floor. The banner that said so on screen does not travel with the
+  // file, which is exactly why it is repeated here.
+  const short = shortfallKey ? trunc[shortfallKey] : null;
+  if (short) {
+    const noun = COLLECTION_NOUN[shortfallKey] || shortfallKey;
+    const why = short.capped
+      ? `the ${short.cap}-row paging cap was hit (${short.pagesFetched} of ${short.pagesAvailable} pages)`
+      : "a page was rejected or rate-limited part way through the walk";
+    caveats.push(
+      `This console holds ${short.loaded} of ${short.total} ${noun}: ${short.total - short.loaded} `
+      + `were never loaded, because ${why}. Every count in this file is therefore a LOWER BOUND, and `
+      + `rows that exist on the platform may be absent from it.`);
+  }
+  // The list on screen is capped; this file is not. Stated so nobody reconciles
+  // 200 rows against a header of 813 and assumes the file was truncated too.
+  if (shownOnScreen != null && rows.length > shownOnScreen) {
+    caveats.push(`The list on screen draws only the first ${shownOnScreen} matches; this file `
+      + `contains all ${rows.length} of them.`);
+  }
+  if (rows.length === 0) {
+    caveats.push("No row matched this scope. The file is empty because the filters above excluded "
+      + "everything, not because the collection it was drawn from was empty.");
+  }
+
+  const f = st.fresh || null;
+  const scope = {
+    artefact: "on-screen export",
+    dataset,
+    title,
+    tenant: "VIDERISALES",
+    generatedAt: new Date().toISOString(),
+    onScreenView: st.view || null,
+    scopeLabel,
+    filters,
+    rowCount: rows.length,
+    sourceCount,
+    sourceNoun,
+    rowsShownOnScreen: shownOnScreen,
+    collectionShortfall: short || null,
+    dataAsOf: (f && f.newestSampleAt) || null,
+    dataAgeSeconds: f && typeof f.ageSeconds === "number" ? Math.round(f.ageSeconds) : null,
+    freshnessState: (f && f.state) || null,
+    caveats,
+    refusals: exportRefusals(st),
+  };
+  const objects = rows.map((r) => {
+    const o = {};
+    for (const [h, fn] of columns) o[h] = fn(r, st);
+    return o;
+  });
+  const cells = rows.map((r) => columns.map(([, fn]) => fn(r, st)));
+  return { kind, dataset, title, scope, columns, rows, objects, cells };
+}
+
+/** The scope block as the CSV preamble. `#` lines, exactly as
+ *  src/api/routes/reports.ts writes them, so a file from the server and a file
+ *  from this page read the same way. */
+function exportCsvText(set) {
+  const sc = set.scope;
+  // Seconds AND words: "1050520 s" is precise and unreadable, and this line is
+  // read by a person deciding whether to trust the file.
+  const age = sc.dataAgeSeconds == null ? "unknown"
+    : `${sc.dataAgeSeconds} s / ${dur(sc.dataAgeSeconds)}`;
+  const lines = [
+    `# Videri Fleet Intelligence — ${sc.title}`,
+    `# THIS FILE IS SCOPED. Everything below is the list that was on screen, not the fleet.`,
+    `# Dataset: ${sc.dataset}`,
+    `# Scope: ${sc.scopeLabel}`,
+  ];
+  for (const [k, v] of sc.filters) lines.push(`# Filter — ${k}: ${v}`);
+  lines.push(
+    `# Rows in this file: ${sc.rowCount}`,
+    `# Drawn from: ${sc.sourceCount} ${sc.sourceNoun}`,
+    `# Tenant: ${sc.tenant}`,
+    `# Generated at: ${sc.generatedAt} (absolute, UTC)`,
+    `# Data as of: ${sc.dataAsOf || "unknown — no sample timestamp was served"}`
+      + ` (${age} old at generation, ${sc.freshnessState || "freshness unknown"})`,
+    `# This file is a SNAPSHOT of that moment, not a live read of the platform.`,
+    `# Site and customer are the same axis on this platform: a site IS the customer unit here,`,
+    `#   and there is no separate customer entity behind the API. The customer column is the`,
+    `#   site name, and it is empty wherever the site could not be resolved.`,
+  );
+  for (const c of sc.caveats) lines.push(`# NOTE: ${c}`);
+  for (const r of sc.refusals) lines.push(`# ${r}`);
+  if (csvFormulaRisk(set.cells)) {
+    lines.push("# WARNING: at least one value begins with =, +, - or @ and will be read as a formula"
+      + " by a spreadsheet. The values are unmodified here on purpose; import with every column as text.");
+  }
+  // Comment lines are not CSV fields, so they are not quoted -- but any CR/LF
+  // inside an interpolated value is collapsed, or a device name could inject a
+  // fake data row into the preamble.
+  return lines.map((l) => String(l).replace(/[\r\n]+/g, " ")).join(CSV_EOL) + CSV_EOL
+    + toCsvText(set.columns.map(([h]) => h), set.cells);
+}
+
+/** The same scope block, the same rows, as JSON. `scope` first, so a reader
+ *  who opens the file sees what it is before they see a number. */
+function exportJsonText(set) {
+  return JSON.stringify({ scope: set.scope, columns: set.columns.map(([h]) => h), rows: set.objects }, null, 2);
+}
+
+/** Filesystem-safe slug. Never used as an identity. */
+function exportSlug(text) {
+  const slug = String(text || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  return slug === "" ? "unfiltered" : slug.slice(0, 48);
+}
+
+/** The scope, in a filename: a folder of exports must not be five files called
+ *  `devices.csv`. Site and status ride in the name; the file's own preamble is
+ *  still the authority. */
+function exportFilename(set, fmt) {
+  const st = S;
+  const bits = [set.dataset];
+  if (set.kind === "devices") {
+    if (st.dsite && st.dsite !== "all") bits.push("site-" + exportSlug(st.dsite));
+    if (st.cls !== "all") bits.push(exportSlug(st.cls));
+    if (st.dids) bits.push("drilldown");
+  }
+  if (set.kind === "alerts") bits.push(exportSlug(set.scope.filters[0] ? set.scope.filters[0][1] : "band"));
+  if (String(st.q || "").trim() && set.kind === "devices") bits.push("q-" + exportSlug(st.q));
+  return `videri-${bits.map(exportSlug).join("-")}-${set.scope.generatedAt.replace(/[:.]/g, "-")}.${fmt}`;
+}
+
+/** Hand the bytes to the browser. The only IO in this section. */
+function exportDownload(kind, fmt) {
+  const set = exportSet(kind);
+  const text = fmt === "csv" ? exportCsvText(set) : exportJsonText(set);
+  const blob = new Blob([text], {
+    type: fmt === "csv" ? "text/csv;charset=utf-8" : "application/json",
+  });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = exportFilename(set, fmt);
+  a.click();
+  URL.revokeObjectURL(a.href);
+  exportMenuClose();
+}
+
+/**
+ * The whole-fleet summary, kept and NAMED as such.
+ *
+ * It is the old export, plus the two things it was missing: a scope block that
+ * says it is unscoped (so a figure from it can never be mistaken for the site
+ * on screen) and the same refusal list as every other artefact here.
+ */
+function exportFleetSummary() {
   const h = healthScore();
   const report = {
-    generatedAt: new Date().toISOString(),
-    tenant: "VIDERISALES",
+    scope: {
+      artefact: "fleet summary",
+      dataset: "fleet-summary",
+      tenant: "VIDERISALES",
+      generatedAt: new Date().toISOString(),
+      scopeLabel: "THE WHOLE FLEET, UNFILTERED — not the site, band or search on screen",
+      filters: [],
+      dataAsOf: (S.fresh && S.fresh.newestSampleAt) || null,
+      dataAgeSeconds: S.fresh && typeof S.fresh.ageSeconds === "number"
+        ? Math.round(S.fresh.ageSeconds) : null,
+      freshnessState: (S.fresh && S.fresh.state) || null,
+      refusals: exportRefusals(S),
+    },
     freshness: S.fresh,
     healthScore: h && { score: h.score, counted: h.dims, excluded: h.excluded },
     fleet: S.summary && S.summary.snapshot,
+    // The SLA payload is carried WHOLE, because its coverage, confidence
+    // breakdown and unmeasurable list are what make its numbers readable at
+    // all. Never a single blended figure lifted out of it.
     sla: S.sla,
     // Named by band, because "openAlerts: 291" over a console that asked for
     // band=incident is a figure that outlives the tab that qualified it.
@@ -6756,9 +7764,172 @@ $("#exportbtn").addEventListener("click", () => {
   const blob = new Blob([JSON.stringify(report, null, 2)], { type: "application/json" });
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
-  a.download = `videri-fleet-report-${new Date().toISOString().slice(0, 10)}.json`;
+  a.download = `videri-fleet-summary-${new Date().toISOString().slice(0, 10)}.json`;
   a.click();
   URL.revokeObjectURL(a.href);
+  exportMenuClose();
+}
+
+/* ---- the export menu --------------------------------------------- */
+
+function exportMenuClose() {
+  const m = $("#exportmenu");
+  if (m) m.classList.remove("on");
+  const b = $("#exportbtn");
+  if (b) b.setAttribute("aria-expanded", "false");
+}
+
+/**
+ * The menu, rebuilt on every open so its counts are the counts on screen.
+ *
+ * Each row prints the row count the file will contain, taken from the very
+ * array the file is built from -- the same "count the thing you filter" rule
+ * the chips live under. The scope sentence at the top is the one that also
+ * goes into the file, so an operator sees before they click what the artefact
+ * will claim about itself.
+ */
+function renderExportMenu() {
+  const m = $("#exportmenu");
+  if (!m) return;
+  const kinds = ["devices", "alerts", "advisories"];
+  // The dataset matching the view on screen is marked, because "export what I
+  // am looking at" is the request this menu answers.
+  const here = { devices: "devices", alerts: "alerts", actions: "advisories" }[S.view] || null;
+  const sets = kinds.map((k) => exportSet(k));
+  const rowsHtml = sets.map((set) => {
+    const sc = set.scope;
+    const mark = set.kind === here ? " here" : "";
+    return `<div class="xrow${mark}">
+      <span class="xl"><b>${sc.rowCount.toLocaleString()}</b> ${esc(set.dataset)}
+        ${set.kind === here ? `<span class="prov">the list on screen now</span>` : ""}
+        <span class="prov">${esc(sc.scopeLabel)}</span></span>
+      <button class="btn sm" data-x="${esc(set.kind)}" data-xf="csv">CSV</button>
+      <button class="btn sm" data-x="${esc(set.kind)}" data-xf="json">JSON</button></div>`;
+  }).join("");
+  const ref = sets[0].scope.refusals[0];
+  m.innerHTML =
+    `<h4>Export what is on screen</h4>
+     <div class="xscope">Each file states its own scope inside it — the filters, the site,
+       the band, the search, the row count and anything it refuses to state.
+       <ul><li>${esc(ref)}</li></ul></div>
+     ${rowsHtml}
+     <div class="xrow"><span class="xl">Fleet summary
+       <span class="prov">the whole fleet, unfiltered — labelled as such in the file</span></span>
+       <button class="btn sm" data-x="fleet" data-xf="json">JSON</button></div>
+     <div class="xnote">Rows come from the collections this console has loaded, filtered exactly as
+       the screen is. Where a collection came up short the file says so and its counts are lower
+       bounds.</div>`;
+  m.querySelectorAll("[data-x]").forEach((b) => b.addEventListener("click", () => {
+    if (b.dataset.x === "fleet") exportFleetSummary();
+    else exportDownload(b.dataset.x, b.dataset.xf);
+  }));
+}
+
+/* ---- wiring ------------------------------------------------------ */
+$("#dx").addEventListener("click", closeDevice);
+$("#scrim").addEventListener("click", closeDevice);
+// Escape closes the TOP layer. The alert work surface sits above the device
+// drawer, so closing the drawer underneath it would leave the surface stranded
+// over an empty page.
+addEventListener("keydown", (e) => {
+  if (e.key !== "Escape") return;
+  // The export popover sits above both layers, so it is closed first: an
+  // Escape that shut the drawer underneath an open menu would leave the menu
+  // floating over an empty page.
+  const menu = $("#exportmenu");
+  if (menu && menu.classList.contains("on")) { exportMenuClose(); return; }
+  if (alertWorkOpen()) closeAlertWork();
+  else closeDevice();
+});
+$("#awx").addEventListener("click", closeAlertWork);
+$("#ascrim").addEventListener("click", closeAlertWork);
+// Both renderers, for the reason the Alerts search states below: the status
+// chips, the header and the rows all count the SEARCHED set, so they have to
+// move in the same tick.
+$("#q").addEventListener("input", (e) => {
+  S.q = e.target.value;
+  renderDeviceFilters(); renderDevices();
+  // replace, never push: thirty keystrokes must not cost thirty Back presses.
+  urlSync("replace");
+});
+// Both renderers, because the severity chips and the header count the searched
+// set: the chips, the header and the rows have to move in the same tick.
+$("#aq").addEventListener("input", (e) => {
+  S.aq = e.target.value;
+  renderAlertFilters(); renderAlerts();
+  urlSync("replace");
+});
+$("#reload").addEventListener("click", () => load());
+
+const VIEWS_ALL = ["overview", "alerts", "actions", "devices", "compliance", "brief", "insights", "sla", "trends", "audit"];
+document.querySelectorAll("#nav button").forEach((b) => b.addEventListener("click", () => {
+  // The switch itself, the lazy audit read included, lives in showView(): the
+  // nav, the command palette and a Back press must all land on the same view
+  // by the same route, or the address bar and the screen drift apart.
+  showView(b.dataset.v);
+  window.scrollTo({ top: 0, behavior: "instant" });
+  // A tab change is exactly the thing a Back press should undo, so it PUSHES.
+  urlSync("push");
+}));
+$("#audreload").addEventListener("click", () => loadAudit({ page: 1 }));
+
+document.querySelectorAll("[data-goto]").forEach((b) =>
+  b.addEventListener("click", () => switchTab(b.dataset.goto)));
+$("#gq").addEventListener("focus", () => { $("#gq").blur(); palOpen(); });
+$("#gq").addEventListener("click", palOpen);
+$("#shotLive").addEventListener("click", toggleLive);
+$("#gapsbtn").addEventListener("click", () => {
+  switchTab("overview");
+  setTimeout(() => $("#wgaps").scrollIntoView({ behavior: "smooth", block: "center" }), 60);
+});
+/* The export menu. Opening it REBUILDS it, so every count it shows is the
+   count on screen at that moment and every file it writes states the scope it
+   was built from. See the scoped-export section above. */
+$("#exportbtn").addEventListener("click", (e) => {
+  e.stopPropagation();
+  const m = $("#exportmenu");
+  if (m.classList.contains("on")) { exportMenuClose(); return; }
+  renderExportMenu();
+  m.classList.add("on");
+  $("#exportbtn").setAttribute("aria-expanded", "true");
+});
+// Click-away and Escape close it. A popover that survives a click elsewhere
+// covers the thing the operator just clicked.
+document.addEventListener("click", (e) => {
+  const m = $("#exportmenu");
+  if (m && m.classList.contains("on") && !m.contains(e.target)) exportMenuClose();
+});
+/* ---- URL state: the listeners --------------------------------------
+   Back and Forward are a re-application of the address bar, not a second
+   code path: urlReadParams() parses it, urlApplyPatch() writes it into S,
+   and the layers are opened or closed to match. URL_SUSPEND is set for the
+   duration so that closing a drawer on the way past does not push a new
+   entry over the one we are stepping back to. */
+addEventListener("popstate", () => {
+  const { patch, problems } = urlReadParams(location.search);
+  URL_SUSPEND = true;
+  try {
+    urlApplyPatch(patch);
+    if (patch.trwin != null) TR_USER_PICKED = true;
+    S.link = { device: patch.device, dtab: patch.dtab, alert: patch.alert,
+               problems, resolved: true };
+    showView(S.view);
+    // The address bar is the truth about which layers are open.
+    if (patch.alert !== ((S.awork && S.awork.id) || "")) {
+      if (patch.alert) openAlertWork(patch.alert, { fromLink: true });
+      else closeAlertWork();
+    }
+    if (patch.device !== (S.devOpen || "")) {
+      if (patch.device) openDevice(patch.device, { tab: patch.dtab, fromLink: true });
+      else closeDevice();
+    }
+    // The audit log is a server-side read, so a pinned filter means a refetch.
+    if (patch.aud) loadAudit(patch.aud);
+    urlRepaint();
+  } finally {
+    URL_SUSPEND = false;
+  }
+  renderLinkNotes();
 });
 
 async function load() {
@@ -6916,6 +8087,11 @@ async function load() {
     // Fire-and-forget: the aggregator rollup is a ~14s cold fan-out, so it must
     // never block the dashboard render. It fills its Overview card when ready.
     loadRollups();
+    /* The deep links that needed data to check themselves against (US-8.4.1).
+       Runs once: a device or alert id in the address bar is verified against
+       the collections we now hold, and a link naming something that is gone
+       says so instead of opening a neighbour. */
+    urlResolveLink();
   } catch (e) {
     $("#staleness").innerHTML =
       `<div class="banner bad"><span>&#9888;&#65039;</span><span><b>Could not load the API.</b>
@@ -6924,5 +8100,8 @@ async function load() {
     S.loading = false;
   }
 }
+/* The link is applied BEFORE the first fetch, so the first paint is already the
+   shared view rather than the default one flashing past it. */
+urlBoot();
 load();
 </script>
