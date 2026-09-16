@@ -350,7 +350,17 @@ test("a poller that has never once run is reported as such, not as healthy silen
   );
   // Only the lanes with no opt-in flag are asserted: the route reads the real
   // process.env for the flagged ones, so their status is environment-dependent.
-  for (const lane of EXPECTED_LANES.filter((l) => !l.optInEnv)) {
+  //
+  // And only the lanes observable through `poller_runs`. Three scheduled lanes
+  // (`alert-cross-check`, `retention`, `prune-raw`) record nothing anywhere, so
+  // an empty history is not evidence they never ran — it is evidence we cannot
+  // tell, and they correctly report `unknown`. `snapshot` is observed through
+  // `fleet_snapshots` instead, which this stub does not serve.
+  const observableLanes = EXPECTED_LANES.filter(
+    (l) => !l.optInEnv && (l.observability?.kind ?? "poller-runs") === "poller-runs",
+  );
+  assert.ok(observableLanes.length > 0, "the roster must still contain lanes to assert on");
+  for (const lane of observableLanes) {
     const health = byLane.get(lane.lane);
     assert.ok(health, `${lane.lane} must appear in the roster even with no runs`);
     assert.equal(health.status, "never-ran", `${lane.lane} never ran and must say so`);

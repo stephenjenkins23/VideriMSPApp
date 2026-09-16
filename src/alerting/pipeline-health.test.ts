@@ -23,6 +23,7 @@ import {
   type PollerRunRow,
   type ExpectedLane,
 } from "./pipeline-health.js";
+import { LANE_NAMES } from "../pipeline/lanes/registry.js";
 
 const NOW = new Date("2026-09-01T12:00:00Z");
 const secondsAgo = (s: number) => new Date(NOW.getTime() - s * 1000);
@@ -369,13 +370,47 @@ test("a lane that runs but is missing from the roster is still watched", () => {
   assert.equal(laneOf(report, "brand-new-lane").status, "stalled");
 });
 
-test("the roster carries no cadences — those are measured", () => {
+/**
+ * This test used to assert the OPPOSITE — that the roster carried no cadence at
+ * all — on the reasoning that "the config says 15 minutes" is worth nothing next
+ * to "it has in fact been running every 15 minutes".
+ *
+ * That reasoning was half right, and the missing half cost us two unreportable
+ * failures. Observation alone cannot answer "did it run as often as it was
+ * configured to": `snapshot` wrote 1,686 rows whose gaps are a perfectly
+ * consistent 5.33 min median, and at its configured 5-minute cadence that is
+ * 59.3% coverage. The observed rhythm looks flawless; the rate does not. So the
+ * roster now carries the CONFIGURED interval, and the observed cadence is still
+ * measured separately from the runs themselves. Both, not either.
+ */
+test("the roster declares each lane's CONFIGURED interval, and observation stays separate", () => {
   for (const lane of EXPECTED_LANES) {
-    assert.deepEqual(
-      Object.keys(lane).filter((k) => /interval|cadence|seconds|ms/i.test(k)),
-      [],
-      `${lane.lane} must not declare a cadence`,
+    assert.equal(
+      typeof lane.intervalSeconds,
+      "number",
+      `${lane.lane} must declare the interval the scheduler actually runs`,
     );
+    assert.ok(lane.intervalSeconds! > 0, `${lane.lane} interval must be positive`);
+    assert.ok(lane.observability, `${lane.lane} must declare how a run of it can be observed`);
+  }
+  // The observed cadence is still derived from the runs and owes the roster
+  // nothing — a lane absent from the roster entirely still gets one.
+  const cadence = measureCadence(series("not-in-any-roster", 5 * MIN, 6));
+  assert.equal(cadence.seconds, 5 * MIN);
+  assert.equal(cadence.confidence, "measured");
+});
+
+test("every scheduled lane is in the roster — the drift that hid two failures", () => {
+  // The bug this pins: EXPECTED_LANES was hand-written and had drifted by four
+  // lanes, so `snapshot`, `alert-cross-check`, `retention` and `prune-raw` were
+  // invisible to the only check that watches our own collection.
+  const roster = new Set(EXPECTED_LANES.map((l) => l.lane));
+  for (const lane of LANE_NAMES) {
+    assert.ok(roster.has(lane), `${lane} is scheduled but missing from the health roster`);
+  }
+  assert.equal(roster.size, LANE_NAMES.length, "the roster must be exactly the scheduler's lanes");
+  for (const lane of ["snapshot", "alert-cross-check", "retention", "prune-raw"]) {
+    assert.ok(roster.has(lane), `${lane} was one of the four that drifted out`);
   }
 });
 

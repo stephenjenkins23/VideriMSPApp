@@ -29,21 +29,58 @@
  * STALE. Every finding therefore carries `dataImpact`, in words, because silence
  * from us is not health — it is us not looking.
  *
- * CADENCE IS MEASURED, NOT DECLARED
- * The expected interval for each lane is derived from the gaps between its own
- * recent runs (median, so a daemon restart or one slow tick cannot move it).
- * Copying the interval table out of run-poller.ts would have created a second
- * source of truth that drifts the first time someone tunes an interval — and
- * "the config says 15 minutes" is worth nothing next to "it has in fact been
- * running every 15 minutes". The ONE hardcoded thing is a roster of lane NAMES
- * (`EXPECTED_LANES`), with no cadences in it, because a lane that has never
- * recorded a single run leaves no data to measure and is only visible against a
- * declaration.
+ * TWO CADENCES, BOTH REPORTED, NEITHER REPLACING THE OTHER
+ * They answer different questions and conflating them loses one of them:
+ *
+ *   OBSERVED   — the median gap between this lane's own recent runs. Answers
+ *                "has it stalled relative to its own rhythm", which is what the
+ *                stall and overdue checks are about, and it needs no declaration
+ *                to be true. `measureCadence` is unchanged.
+ *   CONFIGURED — the interval the scheduler is actually set to, read from the
+ *                same registry the scheduler builds its task list from. Answers
+ *                "did it run as often as it was configured to", which is what
+ *                SLA coverage needs, and which observation alone cannot answer:
+ *                a lane that ran twice five minutes apart has a perfect observed
+ *                cadence and 0.1% coverage.
+ *
+ * A configured interval is also the only safe basis for a GAP threshold. A daily
+ * lane's normal rhythm is indistinguishable from an outage against an absolute
+ * one: `data-usage` ran at 24.00 h, 24.01 h and 24.30 h — working perfectly —
+ * and once at 48.91 h, which is the only real miss. A naive longest-gap alarm
+ * flags it every single day, and an operator who learns to ignore that alarm has
+ * been trained to ignore the real one. So every threshold here is a MULTIPLE of
+ * the lane's own configured interval.
+ *
+ * THE ROSTER IS DERIVED, NOT MIRRORED
+ * `EXPECTED_LANES` used to be hand-written, with a comment saying it "mirrors
+ * the task list in run-poller.ts". It had drifted, and four lanes the scheduler
+ * runs every day were invisible to this check as a result — including `snapshot`,
+ * which was writing 1,686 rows at 59.3% of its configured cadence with nothing
+ * able to report it. The roster now comes from `pipeline/lanes/registry.ts`,
+ * which is the same declaration the scheduler runs.
+ *
+ * AND THE HONEST-NULL RULE, APPLIED TO OURSELVES
+ * Some lanes write no `poller_runs` row. Where their OUTPUT dates their runs
+ * (`snapshot` → `fleet_snapshots.computed_at`) coverage is measured from that.
+ * Where nothing records them at all (`alert-cross-check`, `retention`,
+ * `prune-raw`) the lane reports UNKNOWN and says why — never 0%, which claims a
+ * measured rate we do not have, and never healthy, which claims we looked when
+ * we did not. Absence of a run row must never be indistinguishable from absence
+ * of a lane.
  */
 
 import type { Severity } from "../domain/types.js";
 import type { Repository } from "../db/repository.js";
 import { formatDuration } from "./evaluate.js";
+import {
+  LANE_REGISTRY,
+  laneIntervalSeconds,
+  laneOptInState,
+  laneTableSources,
+  type LaneDecl,
+  type LaneEnv,
+  type LaneObservability,
+} from "../pipeline/lanes/registry.js";
 
 /** One row of `poller_runs`, as this module needs it. */
 export interface PollerRunRow {
@@ -59,12 +96,12 @@ export interface PollerRunRow {
 }
 
 /**
- * The lane roster.
+ * The lane roster, as the health path needs it.
  *
- * Mirrors the task list in `src/pipeline/run-poller.ts` (plus `src/ai/scheduled.ts`),
- * and is the only hardcoded lane knowledge in the health path. It carries NO
- * intervals on purpose — those are measured. It exists for the one thing data
- * cannot tell us: a lane that has never once recorded a run.
+ * DERIVED from `pipeline/lanes/registry.ts` — the same declaration
+ * `run-poller.ts` builds its task list from — so a lane added to the scheduler
+ * cannot be invisible here. The previous hand-written mirror had drifted by four
+ * lanes.
  *
  * `optInEnv` matters for honesty. Most slow lanes are opt-in behind a flag, so
  * "never ran" means two completely different things depending on the flag: a
@@ -72,9 +109,7 @@ export interface PollerRunRow {
  * operator to ignore the report.
  *
  * A lane found in `poller_runs` but absent here is still assessed — the roster
- * only adds expectations, it never restricts them — so adding a lane in
- * run-poller.ts and forgetting this list costs the "never ran" check and nothing
- * else.
+ * only adds expectations, it never restricts them.
  */
 export interface ExpectedLane {
   lane: string;
@@ -89,29 +124,61 @@ export interface ExpectedLane {
    * cover these lanes.
    */
   zeroRowsIsNormal?: true;
+  /**
+   * The CONFIGURED cadence, from the scheduler's own registry. Every coverage
+   * threshold is a multiple of this. Null or absent means no interval is
+   * declared, and coverage then reports unknown rather than guessing one.
+   *
+   * This does NOT replace the observed cadence — `measureCadence` still derives
+   * the stall threshold from the lane's own recent rhythm. Both are reported.
+   */
+  intervalSeconds?: number | null;
+  /**
+   * How a run of this lane can be observed at all. Absent means `poller_runs`,
+   * which is true of every lane that calls `record()` and of any undeclared lane
+   * we only know about because it appears there.
+   */
+  observability?: LaneObservability;
+}
+
+/** One lane's observation history, aggregated. Matches `LaneObservationRow`. */
+export interface LaneObservations {
+  lane: string;
+  /** Where the evidence came from, in words an operator can check. */
+  source: string;
+  count: number;
+  firstAt: Date | null;
+  lastAt: Date | null;
+  medianGapSeconds: number | null;
+  gaps: ReadonlyArray<{ startedAt: Date; endedAt: Date; seconds: number }>;
+  gapsTruncated: boolean;
+}
+
+/** One lane declaration, as this module reads it. */
+export function toExpectedLane(decl: LaneDecl, env: LaneEnv = process.env): ExpectedLane {
+  return {
+    lane: decl.lane,
+    ...(decl.optInEnv ? { optInEnv: decl.optInEnv } : {}),
+    feeds: decl.feeds,
+    ...(decl.zeroRowsIsNormal ? { zeroRowsIsNormal: decl.zeroRowsIsNormal } : {}),
+    intervalSeconds: laneIntervalSeconds(decl, env),
+    observability: decl.observability,
+  };
+}
+
+/** The roster resolved against a specific environment (two intervals are env-driven). */
+export function expectedLanesFor(env: LaneEnv = process.env): readonly ExpectedLane[] {
+  return LANE_REGISTRY.map((decl) => toExpectedLane(decl, env));
 }
 
 /**
- * Only lanes that actually call `record()` belong here. `snapshot`, `retention`,
- * `prune-raw` and `alert-cross-check` run on the same scheduler but write no
- * `poller_runs` row, so this check is blind to them by construction — listing
- * them would report a permanent, false "never ran". Making them visible means
- * making them record, in run-poller.ts.
+ * The roster against this process's environment.
+ *
+ * A const for the many callers that just want the list; `expectedLanesFor` is
+ * the form to use when the environment matters (tests, and `loadPipelineHealth`,
+ * which is handed the env explicitly).
  */
-export const EXPECTED_LANES: readonly ExpectedLane[] = [
-  { lane: "devices", feeds: "the device registry, names, locations and firmware versions" },
-  { lane: "status", feeds: "presence — which canvases are online, and every offline alert" },
-  { lane: "metrics", feeds: "screen state — black screen, logo, what is playing" },
-  { lane: "alerting", feeds: "every alert; without it nothing opens, refreshes or resolves", zeroRowsIsNormal: true },
-  { lane: "compliance", feeds: "compliance scores and settings drift" },
-  { lane: "data-usage", optInEnv: "ENABLE_DATA_USAGE_POLL", feeds: "daily per-device data usage" },
-  { lane: "device-settings", optInEnv: "ENABLE_SETTINGS_POLL", feeds: "cached device settings, and so compliance drift" },
-  { lane: "telemetry-slowlane", optInEnv: "ENABLE_TELEMETRY_SLOWLANE", feeds: "per-device CPU, memory, storage and signal" },
-  { lane: "schedule-slowlane", optInEnv: "ENABLE_SCHEDULE_SLOWLANE", feeds: "what each canvas is scheduled to play, and proof-of-play gaps" },
-  { lane: "screen-verify-slowlane", optInEnv: "ENABLE_SCREEN_VERIFY", feeds: "device-confirmed black-screen verdicts" },
-  { lane: "ai-brief", optInEnv: "ENABLE_AI_JOBS", feeds: "the generated fleet brief" },
-  { lane: "ai-action-plan", optInEnv: "ENABLE_AI_JOBS", feeds: "the generated action plan" },
-];
+export const EXPECTED_LANES: readonly ExpectedLane[] = expectedLanesFor();
 
 /**
  * Every threshold in one place.
@@ -144,6 +211,58 @@ export const PIPELINE_HEALTH_DEFAULTS = {
   failingRunsForCritical: 3,
   /** Consecutive empty runs before "brought nothing back" is a finding. */
   emptyRunsForCollapse: 3,
+
+  // ── configured-cadence coverage ────────────────────────────────────────────
+  //
+  // Every one of these is a MULTIPLE of the lane's own configured interval, for
+  // the reason in the header: an absolute gap threshold flags a daily lane every
+  // single day, and the operator learns to ignore it.
+  /**
+   * Gap size, in configured intervals, at which a gap is worth returning at all.
+   * At 2x, a gap has demonstrably skipped at least one fire (floor(gap/interval)
+   * - 1 >= 1). Below it, `data-usage`'s perfectly normal 24.30 h gap — 1.01x its
+   * configured day — is correctly worth nothing.
+   */
+  coverageGapMultiplier: 2,
+  /**
+   * Gap size, in configured intervals, at which a lane counts as SILENT for
+   * outage correlation. Wider than the coverage gate on purpose: correlation is
+   * a claim about the whole daemon, so it should rest on unambiguous silence.
+   */
+  outageSilenceMultiplier: 3,
+  /**
+   * How many lanes must be silent together, and how tightly their last
+   * observations must cluster, before this is called one process outage rather
+   * than N lane faults.
+   *
+   * BOTH NUMBERS ARE MEASURED, not chosen. Across the local history the stop
+   * spread within a cluster is p50 0.049 SECONDS, p90 14.2 s, p99 69.7 s, max
+   * 104.7 s. Lanes stopping within fifty milliseconds of each other are one
+   * process dying; two collectors failing for their own reasons would stop at
+   * their own next-fire times, minutes apart. 120 s is therefore the smallest
+   * tolerance that still captures the whole observed population, and it remains
+   * below the shortest lane interval.
+   *
+   * TWO lanes, not three. Three was the cautious first guess and it was too
+   * cautious: 101 of the 130 correlated windows have exactly two members, and
+   * excluding them left SEVEN lanes individually blamed for holes they shared —
+   * one fault presented as seven, which is how a self-check stops being read.
+   * The direction of error also matters: being generous about what counts as a
+   * shared outage under-blames a lane, and an unreported lane shortfall is
+   * recoverable from the coverage numbers, which are always shown. A false
+   * accusation against a healthy lane is not.
+   */
+  outageMinLanes: 2,
+  outageClusterSeconds: 120,
+  /**
+   * Coverage below which a shortfall is worth reporting, AFTER correlated
+   * outage time is excluded. 0.9 because the scheduler measures its interval
+   * from task COMPLETION and adds startup jitter, so a healthy lane lands a few
+   * percent under its nominal rate by construction — `status` at 120 s runs at a
+   * measured 122 s median, and calling that broken would be a false alarm about
+   * ourselves.
+   */
+  minConfiguredCoverage: 0.9,
 } as const;
 
 export type LaneStatus =
@@ -163,12 +282,90 @@ export interface LaneCadence {
   basis: string;
 }
 
+/**
+ * Did this lane run as often as it was CONFIGURED to?
+ *
+ * A different question from `LaneCadence`, which asks whether it has stalled
+ * against its own recent rhythm. Both are reported; neither replaces the other.
+ *
+ * Every number here is nullable and `basis` always explains a null. That is
+ * deliberate and it is the whole point of this type: a lane we cannot measure
+ * must not be reported as 0% (which claims we measured a rate of zero) and must
+ * not be reported as healthy (which claims we looked).
+ */
+export interface LaneCoverage {
+  /** The scheduler's interval, from the registry. Null = none declared. */
+  configuredIntervalSeconds: number | null;
+  /** Where the evidence came from: `poller_runs`, `fleet_snapshots.computed_at`. */
+  source: string | null;
+  /** Observations found in the assessed window. */
+  observed: number | null;
+  /** Observations the configured interval implies over the same span. */
+  expected: number | null;
+  /** observed / expected, capped at 1. NULL where unmeasurable — never 0. */
+  ratio: number | null;
+  /**
+   * The same, with time inside a CORRELATED DAEMON OUTAGE removed.
+   *
+   * This is the number worth judging a lane on. Raw coverage over the local
+   * history is 60-80% for nearly every lane, and that is one intermittently
+   * dead daemon (31.6 h across 29 correlated outages in a 213 h span), not
+   * eleven broken collectors. Judging lanes on the raw figure would produce
+   * eleven findings for one fault.
+   */
+  ratioExcludingOutages: number | null;
+  /** First to last observation, in seconds. Not the whole lookback window. */
+  spanSeconds: number | null;
+  /** Of that span, how much fell inside a correlated outage. */
+  outageSeconds: number | null;
+  /** floor(gap / interval) - 1, summed over the gaps we have. */
+  missedFires: number | null;
+  /** The same, counting only the part of each gap outside a correlated outage. */
+  missedFiresOutsideOutages: number | null;
+  longestGapSeconds: number | null;
+  /** The longest gap as a multiple of the configured interval. */
+  longestGapIntervals: number | null;
+  /**
+   * True when more gaps qualified than were read back, so `missedFires` is a
+   * floor. Said rather than silently rounded off.
+   */
+  incomplete: boolean;
+  /** How the numbers were arrived at, or why they are null. Never empty. */
+  basis: string;
+}
+
+/**
+ * Several lanes silent over the same window — one process outage.
+ *
+ * Reported as ONE finding because that is what it is. The alternative, which is
+ * what a per-lane check alone produces, is N findings for one fault, and the
+ * operator has to reconstruct the correlation by eye from timestamps.
+ */
+export interface PipelineOutage {
+  /** The last lane to go silent — the outage cannot have started before this. */
+  startedAt: string;
+  /** The first lane to come back — it cannot have ended after this. */
+  endedAt: string;
+  seconds: number;
+  lanes: string[];
+  /** Spread of the lanes' final observations. Small = one process died. */
+  stopSpreadSeconds: number;
+  /** Spread of their first observations after. Small = one process restarted. */
+  resumeSpreadSeconds: number;
+}
+
 export type PipelineFindingKind =
   | "lane-never-ran"
   | "lane-stalled"
   | "lane-overdue"
   | "lane-all-batches-failing"
-  | "lane-yield-collapsed";
+  | "lane-yield-collapsed"
+  /** The lane is scheduled but leaves no trace, so we cannot tell if it ran. */
+  | "lane-unobservable"
+  /** It ran, but measurably less often than it was configured to. */
+  | "lane-coverage-shortfall"
+  /** Several lanes stopped and resumed together: one process, not N lanes. */
+  | "pipeline-outage";
 
 export interface PipelineFinding {
   kind: PipelineFindingKind;
@@ -200,6 +397,8 @@ export interface LaneHealth {
   consecutiveEmpty: number;
   lastYield: number | null;
   lastRowsWritten: number | null;
+  /** Did it run as often as CONFIGURED. Always present; always honest about nulls. */
+  coverage: LaneCoverage;
   findings: PipelineFinding[];
 }
 
@@ -214,6 +413,14 @@ export interface PipelineHealthReport {
   summary: string;
   /** True when at least one lane is stalled — i.e. device data is going stale. */
   deviceDataAtRisk: boolean;
+  /** Windows where lanes went silent TOGETHER. One process, not N lanes. */
+  outages: PipelineOutage[];
+  /**
+   * Lanes the scheduler runs that leave no trace we can read. Not a fault about
+   * the fleet and not necessarily a fault at all — but never reportable as
+   * healthy, because we did not look.
+   */
+  unobservableLanes: string[];
 }
 
 export interface AssessOptions {
@@ -226,6 +433,16 @@ export interface AssessOptions {
    * whether the flag is set", which is reported as such rather than guessed.
    */
   optInEnabled?: Readonly<Record<string, boolean>>;
+  /**
+   * Aggregated observation history per lane, for configured-cadence coverage.
+   *
+   * Separate from `runs` because the two need different windows. `runs` is
+   * capped per lane so a median is cheap to compute; 40 `status` rows span 80
+   * minutes, which cannot answer a coverage question over 14 days. Omitted means
+   * coverage is simply not measured, and every lane says so rather than
+   * reporting a zero.
+   */
+  observations?: readonly LaneObservations[];
   thresholds?: Partial<typeof PIPELINE_HEALTH_DEFAULTS>;
 }
 
@@ -298,6 +515,233 @@ export function measureCadence(
 }
 
 /**
+ * The observed cadence for a lane we can only see through the data it writes.
+ *
+ * `measureCadence` needs the runs themselves; a table-sourced lane has no run
+ * rows, so its rhythm comes from the aggregate instead. Same question, same
+ * vocabulary, different evidence — and the evidence is named in `basis` so an
+ * operator can tell which one they are reading.
+ */
+export function cadenceFromObservations(obs: LaneObservations | undefined): LaneCadence {
+  if (!obs || obs.count === 0) {
+    return { seconds: null, confidence: "unknown", basis: "no runs recorded" };
+  }
+  if (obs.count === 1 || obs.medianGapSeconds === null) {
+    return {
+      seconds: null,
+      confidence: "unknown",
+      basis: `only ${obs.count} observation in ${obs.source}, so there is no gap to measure`,
+    };
+  }
+  return {
+    seconds: obs.medianGapSeconds,
+    confidence: obs.count - 1 >= PIPELINE_HEALTH_DEFAULTS.minGapsForMeasuredCadence
+      ? "measured"
+      : "provisional",
+    basis: `median of ${obs.count - 1} gaps between ${obs.count} rows in ${obs.source}`,
+  };
+}
+
+/** Seconds of `[startedAt, endedAt)` that fall inside any of `windows`. */
+function overlapSeconds(
+  gap: { startedAt: Date; endedAt: Date },
+  windows: ReadonlyArray<{ start: number; end: number }>,
+): number {
+  const from = gap.startedAt.getTime();
+  const to = gap.endedAt.getTime();
+  let total = 0;
+  for (const w of windows) {
+    const lo = Math.max(from, w.start);
+    const hi = Math.min(to, w.end);
+    if (hi > lo) total += (hi - lo) / 1000;
+  }
+  return total;
+}
+
+/**
+ * Find windows where several lanes were silent TOGETHER.
+ *
+ * "Together" is the whole claim, so it is made on two pieces of evidence rather
+ * than one: at least `outageMinLanes` distinct lanes, AND their last
+ * observations clustered inside `outageClusterSeconds`. Independent lane faults
+ * do not stop within two minutes of each other; a dying process does.
+ *
+ * Pure. Gaps may arrive in any order and from any mix of lanes.
+ */
+export function correlateOutages(
+  gapsByLane: ReadonlyArray<{ lane: string; startedAt: Date; endedAt: Date; seconds: number }>,
+  thresholds: typeof PIPELINE_HEALTH_DEFAULTS = PIPELINE_HEALTH_DEFAULTS,
+): PipelineOutage[] {
+  const sorted = [...gapsByLane].sort((a, b) => a.startedAt.getTime() - b.startedAt.getTime());
+  const outages: PipelineOutage[] = [];
+
+  let cluster: typeof sorted = [];
+  const flush = (): void => {
+    const lanes = [...new Set(cluster.map((g) => g.lane))].sort();
+    if (lanes.length < thresholds.outageMinLanes) return;
+    // The outage can only be claimed for the window every member was silent:
+    // it started no earlier than the LAST lane to stop, and ended no later than
+    // the FIRST to come back. Claiming the union would overstate it.
+    const stops = cluster.map((g) => g.startedAt.getTime());
+    const resumes = cluster.map((g) => g.endedAt.getTime());
+    const startedAt = Math.max(...stops);
+    const endedAt = Math.min(...resumes);
+    if (endedAt <= startedAt) return;
+    outages.push({
+      startedAt: new Date(startedAt).toISOString(),
+      endedAt: new Date(endedAt).toISOString(),
+      seconds: (endedAt - startedAt) / 1000,
+      lanes,
+      stopSpreadSeconds: (Math.max(...stops) - Math.min(...stops)) / 1000,
+      resumeSpreadSeconds: (Math.max(...resumes) - Math.min(...resumes)) / 1000,
+    });
+  };
+
+  for (const gap of sorted) {
+    const last = cluster[cluster.length - 1];
+    if (
+      last &&
+      (gap.startedAt.getTime() - last.startedAt.getTime()) / 1000 > thresholds.outageClusterSeconds
+    ) {
+      flush();
+      cluster = [];
+    }
+    cluster.push(gap);
+  }
+  flush();
+  return outages.sort((a, b) => b.seconds - a.seconds);
+}
+
+/**
+ * Did this lane run as often as it was configured to?
+ *
+ * Pure. Returns nulls with a stated reason wherever it cannot answer, which is
+ * the point: three of our sixteen lanes record nothing at all, and a 0% for
+ * those would be a fabricated measurement.
+ *
+ * The span is the lane's OWN first-to-last observation, not the whole lookback.
+ * Time after a lane stopped is not a coverage question — it is a stall, which
+ * the cadence check already owns and reports with its own age and threshold.
+ * Counting it here as well would double-report one fault and reduce coverage to
+ * "was the daemon up", which is the outage finding's job.
+ */
+export function measureConfiguredCoverage(
+  expectation: Pick<ExpectedLane, "intervalSeconds" | "observability"> | undefined,
+  obs: LaneObservations | undefined,
+  outages: readonly PipelineOutage[] = [],
+  thresholds: typeof PIPELINE_HEALTH_DEFAULTS = PIPELINE_HEALTH_DEFAULTS,
+): LaneCoverage {
+  const interval = expectation?.intervalSeconds ?? null;
+  const blank = (basis: string): LaneCoverage => ({
+    configuredIntervalSeconds: interval,
+    source: obs?.source ?? null,
+    observed: obs?.count ?? null,
+    expected: null,
+    ratio: null,
+    ratioExcludingOutages: null,
+    spanSeconds: null,
+    outageSeconds: null,
+    missedFires: null,
+    missedFiresOutsideOutages: null,
+    longestGapSeconds: null,
+    longestGapIntervals: null,
+    incomplete: obs?.gapsTruncated ?? false,
+    basis,
+  });
+
+  const observability = expectation?.observability ?? { kind: "poller-runs" };
+  if (observability.kind === "none") {
+    return blank(
+      `UNKNOWN, not zero: this lane cannot be observed at all — ${observability.why}. ` +
+        `Its coverage is not 0%; it is unmeasured.`,
+    );
+  }
+  if (interval === null) {
+    return blank(
+      "no configured interval is declared for this lane, so there is nothing to " +
+        "measure coverage against. Declare it in src/pipeline/lanes/registry.ts.",
+    );
+  }
+  if (!obs) {
+    return blank(
+      "no observation history was supplied for this lane, so coverage was not measured.",
+    );
+  }
+  if (obs.count === 0) {
+    return blank(
+      `no rows in ${obs.source} for the assessed window. Nothing ran, so there is no ` +
+        `RATE to report — the finding is that it never ran, not that it ran 0% of the time.`,
+    );
+  }
+  if (obs.count === 1 || !obs.firstAt || !obs.lastAt) {
+    return blank(
+      `one row in ${obs.source}, so there is no span to measure a rate over.`,
+    );
+  }
+
+  const spanSeconds = (obs.lastAt.getTime() - obs.firstAt.getTime()) / 1000;
+  const windows = outages.map((o) => ({
+    start: new Date(o.startedAt).getTime(),
+    end: new Date(o.endedAt).getTime(),
+  }));
+
+  let outageSeconds = 0;
+  let missedFires = 0;
+  let missedFiresOutsideOutages = 0;
+  let longestGapSeconds = 0;
+  for (const gap of obs.gaps) {
+    const shared = overlapSeconds(gap, windows);
+    outageSeconds += shared;
+    longestGapSeconds = Math.max(longestGapSeconds, gap.seconds);
+    // floor, not round: a gap of N configured intervals means N-1 fires were
+    // skipped, so a 1.01x gap (data-usage's normal day) is correctly zero.
+    const skipped = Math.max(0, Math.floor(gap.seconds / interval) - 1);
+    missedFires += skipped;
+    // An outage can only excuse as many fires as it had ROOM for, quantised to
+    // whole intervals — not a proportional share of the gap.
+    //
+    // Subtracting the raw overlap was wrong for coarse lanes and it hid a real
+    // fault: `data-usage` is daily, its 48.91 h gap skipped exactly one fire,
+    // and roughly an hour of scattered outage inside that two-day window was
+    // enough to make 48.91 - 1 fall under 2x and excuse it entirely. An hour of
+    // downtime cannot swallow a daily fire. Quantising asks the right question —
+    // how many whole fires could this outage have eaten — and leaves the 22.28 h
+    // hole in a 2-minute lane fully excused, which is correct.
+    missedFiresOutsideOutages += Math.max(0, skipped - Math.floor(shared / interval));
+  }
+
+  const expected = Math.floor(spanSeconds / interval) + 1;
+  const spanExcludingOutages = Math.max(0, spanSeconds - outageSeconds);
+  const expectedExcludingOutages = Math.floor(spanExcludingOutages / interval) + 1;
+  const ratio = Math.min(1, obs.count / Math.max(1, expected));
+  const ratioExcludingOutages = Math.min(1, obs.count / Math.max(1, expectedExcludingOutages));
+
+  return {
+    configuredIntervalSeconds: interval,
+    source: obs.source,
+    observed: obs.count,
+    expected,
+    ratio,
+    ratioExcludingOutages,
+    spanSeconds,
+    outageSeconds,
+    missedFires,
+    missedFiresOutsideOutages,
+    longestGapSeconds: obs.gaps.length > 0 ? longestGapSeconds : null,
+    longestGapIntervals: obs.gaps.length > 0 ? longestGapSeconds / interval : null,
+    incomplete: obs.gapsTruncated,
+    basis:
+      `${obs.count} row(s) in ${obs.source} over ${formatDuration(spanSeconds)}, against ` +
+      `${expected} implied by a configured ${formatDuration(interval)} cadence` +
+      (outageSeconds > 0
+        ? ` (${formatDuration(outageSeconds)} of that span fell inside a correlated ` +
+          `daemon outage and is excluded from the adjusted figure)`
+        : "") +
+      (obs.gapsTruncated ? ". More gaps qualified than were read, so missed fires is a floor" : ""),
+  };
+}
+
+/**
  * Assess every lane. Pure: takes rows, returns a report.
  *
  * `runs` may be in any order and may contain any set of lanes; they are grouped
@@ -309,6 +753,7 @@ export function assessPipelineHealth(
     now = new Date(),
     expectedLanes = EXPECTED_LANES,
     optInEnabled,
+    observations = [],
     thresholds: overrides,
   }: AssessOptions = {},
 ): PipelineHealthReport {
@@ -325,20 +770,41 @@ export function assessPipelineHealth(
   }
 
   const expectedByName = new Map(expectedLanes.map((l) => [l.lane, l]));
-  // Union: everything we expect, plus anything that has actually run. A lane
-  // added in code but not in the roster must still be watched.
-  const laneNames = [...new Set([...expectedByName.keys(), ...byLane.keys()])].sort();
+  const observedByName = new Map(observations.map((o) => [o.lane, o]));
+  // Union: everything we expect, plus anything that has actually run or written.
+  // A lane added in code but not in the roster must still be watched, and a lane
+  // we only know about through the data it writes must still appear.
+  const laneNames = [
+    ...new Set([...expectedByName.keys(), ...byLane.keys(), ...observedByName.keys()]),
+  ].sort();
+
+  // Correlate BEFORE assessing lanes, because whether a lane's coverage hole is
+  // its own fault depends on whether the whole daemon was down at the time. Only
+  // unambiguous silence — 3x a lane's configured interval — is admitted as
+  // evidence of an outage.
+  const outages = correlateOutages(
+    laneNames.flatMap((lane) => {
+      const interval = expectedByName.get(lane)?.intervalSeconds ?? null;
+      const obs = observedByName.get(lane);
+      if (interval === null || !obs) return [];
+      return obs.gaps
+        .filter((g) => g.seconds > interval * thresholds.outageSilenceMultiplier)
+        .map((g) => ({ lane, startedAt: g.startedAt, endedAt: g.endedAt, seconds: g.seconds }));
+    }),
+    thresholds,
+  );
 
   const lanes = laneNames.map((lane) =>
     assessLane(lane, byLane.get(lane) ?? [], expectedByName.get(lane), {
       now,
       optInEnabled,
       thresholds,
+      observations: observedByName.get(lane),
+      outages,
     }),
   );
 
-  const findings = lanes
-    .flatMap((l) => l.findings)
+  const findings = [...lanes.flatMap((l) => l.findings), ...outageFindings(outages, thresholds)]
     .sort((a, b) => SEVERITY_RANK[a.severity] - SEVERITY_RANK[b.severity]);
 
   const worstStatus = lanes.reduce<LaneStatus>(
@@ -357,28 +823,133 @@ export function assessPipelineHealth(
     findings,
     worstStatus,
     deviceDataAtRisk: stalled.length > 0,
-    summary: summarise(lanes, findings, stalled),
+    outages,
+    unobservableLanes: lanes
+      .filter((l) => l.findings.some((f) => f.kind === "lane-unobservable"))
+      .map((l) => l.lane),
+    summary: summarise(lanes, findings, stalled, outages),
   };
+}
+
+/**
+ * One finding per correlated outage, not one per lane per outage.
+ *
+ * The improvement this buys an operator is a sentence they would otherwise have
+ * to derive from timestamps by eye: "this is one process outage, not eleven lane
+ * failures". It is only claimed where the evidence supports it — see
+ * `correlateOutages` for the two conditions.
+ */
+function outageFindings(
+  outages: readonly PipelineOutage[],
+  thresholds: typeof PIPELINE_HEALTH_DEFAULTS,
+): PipelineFinding[] {
+  if (outages.length === 0) return [];
+  const worst = outages[0]!;
+  const totalSeconds = outages.reduce((sum, o) => sum + o.seconds, 0);
+  const affected = [...new Set(outages.flatMap((o) => o.lanes))].sort();
+  return [
+    {
+      kind: "pipeline-outage",
+      scope: "vfi-pipeline",
+      // Not "lane"-scoped: the point is that no single lane owns this.
+      lane: "(whole pipeline)",
+      severity: worst.seconds > 4 * 3600 ? "high" : "medium",
+      headline:
+        outages.length === 1
+          ? `${worst.lanes.length} lanes stopped and resumed together for ` +
+            `${formatDuration(worst.seconds)} — one process outage`
+          : `${outages.length} correlated outages totalling ` +
+            `${formatDuration(totalSeconds)} across ${affected.length} lanes`,
+      detail:
+        `The longest ran ${worst.startedAt} to ${worst.endedAt} ` +
+        `(${formatDuration(worst.seconds)}) and covered ${worst.lanes.join(", ")}. Those ` +
+        `lanes' last observations are spread over ` +
+        `${formatDuration(worst.stopSpreadSeconds)} and their first observations after it ` +
+        `over ${formatDuration(worst.resumeSpreadSeconds)} — far tighter than any lane ` +
+        `interval, so this is the DAEMON stopping, not ${worst.lanes.length} independent ` +
+        `collectors failing. Each lane's coverage is reported both raw and excluding this ` +
+        `time, because judging a lane on a hole the whole process shared would produce ` +
+        `${affected.length} findings for one fault.`,
+      dataImpact:
+        `Every lane listed has a hole of the same shape over the same window, so device ` +
+        `data from all of them is missing for that period rather than wrong. Anything ` +
+        `computed across it — SLA coverage, trends, uptime — is measuring our absence, ` +
+        `not the fleet's.`,
+      since: worst.startedAt,
+    },
+  ];
 }
 
 interface LaneContext {
   now: Date;
   optInEnabled?: Readonly<Record<string, boolean>> | undefined;
   thresholds: typeof PIPELINE_HEALTH_DEFAULTS;
+  observations?: LaneObservations | undefined;
+  outages: readonly PipelineOutage[];
 }
 
 function assessLane(
   lane: string,
   runs: readonly PollerRunRow[],
   expectation: ExpectedLane | undefined,
-  { now, optInEnabled, thresholds }: LaneContext,
+  { now, optInEnabled, thresholds, observations, outages }: LaneContext,
 ): LaneHealth {
   const feeds = expectation?.feeds ?? "whatever this lane collects";
-  const cadence = measureCadence(runs, thresholds);
+  const observability = expectation?.observability ?? { kind: "poller-runs" };
+  const coverage = measureConfiguredCoverage(expectation, observations, outages, thresholds);
   const findings: PipelineFinding[] = [];
 
+  // ── the lane leaves no trace at all ────────────────────────────────────────
+  //
+  // `alert-cross-check`, `retention` and `prune-raw` run on the scheduler and
+  // record nothing anywhere. The old roster left them out entirely, which meant
+  // the health report could not distinguish "this lane is fine" from "this lane
+  // does not exist" — and two of them had, in fact, never run.
+  //
+  // UNKNOWN, not never-ran, and not 0%. We genuinely cannot tell whether they
+  // ran; claiming a fault would be the same false-alarm mistake as flagging a
+  // daily lane every day, and claiming 0% would invent a measurement. The
+  // finding names the fix, which is in our own code.
+  if (observability.kind === "none") {
+    findings.push({
+      kind: "lane-unobservable",
+      scope: "vfi-pipeline",
+      lane,
+      // Info: this is a gap in OUR instrumentation, not evidence of a fault.
+      // Raising it higher would put a permanent amber on a healthy pipeline.
+      severity: "info",
+      headline: `${lane} runs on the scheduler but cannot be observed`,
+      detail:
+        `${lane} is scheduled every ` +
+        `${expectation?.intervalSeconds ? formatDuration(expectation.intervalSeconds) : "(no declared interval)"}, ` +
+        `but ${observability.why}. So we cannot tell whether it has run hourly for a ` +
+        `month or has never run once, and this report will not guess. It is reported as ` +
+        `UNKNOWN rather than 0% (which would claim a measurement) or healthy (which ` +
+        `would claim we looked).`,
+      dataImpact:
+        `${feeds} may be up to date or may never have been produced — we cannot tell ` +
+        `from here. Treat anything downstream of this lane as unverified rather than ` +
+        `stale or fresh.`,
+      since: null,
+    });
+    return {
+      lane, status: "unknown", lastRunAt: null, ageSeconds: null,
+      cadence: { seconds: null, confidence: "unknown", basis: observability.why },
+      runsConsidered: 0, consecutiveAllFailed: 0, consecutiveEmpty: 0,
+      lastYield: null, lastRowsWritten: null, coverage, findings,
+    };
+  }
+
+  // A table-sourced lane records no runs, so everything below that needs a run
+  // row is unavailable for it — and reported as null rather than as zero. Its
+  // freshness and rhythm come from the data it wrote instead.
+  const fromTable = observability.kind === "table";
+  const cadence = fromTable ? cadenceFromObservations(observations) : measureCadence(runs, thresholds);
+  const observedCount = fromTable ? (observations?.count ?? 0) : runs.length;
+  const lastObservedAt = fromTable ? (observations?.lastAt ?? null) : (runs[0]?.startedAt ?? null);
+
   // ── never ran ──────────────────────────────────────────────────────────────
-  if (runs.length === 0) {
+  if (observedCount === 0 || lastObservedAt === null) {
     const flag = expectation?.optInEnv;
     const flagState = flag && optInEnabled ? optInEnabled[lane] : undefined;
 
@@ -389,7 +960,7 @@ function assessLane(
       return {
         lane, status: "disabled", lastRunAt: null, ageSeconds: null, cadence,
         runsConsidered: 0, consecutiveAllFailed: 0, consecutiveEmpty: 0,
-        lastYield: null, lastRowsWritten: null, findings: [],
+        lastYield: null, lastRowsWritten: null, coverage, findings: [],
       };
     }
 
@@ -406,7 +977,9 @@ function assessLane(
       severity: unknowable ? "info" : "high",
       headline: `${lane} has never run`,
       detail:
-        `No run of ${lane} has ever been recorded.` +
+        `No run of ${lane} has ever been recorded` +
+        (fromTable ? ` in ${observability.table}.${observability.timeColumn}` : "") +
+        `.` +
         (flag
           ? flagState === undefined
             ? ` It is opt-in behind ${flag}; if that flag is set this is a fault, and if it is not, this lane is off by choice.`
@@ -422,12 +995,12 @@ function assessLane(
       lane, status: unknowable ? "unknown" : "never-ran",
       lastRunAt: null, ageSeconds: null, cadence,
       runsConsidered: 0, consecutiveAllFailed: 0, consecutiveEmpty: 0,
-      lastYield: null, lastRowsWritten: null, findings,
+      lastYield: null, lastRowsWritten: null, coverage, findings,
     };
   }
 
-  const latest = runs[0]!;
-  const ageSeconds = Math.max(0, (now.getTime() - latest.startedAt.getTime()) / 1000);
+  const latest = runs[0];
+  const ageSeconds = Math.max(0, (now.getTime() - lastObservedAt.getTime()) / 1000);
 
   // ── (a) stalled / overdue ──────────────────────────────────────────────────
   let cadenceStatus: LaneStatus = "healthy";
@@ -444,12 +1017,12 @@ function assessLane(
         headline: `${lane} has one run in the assessed history, ${formatDuration(ageSeconds)} ago`,
         detail:
           `The only run of ${lane} in the history we assessed started ` +
-          `${latest.startedAt.toISOString()}. With a single run there is no cadence to ` +
+          `${lastObservedAt.toISOString()}. With a single run there is no cadence to ` +
           `compare against, so this is judged against a ` +
           `${formatDuration(thresholds.singleRunStaleSeconds)} ceiling rather than a multiple ` +
           `of its own interval.`,
-        dataImpact: stallImpact(lane, feeds, latest.startedAt, ageSeconds),
-        since: iso(latest.startedAt),
+        dataImpact: stallImpact(lane, feeds, lastObservedAt, ageSeconds),
+        since: iso(lastObservedAt),
       });
     } else {
       cadenceStatus = "unknown";
@@ -477,9 +1050,9 @@ function assessLane(
           `${lane} runs about every ${formatDuration(cadence.seconds)} (${cadence.basis}), ` +
           `so ${formatDuration(ageSeconds)} is ${(ageSeconds / cadence.seconds).toFixed(1)}× ` +
           `its own cadence — past the ${multiplier}× stall threshold. Last run ` +
-          `${latest.startedAt.toISOString()}.`,
-        dataImpact: stallImpact(lane, feeds, latest.startedAt, ageSeconds),
-        since: iso(latest.startedAt),
+          `${lastObservedAt.toISOString()}.`,
+        dataImpact: stallImpact(lane, feeds, lastObservedAt, ageSeconds),
+        since: iso(lastObservedAt),
       });
     } else if (ageSeconds > overdueAfter) {
       cadenceStatus = "overdue";
@@ -496,7 +1069,7 @@ function assessLane(
         dataImpact:
           `${feeds} is ${formatDuration(ageSeconds)} old rather than the usual ` +
           `${formatDuration(cadence.seconds)}. Still usable; not live.`,
-        since: iso(latest.startedAt),
+        since: iso(lastObservedAt),
       });
     }
   }
@@ -530,7 +1103,7 @@ function assessLane(
     if (tooSmallToJudge && consecutiveAllFailed === 0 && !nextAlsoFailed) break;
     consecutiveAllFailed += 1;
   }
-  if (consecutiveAllFailed > 0) {
+  if (consecutiveAllFailed > 0 && latest) {
     const oldestFailing = runs[consecutiveAllFailed - 1]!;
     findings.push({
       kind: "lane-all-batches-failing",
@@ -580,6 +1153,25 @@ function assessLane(
 
   const consecutiveEmpty = countLeading(runs, (r) => r.rowsWritten === 0);
 
+  // ── (d) it ran, but less often than it was configured to ───────────────────
+  //
+  // Judged on coverage EXCLUDING correlated outage time. The raw figure over the
+  // local history is 60-80% for nearly every lane, and that is one intermittently
+  // dead daemon rather than eleven broken collectors — reporting the raw number
+  // per lane would put eleven findings on the board for one fault, which is how
+  // a self-check stops being read.
+  //
+  // Two conditions, not one: the rate must be short AND at least one fire must
+  // demonstrably have been skipped outside an outage. The second is what keeps a
+  // daily lane quiet — `data-usage`'s 24.00/24.01/24.30 h gaps skip nothing.
+  const coverageFinding =
+    coverage.ratioExcludingOutages !== null &&
+    coverage.ratioExcludingOutages < thresholds.minConfiguredCoverage &&
+    (coverage.missedFiresOutsideOutages ?? 0) > 0
+      ? coverageShortfallFinding(lane, feeds, coverage, thresholds)
+      : null;
+  if (coverageFinding) findings.push(coverageFinding);
+
   const status: LaneStatus =
     consecutiveAllFailed > 0
       ? "failing"
@@ -587,20 +1179,65 @@ function assessLane(
         ? cadenceStatus
         : yieldFinding
           ? "collapsed"
-          : cadenceStatus;
+          : coverageFinding
+            // Reusing `overdue` rather than inventing a status: a lane running
+            // below its configured rate IS behind its cadence, and a new enum
+            // value would silently render as unknown in every consumer.
+            ? "overdue"
+            : cadenceStatus;
 
   return {
     lane,
     status,
-    lastRunAt: iso(latest.startedAt),
+    lastRunAt: iso(lastObservedAt),
     ageSeconds,
     cadence,
-    runsConsidered: runs.length,
+    runsConsidered: observedCount,
     consecutiveAllFailed,
     consecutiveEmpty,
-    lastYield: latest.telemetryYield,
-    lastRowsWritten: latest.rowsWritten,
+    // Honest nulls: a table-sourced lane records no batches and no yield, so
+    // these are unknown rather than zero.
+    lastYield: latest?.telemetryYield ?? null,
+    lastRowsWritten: latest?.rowsWritten ?? null,
+    coverage,
     findings,
+  };
+}
+
+/** "It ran, but not as often as configured" — stated in intervals, not minutes. */
+function coverageShortfallFinding(
+  lane: string,
+  feeds: string,
+  coverage: LaneCoverage,
+  thresholds: typeof PIPELINE_HEALTH_DEFAULTS,
+): PipelineFinding {
+  const pct = (r: number | null): string => (r === null ? "unknown" : `${(r * 100).toFixed(1)}%`);
+  const interval = coverage.configuredIntervalSeconds ?? 0;
+  const missed = coverage.missedFiresOutsideOutages ?? 0;
+  return {
+    kind: "lane-coverage-shortfall",
+    scope: "vfi-pipeline",
+    lane,
+    severity: (coverage.ratioExcludingOutages ?? 1) < 0.5 ? "high" : "medium",
+    headline:
+      `${lane} ran at ${pct(coverage.ratioExcludingOutages)} of its configured ` +
+      `${formatDuration(interval)} cadence`,
+    detail:
+      `${coverage.basis}. Raw coverage ${pct(coverage.ratio)}; ` +
+      `${pct(coverage.ratioExcludingOutages)} once time inside a correlated daemon outage ` +
+      `is excluded, which is the figure judged against the ` +
+      `${(thresholds.minConfiguredCoverage * 100).toFixed(0)}% floor. ` +
+      `At least ${missed} scheduled fire(s) were skipped outside any outage` +
+      (coverage.longestGapIntervals !== null
+        ? `, the worst gap being ${coverage.longestGapIntervals.toFixed(1)}× its configured interval`
+        : "") +
+      `. The lane is alive and its last run is recent, so nothing else here flags it.`,
+    dataImpact:
+      `${feeds} exists but is sampled more coarsely than intended, so anything computed ` +
+      `per interval over it — coverage, uptime, trends — is built on ` +
+      `${pct(coverage.ratioExcludingOutages)} of the samples it assumes. That is a ` +
+      `resolution problem, not a staleness one, and it does not show up as either.`,
+    since: null,
   };
 }
 
@@ -674,6 +1311,7 @@ function summarise(
   lanes: readonly LaneHealth[],
   findings: readonly PipelineFinding[],
   stalled: readonly LaneHealth[],
+  outages: readonly PipelineOutage[],
 ): string {
   const counted = lanes.filter((l) => l.status !== "disabled");
   const healthy = counted.filter((l) => l.status === "healthy").length;
@@ -687,10 +1325,22 @@ function summarise(
     `${healthy} of ${counted.length} lane(s) healthy; ${findings.length} finding(s) about ` +
     `OUR pipeline (not the fleet): ` +
     findings.map((f) => `${f.lane} ${f.kind.replace("lane-", "")}`).join(", ") + ".";
+  // Said explicitly, because it is the difference between one thing to fix and
+  // a page of them: correlated silence is the daemon, not the lanes.
+  const outageClause = ((): string => {
+    if (outages.length === 0) return "";
+    const lanes = [...new Set(outages.flatMap((o) => o.lanes))].length;
+    const hours = formatDuration(outages.reduce((sum, o) => sum + o.seconds, 0));
+    return outages.length === 1
+      ? ` The ${formatDuration(outages[0]!.seconds)} hole in ${outages[0]!.lanes.length} lanes ` +
+        `is ONE process outage, not ${outages[0]!.lanes.length} lane failures.`
+      : ` ${hours} of the silence below is ${outages.length} CORRELATED outages across ` +
+        `${lanes} lanes — the daemon stopping and restarting, not ${lanes} broken collectors.`;
+  })();
   return stalled.length === 0
-    ? head
+    ? head + outageClause
     : `${head} ${stalled.length} lane(s) have stopped, so the device data they feed is ` +
-      `stale — treat the console as a snapshot for those areas.`;
+      `stale — treat the console as a snapshot for those areas.` + outageClause;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -717,7 +1367,17 @@ export interface LoadPipelineHealthOptions {
 }
 
 /**
- * Read the run history and assess it. One query, no per-lane round trips.
+ * Read the run history and assess it.
+ *
+ * TWO reads, deliberately, because the two questions need different windows:
+ *
+ *   `pollerRunHistory`  — the last N runs per lane, row by row, for the OBSERVED
+ *                         cadence, the batch outcomes and the yield.
+ *   `laneObservations`  — aggregates over the whole window for CONFIGURED
+ *                         coverage. 40 `status` rows span 80 minutes, which
+ *                         cannot answer "did it run as often as configured" over
+ *                         14 days, and pulling every row would be ~9,000
+ *                         timestamps for a four-number answer.
  *
  * The opt-in flags are read from the environment of whichever process asks —
  * normally the API server, which loads the same `.env` the poller does. If a
@@ -728,30 +1388,75 @@ export async function loadPipelineHealth(
   repo: Repository,
   { now = new Date(), lookbackHours = 14 * 24, runsPerLane = 40, env = process.env }: LoadPipelineHealthOptions = {},
 ): Promise<PipelineHealthReport> {
+  const expectedLanes = expectedLanesFor(env);
   const runs = await repo.pollerRunHistory({ lookbackHours, runsPerLane });
-  const optInEnabled: Record<string, boolean> = {};
-  for (const lane of EXPECTED_LANES) {
-    if (!lane.optInEnv) continue;
-    const raw = env[lane.optInEnv];
-    // POLARITY FIRST, then absence — the reverse order was a real bug.
-    //
-    // ENABLE_DATA_USAGE_POLL is the one DEFAULT-ON flag (see run-poller.ts:175,
-    // which schedules the lane when it is unset, and DEPLOY.md, which documents
-    // it as "on unless set false"). For that flag `undefined` means ENABLED, not
-    // unknown. Skipping on `undefined` before applying the polarity meant that
-    // on a default deployment — the flag commented out in .env.example — a
-    // data-usage lane that had NEVER RUN was reported as `unknown`/`info`
-    // ("possibly off by choice") instead of `never-ran`/`high`, and was excluded
-    // from `deviceDataAtRisk`. The self-check went quiet about precisely the
-    // starvation it was built to catch, and which we had just fixed.
-    if (lane.optInEnv === "ENABLE_DATA_USAGE_POLL") {
-      optInEnabled[lane.lane] = raw !== "false";
-      continue;
+
+  // Gap floors are PER LANE and relative to each lane's configured interval —
+  // the one thing an absolute floor cannot do. A flat 15 minutes would treat
+  // `data-usage`'s normal day as a hole and miss every one of `status`'s.
+  const minGapSeconds: Record<string, number> = {};
+  for (const lane of expectedLanes) {
+    if (lane.intervalSeconds) {
+      minGapSeconds[lane.lane] =
+        lane.intervalSeconds * PIPELINE_HEALTH_DEFAULTS.coverageGapMultiplier;
     }
-    // Every other flag is off unless "true", so absence really is unknowable
-    // from here: it may be unset in THIS process but set for the poller.
-    if (raw === undefined) continue;
-    optInEnabled[lane.lane] = raw === "true";
   }
-  return assessPipelineHealth(runs, { now, optInEnabled });
+
+  // Coverage is additive: if this read fails, every lane reports coverage
+  // `unknown` with a reason and the rest of the report still stands. A
+  // self-check that goes blank because one of its two inputs is unavailable is
+  // worse than one that says which half it is missing.
+  let observations: LaneObservations[] = [];
+  let coverageError: string | null = null;
+  try {
+    observations =
+      typeof repo.laneObservations === "function"
+        ? await repo.laneObservations({
+            lookbackHours,
+            minGapSeconds,
+            tableSources: laneTableSources(),
+          })
+        : [];
+    // A lane with no rows at all returns no row at all, which reads as "we did
+    // not look" rather than "we looked and it is empty". Those are different
+    // claims and the difference is the whole point of this module, so an empty
+    // observation is made explicit — naming the source that was checked.
+    if (observations.length > 0) {
+      const seen = new Set(observations.map((o) => o.lane));
+      for (const decl of LANE_REGISTRY) {
+        if (seen.has(decl.lane) || decl.observability.kind === "none") continue;
+        observations.push({
+          lane: decl.lane,
+          source:
+            decl.observability.kind === "table"
+              ? `${decl.observability.table}.${decl.observability.timeColumn}`
+              : "poller_runs",
+          count: 0,
+          firstAt: null,
+          lastAt: null,
+          medianGapSeconds: null,
+          gaps: [],
+          gapsTruncated: false,
+        });
+      }
+    }
+  } catch (error) {
+    coverageError = error instanceof Error ? error.message : "unknown error";
+  }
+
+  const optInEnabled: Record<string, boolean> = {};
+  for (const decl of LANE_REGISTRY) {
+    const state = laneOptInState(decl, env);
+    if (state !== undefined) optInEnabled[decl.lane] = state;
+  }
+
+  const report = assessPipelineHealth(runs, { now, expectedLanes, optInEnabled, observations });
+  return coverageError === null
+    ? report
+    : {
+        ...report,
+        summary:
+          `${report.summary} Configured-cadence coverage could not be read ` +
+          `(${coverageError}), so every lane's coverage below is unknown rather than zero.`,
+      };
 }

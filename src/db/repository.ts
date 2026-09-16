@@ -279,6 +279,37 @@ export interface PollerRunHistoryRow {
   telemetryYield: number | null;
 }
 
+/**
+ * One lane's observation history, aggregated — the input to configured-cadence
+ * coverage in `alerting/pipeline-health.ts`.
+ *
+ * Aggregated in SQL rather than pulled row-by-row because the useful window is
+ * the full 14-day retention: 40 `status` rows span 80 minutes, which is far too
+ * short to answer "did it run as often as it was configured to". Pulling every
+ * row instead would be ~9,000 timestamps per request for a four-number answer.
+ */
+export interface LaneObservationRow {
+  lane: string;
+  /** Where the evidence came from, shown to the operator: `poller_runs`, `fleet_snapshots.computed_at`. */
+  source: string;
+  /** Observations inside the window. */
+  count: number;
+  firstAt: Date | null;
+  lastAt: Date | null;
+  /**
+   * Median interval between consecutive observations. The OBSERVED rhythm, kept
+   * alongside the configured one because they answer different questions: has
+   * this lane stalled against its own recent rhythm, versus did it run as often
+   * as it was configured to.
+   */
+  medianGapSeconds: number | null;
+  /** The longest gaps only — see `gapsTruncated`. Never the whole series. */
+  gaps: Array<{ startedAt: Date; endedAt: Date; seconds: number }>;
+  /** True when the lane had more qualifying gaps than the cap returned, so any
+   *  count derived from `gaps` is a FLOOR and must be reported as "at least". */
+  gapsTruncated: boolean;
+}
+
 export interface OpenAlertRow {
   id: string;
   device_id: string;
@@ -1375,6 +1406,191 @@ export class Repository {
     }));
   }
 
+  /**
+   * Per-lane observation history for configured-cadence coverage.
+   *
+   * TWO sources, because four scheduled lanes write no `poller_runs` row at all
+   * and were therefore invisible to the health check:
+   *
+   *   - `poller_runs`, grouped by poller, for every lane that calls `record()`.
+   *   - any table a lane's OUTPUT lands in, one source per declared lane. Today
+   *     that is `fleet_snapshots.computed_at` for `snapshot`: no run row exists,
+   *     but one row per successful cycle does, and that is the evidence. It also
+   *     reaches back over history a newly-added `record()` call never could.
+   *
+   * O(1) round trips in the number of lanes — two statements for `poller_runs`
+   * plus two per table source (one table source exists), not one per lane.
+   *
+   * `minGapSeconds` is per lane because a threshold has to be relative to each
+   * lane's own configured interval. A flat floor is the trap: `data-usage` runs
+   * daily, so its normal 24 h gap would dominate any absolute threshold while
+   * `status`'s genuinely broken 20-minute holes fell below it.
+   */
+  async laneObservations({
+    lookbackHours = 14 * 24,
+    minGapSeconds = {},
+    defaultMinGapSeconds = 900,
+    tableSources = [],
+    gapsPerLane = 400,
+  }: {
+    lookbackHours?: number;
+    minGapSeconds?: Readonly<Record<string, number>>;
+    defaultMinGapSeconds?: number;
+    tableSources?: ReadonlyArray<{ lane: string; table: string; timeColumn: string }>;
+    gapsPerLane?: number;
+  } = {}): Promise<LaneObservationRow[]> {
+    const hours = String(Math.round(lookbackHours));
+    const out = new Map<string, LaneObservationRow>();
+
+    const blank = (lane: string, source: string): LaneObservationRow => {
+      const existing = out.get(lane);
+      if (existing) return existing;
+      const fresh: LaneObservationRow = {
+        lane, source, count: 0, firstAt: null, lastAt: null, medianGapSeconds: null,
+        gaps: [], gapsTruncated: false,
+      };
+      out.set(lane, fresh);
+      return fresh;
+    };
+
+    // ── poller_runs ──────────────────────────────────────────────────────────
+    const { rows: runSummary } = await this.pool.query<{
+      poller: string; n: string | number; first_at: Date; last_at: Date;
+      median_gap: string | number | null;
+    }>(
+      `SELECT poller, COUNT(*) AS n, MIN(started_at) AS first_at, MAX(started_at) AS last_at,
+              PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY gap) AS median_gap
+         FROM (
+           SELECT poller, started_at,
+                  EXTRACT(EPOCH FROM (
+                    started_at - LAG(started_at) OVER (PARTITION BY poller ORDER BY started_at)
+                  )) AS gap
+             FROM poller_runs
+            WHERE started_at > now() - ($1::text || ' hours')::interval
+         ) seq
+        GROUP BY poller`,
+      [hours],
+    );
+    for (const r of runSummary) {
+      const lane = blank(r.poller, "poller_runs");
+      lane.count = Number(r.n);
+      lane.firstAt = r.first_at;
+      lane.lastAt = r.last_at;
+      lane.medianGapSeconds = numeric(r.median_gap);
+    }
+
+    const { rows: runGaps } = await this.pool.query<{
+      poller: string; started_at: Date; ended_at: Date; seconds: string | number; rn: string | number;
+    }>(
+      // The N LONGEST gaps per lane, not the first N: a cap that truncated
+      // chronologically would systematically hide the worst holes, which are the
+      // only ones worth reporting.
+      `SELECT poller, started_at, ended_at, seconds, rn
+         FROM (
+           SELECT poller, prev AS started_at, started_at AS ended_at,
+                  EXTRACT(EPOCH FROM (started_at - prev)) AS seconds,
+                  ROW_NUMBER() OVER (
+                    PARTITION BY poller
+                    ORDER BY EXTRACT(EPOCH FROM (started_at - prev)) DESC
+                  ) AS rn
+             FROM (
+               SELECT poller, started_at,
+                      LAG(started_at) OVER (PARTITION BY poller ORDER BY started_at) AS prev
+                 FROM poller_runs
+                WHERE started_at > now() - ($1::text || ' hours')::interval
+             ) seq
+            WHERE prev IS NOT NULL
+              AND EXTRACT(EPOCH FROM (started_at - prev))
+                  > COALESCE(($2::jsonb ->> poller)::float8, $3::float8)
+         ) ranked
+        WHERE rn <= $4 + 1
+        ORDER BY poller, started_at`,
+      [hours, JSON.stringify(minGapSeconds), defaultMinGapSeconds, gapsPerLane],
+    );
+    for (const r of runGaps) {
+      const lane = blank(r.poller, "poller_runs");
+      // The cap is asked for one row over the limit purely so truncation is a
+      // FACT rather than a guess — a count that hit the cap exactly is
+      // indistinguishable from one that was truncated.
+      if (Number(r.rn) > gapsPerLane) { lane.gapsTruncated = true; continue; }
+      lane.gaps.push({
+        startedAt: r.started_at,
+        endedAt: r.ended_at,
+        seconds: Number(r.seconds),
+      });
+    }
+
+    // ── declared table sources ───────────────────────────────────────────────
+    for (const src of tableSources) {
+      // Identifiers cannot be parameterised, so they are whitelisted by shape.
+      // They come from a const registry, never from a request, and this refuses
+      // rather than trusts that.
+      if (!SAFE_IDENTIFIER.test(src.table) || !SAFE_IDENTIFIER.test(src.timeColumn)) {
+        throw new Error(
+          `Unsafe lane table source for ${src.lane}: ${src.table}.${src.timeColumn}. ` +
+            `Table sources are declared in src/pipeline/lanes/registry.ts and must be plain identifiers.`,
+        );
+      }
+      const source = `${src.table}.${src.timeColumn}`;
+      const { rows: summary } = await this.pool.query<{
+        n: string | number; first_at: Date | null; last_at: Date | null;
+        median_gap: string | number | null;
+      }>(
+        `SELECT COUNT(*) AS n, MIN(at) AS first_at, MAX(at) AS last_at,
+                PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY gap) AS median_gap
+           FROM (
+             SELECT ${src.timeColumn} AS at,
+                    EXTRACT(EPOCH FROM (
+                      ${src.timeColumn} - LAG(${src.timeColumn}) OVER (ORDER BY ${src.timeColumn})
+                    )) AS gap
+               FROM ${src.table}
+              WHERE ${src.timeColumn} > now() - ($1::text || ' hours')::interval
+           ) seq`,
+        [hours],
+      );
+      const lane = blank(src.lane, source);
+      lane.source = source;
+      lane.count = Number(summary[0]?.n ?? 0);
+      lane.firstAt = summary[0]?.first_at ?? null;
+      lane.lastAt = summary[0]?.last_at ?? null;
+      lane.medianGapSeconds = numeric(summary[0]?.median_gap ?? null);
+
+      const { rows: gaps } = await this.pool.query<{
+        started_at: Date; ended_at: Date; seconds: string | number; rn: string | number;
+      }>(
+        `SELECT started_at, ended_at, seconds, rn
+           FROM (
+             SELECT prev AS started_at, ${src.timeColumn} AS ended_at,
+                    EXTRACT(EPOCH FROM (${src.timeColumn} - prev)) AS seconds,
+                    ROW_NUMBER() OVER (
+                      ORDER BY EXTRACT(EPOCH FROM (${src.timeColumn} - prev)) DESC
+                    ) AS rn
+               FROM (
+                 SELECT ${src.timeColumn},
+                        LAG(${src.timeColumn}) OVER (ORDER BY ${src.timeColumn}) AS prev
+                   FROM ${src.table}
+                  WHERE ${src.timeColumn} > now() - ($1::text || ' hours')::interval
+               ) seq
+              WHERE prev IS NOT NULL
+                AND EXTRACT(EPOCH FROM (${src.timeColumn} - prev)) > $2::float8
+           ) ranked
+          WHERE rn <= $3 + 1
+          ORDER BY started_at`,
+        [hours, minGapSeconds[src.lane] ?? defaultMinGapSeconds, gapsPerLane],
+      );
+      for (const r of gaps) {
+        if (Number(r.rn) > gapsPerLane) { lane.gapsTruncated = true; continue; }
+        lane.gaps.push({
+          startedAt: r.started_at,
+          endedAt: r.ended_at,
+          seconds: Number(r.seconds),
+        });
+      }
+    }
+
+    return [...out.values()];
+  }
+
   async acknowledgeAlert(id: string, by: string): Promise<boolean> {
     const { rowCount } = await this.pool.query(
       `UPDATE alerts SET acknowledged_at = now(), acknowledged_by = $2
@@ -2220,6 +2436,9 @@ function provenanceOf(sample: HealthSample): Record<string, unknown> {
  * Coercing here keeps that detail out of the evaluation logic, where a string
  * would silently break every comparator.
  */
+/** Plain SQL identifier. Table sources are interpolated, so they are checked, not trusted. */
+const SAFE_IDENTIFIER = /^[a-z_][a-z0-9_]*$/;
+
 function numeric(value: string | number | null): number | null {
   if (value === null || value === undefined) return null;
   const n = typeof value === "number" ? value : Number(value);
