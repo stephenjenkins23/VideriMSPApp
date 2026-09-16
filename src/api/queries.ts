@@ -350,6 +350,136 @@ const ALERT_COUNTS_LATERAL = `
      WHERE device_id = d.id AND resolved_at IS NULL
   ) al ON TRUE`;
 
+/**
+ * ── the alert queue's filters, as SQL (Epic 8.5) ─────────────────────────────
+ *
+ * WHY THESE MOVED. The console filtered the alert queue in the browser: it
+ * walked every page of `/api/alerts`, then applied search, rule, age, severity
+ * and sort to the array. At 1,235 rows that works. It stops working well before
+ * the "thousands of screens" target — `apiAll` caps at 2,000 rows, which the
+ * alert collection reaches at roughly 1,600 devices, and past that the filter is
+ * being applied to a TRUNCATED set while still reporting a total, which is a
+ * wrong answer rather than a slow one.
+ *
+ * The semantics below are ported from the console's `alertBands()` deliberately
+ * field by field, because a server filter that ALMOST matches the client's is
+ * worse than no server filter: the rows move but nobody can say why.
+ *
+ * All of it is expressible against `alerts` and a correlated subquery on
+ * `devices`, which is the constraint that matters here — the COUNT statement in
+ * `alerts()` has no `devices` join, so a predicate using the LIST's `d` alias
+ * compiles in one statement and raises `missing FROM-clause entry` in the other.
+ * See the note at the top of `alerts()`.
+ */
+
+/**
+ * Cumulative age windows, not disjoint buckets — "what came in today" and "what
+ * has been rotting for a month", copied from the console's own list. `all` is the
+ * absence of the filter.
+ */
+export type AlertAgeWindow = "all" | "1h" | "24h" | "7d" | "o7d" | "o30d";
+
+/** The queue's sort orders, likewise ported from the console. */
+export type AlertSort = "sev" | "recent" | "oldest" | "device" | "rule";
+
+/**
+ * The label the console shows for an alert with no rule id, and therefore the
+ * value it sends back as the `rule` filter. `alerts.rule_id` is NOT NULL in the
+ * schema, so this is unreachable today with real data — it is accepted anyway
+ * because the client offers it, and a filter option that silently matches
+ * everything would be worse than one that matches nothing.
+ */
+export const NO_RULE_ID = "(no rule id)";
+
+/**
+ * A `LIKE` pattern matching `term` as a LITERAL substring.
+ *
+ * The console searches with `String.includes`, where `%` and `_` are ordinary
+ * characters. Binding `%${term}%` straight into `ILIKE` — as `devices()` does —
+ * quietly turns them into wildcards, so "50%" matches every row and "a_b"
+ * matches "aXb". Escaping keeps the server's answer the same as the client's,
+ * which is the whole point of moving the filter.
+ *
+ * The backslash is escaped FIRST, or escaping `%` would double-escape its own
+ * escape character. Paired with `ESCAPE '\'` at the call site.
+ */
+export function likeContains(term: string): string {
+  return `%${term.replace(/\\/g, "\\\\").replace(/[%_]/g, (c) => `\\${c}`)}%`;
+}
+
+/**
+ * The age windows, as intervals. Closed map, and the interval text is a
+ * compile-time literal from THIS table — never caller input — which is what
+ * makes it safe to interpolate into the statement. `nowRef` is a bound
+ * parameter, not `now()`: the COUNT and the LIST are two statements on two
+ * connections, and reading the clock twice lets an alert on the boundary fall
+ * into one and not the other. A count that disagrees with its own list is the
+ * bug this file is most careful about.
+ */
+const AGE_WINDOWS: Record<Exclude<AlertAgeWindow, "all">, { newer: boolean; interval: string }> = {
+  "1h": { newer: true, interval: "1 hour" },
+  "24h": { newer: true, interval: "24 hours" },
+  "7d": { newer: true, interval: "7 days" },
+  "o7d": { newer: false, interval: "7 days" },
+  "o30d": { newer: false, interval: "30 days" },
+};
+
+/**
+ * One age predicate, or null for "any age".
+ *
+ * `>` for the "opened within" windows and `<=` for the "open longer than" ones,
+ * so the pair at 7 days partitions the queue exactly — no alert is in both and
+ * none is in neither, matching the console's `< window` / `>= window` split. An
+ * `opened_at` in the future satisfies the "within" windows in both
+ * implementations; a clock-skewed row is a reading, not a reason to hide a row.
+ */
+export function alertAgePredicate(window: AlertAgeWindow, nowRef: string): string | null {
+  if (window === "all") return null;
+  const w = AGE_WINDOWS[window];
+  return w.newer
+    ? `a.opened_at > ${nowRef} - interval '${w.interval}'`
+    : `a.opened_at <= ${nowRef} - interval '${w.interval}'`;
+}
+
+/** Severity as an orderable rank. Named so the sorts below cannot drift apart. */
+const SEVERITY_RANK_SQL =
+  `CASE a.severity WHEN 'critical' THEN 0 WHEN 'high' THEN 1 ` +
+  `WHEN 'medium' THEN 2 ELSE 3 END`;
+
+/**
+ * ORDER BY for one sort, always ending in `a.id`.
+ *
+ * The tiebreak is not cosmetic. Paging is LIMIT/OFFSET, so an order with ties is
+ * not a total order and Postgres may return the same row on page 1 and page 2
+ * while dropping another entirely — the console walks 200 rows at a time, so
+ * every tie is a chance to lose an alert. It also makes the response
+ * byte-stable, which is what the ETag validator in etag.ts is asserting.
+ *
+ * `device` sorts on `d.name`, the LIST statement's join. Legal only because this
+ * is an ORDER BY: the COUNT statement has no ORDER BY at all, so unlike a WHERE
+ * predicate a sort may use the alias. Falls back to `a.device_id` when the name
+ * is missing, exactly as the console does.
+ */
+export function alertOrderBy(sort: AlertSort): string {
+  const fired = `COALESCE(a.last_fired_at, a.opened_at)`;
+  switch (sort) {
+    case "recent":
+      return `${fired} DESC, a.id`;
+    case "oldest":
+      return `a.opened_at ASC, a.id`;
+    case "device":
+      return `lower(COALESCE(NULLIF(d.name, ''), a.device_id)) ASC, ${SEVERITY_RANK_SQL}, a.id`;
+    case "rule":
+      return `a.rule_id ASC, ${SEVERITY_RANK_SQL}, ${fired} DESC, a.id`;
+    case "sev":
+    default:
+      // The original order, unchanged apart from the tiebreak: severity first,
+      // newest evidence within a severity. This is the default for a triage
+      // queue and moving it would re-rank every unparameterised client.
+      return `${SEVERITY_RANK_SQL}, a.opened_at DESC, a.id`;
+  }
+}
+
 export class ReadQueries {
   constructor(private readonly pool: Pool) {}
 
@@ -734,6 +864,27 @@ export class ReadQueries {
      * default (docs/23 US-6.2.3).
      */
     acknowledged?: "yes" | "no" | "all" | undefined;
+    /**
+     * Free-text search over the fields a technician knows when the phone rings:
+     * device name, device id, alert title, rule id, severity and location. The
+     * evidence blob is excluded ON PURPOSE — the console's comment records why
+     * (matching inside it makes a search for "logo" return rows whose rule is
+     * not showing-logo), and a server filter that widened the haystack would
+     * return rows the client would not have.
+     */
+    q?: string | undefined;
+    /** One rule id, or `NO_RULE_ID` for the console's "(no rule id)" bucket. */
+    rule?: string | undefined;
+    /** Cumulative age window. `undefined` and `"all"` both mean unfiltered. */
+    age?: AlertAgeWindow | undefined;
+    /** Queue order. Defaults to `sev` — the order this endpoint has always used. */
+    sort?: AlertSort | undefined;
+    /**
+     * The clock the age window is measured against. Supplied by the caller so
+     * the COUNT and the LIST — two statements, two connections — measure the
+     * same instant; defaults to now when absent, and a test can pin it.
+     */
+    now?: Date | undefined;
   }): Promise<{ items: Array<Record<string, unknown>>; totalItems: number }> {
     const where: string[] = [
       // A retired device's alerts must appear in neither the list nor the count.
@@ -777,6 +928,49 @@ export class ReadQueries {
     }
     if (filters.acknowledged === "yes") where.push(`a.acknowledged_at IS NOT NULL`);
     if (filters.acknowledged === "no") where.push(`a.acknowledged_at IS NULL`);
+    /**
+     * The queue's own filters, ported from the console (Epic 8.5). Every one of
+     * them is written against `alerts` or a CORRELATED subquery on `devices`, so
+     * it is legal in the COUNT statement below as well as in the LIST — see the
+     * NOT EXISTS note at the top of this method. That is not a style choice: it
+     * is what makes the count and the list agree by construction.
+     */
+    if (filters.q) {
+      params.push(likeContains(filters.q));
+      const i = params.length;
+      // Name and location live on `devices`, so they are reached through a
+      // correlated EXISTS rather than the LIST query's `d` alias. A device row
+      // that has not landed yet simply cannot match those two fields, which is
+      // the honest outcome — the alert is still searchable by its own columns.
+      where.push(
+        `(a.title ILIKE $${i} ESCAPE '\\' OR a.device_id ILIKE $${i} ESCAPE '\\' ` +
+          `OR a.rule_id ILIKE $${i} ESCAPE '\\' OR a.severity ILIKE $${i} ESCAPE '\\' ` +
+          `OR EXISTS (SELECT 1 FROM devices qd WHERE qd.id = a.device_id ` +
+          `AND (qd.name ILIKE $${i} ESCAPE '\\' OR qd.location ILIKE $${i} ESCAPE '\\')))`,
+      );
+    }
+    if (filters.rule) {
+      // `(no rule id)` is the console's label for a missing rule id and arrives
+      // back as the filter value. Mapped to the SQL that would select such a row
+      // rather than matched literally, or the option would search for an alert
+      // whose rule is named "(no rule id)".
+      if (filters.rule === NO_RULE_ID) {
+        where.push(`(a.rule_id IS NULL OR a.rule_id = '')`);
+      } else {
+        params.push(filters.rule);
+        where.push(`a.rule_id = $${params.length}`);
+      }
+    }
+    if (filters.age && filters.age !== "all") {
+      params.push(filters.now ?? new Date());
+      const age = alertAgePredicate(filters.age, `$${params.length}::timestamptz`);
+      // Non-null by construction (`all` is handled above); asserted rather than
+      // assumed so a widened vocabulary cannot silently drop the filter.
+      if (!age) {
+        throw new Error(`unsupported alert age window: ${filters.age}`);
+      }
+      where.push(age);
+    }
     // The exclusion fails OPEN, and must: an empty exclusion list means "nothing
     // is suppressed", and the correct answer to that is the entire queue.
     if (filters.excludeAlertIds && filters.excludeAlertIds.length > 0) {
@@ -830,10 +1024,7 @@ export class ReadQueries {
               WHERE e.alert_id = a.id AND e.kind = 'note'
            ) ev ON TRUE
            ${whereSql}
-          ORDER BY CASE a.severity
-                     WHEN 'critical' THEN 0 WHEN 'high' THEN 1
-                     WHEN 'medium' THEN 2 ELSE 3 END,
-                   a.opened_at DESC
+          ORDER BY ${alertOrderBy(filters.sort ?? "sev")}
           LIMIT ${filters.limit} OFFSET ${(filters.page - 1) * filters.limit}`,
         params,
       ),

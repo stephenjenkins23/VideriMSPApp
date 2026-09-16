@@ -29,7 +29,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { Pool } from "pg";
 import type { Repository } from "../db/repository.js";
-import { ReadQueries } from "./queries.js";
+import { ReadQueries, alertOrderBy, alertAgePredicate, likeContains, NO_RULE_ID } from "./queries.js";
 import { buildServer } from "./server.js";
 
 // ─── the model ───────────────────────────────────────────────────────────────
@@ -234,10 +234,81 @@ function compile(conjunct: string, params: readonly unknown[]): Predicate {
     const want = params[Number(one[1]) - 1];
     return (a) => a.device_id === want;
   }
+  // ── the triage-queue filters (Epic 8.5) ────────────────────────────────────
+  // Modelled by EVALUATING them, not by matching their text. A fake that only
+  // pattern-matched would pass whether the search escaped its wildcards, whether
+  // the age window used `<` or `<=`, and whether the device-name reach was
+  // correlated or broken — which is the whole question being asked here.
+
+  const search = new RegExp(
+    `^\\(a\\.title ILIKE \\$(\\d+) ESCAPE '\\\\' OR a\\.device_id ILIKE \\$\\1 ESCAPE '\\\\' ` +
+      `OR a\\.rule_id ILIKE \\$\\1 ESCAPE '\\\\' OR a\\.severity ILIKE \\$\\1 ESCAPE '\\\\' ` +
+      `OR EXISTS \\(SELECT 1 FROM devices ([a-z_]+) WHERE \\2\\.id = a\\.device_id ` +
+      `AND \\(\\2\\.name ILIKE \\$\\1 ESCAPE '\\\\' OR \\2\\.location ILIKE \\$\\1 ESCAPE '\\\\'\\)\\)\\)$`,
+    "i",
+  ).exec(c);
+  if (search) {
+    const pattern = params[Number(search[1]) - 1] as string;
+    assert.equal(typeof pattern, "string", "the search term must be bound, never interpolated");
+    return (a, devices) => {
+      const d = devices.find((row) => row.id === a.device_id);
+      return [
+        a.title, a.device_id, a.rule_id, a.severity,
+        // Only reachable through the correlated subquery, so an alert whose
+        // device row has not landed cannot match on these two.
+        ...(d ? [d.name, d.location] : []),
+      ].some((field) => field != null && ilike(String(field), pattern));
+    };
+  }
+  const rule = /^a\.rule_id = \$(\d+)$/i.exec(c);
+  if (rule) {
+    const want = params[Number(rule[1]) - 1];
+    return (a) => a.rule_id === want;
+  }
+  if (/^\(a\.rule_id IS NULL OR a\.rule_id = ''\)$/i.test(c)) {
+    return (a) => a.rule_id === null || a.rule_id === "";
+  }
+  const age = /^a\.opened_at (>|<=) \$(\d+)::timestamptz - interval '(\d+) (hour|hours|day|days)'$/i
+    .exec(c);
+  if (age) {
+    const now = params[Number(age[2]) - 1];
+    assert.ok(now instanceof Date,
+      "the age window must be measured against a BOUND clock, so the COUNT and the " +
+      "LIST cannot read `now()` a microsecond apart and disagree on a boundary row");
+    const unit = /^hour/i.test(age[4]!) ? 3_600_000 : 86_400_000;
+    const edge = now.getTime() - Number(age[3]) * unit;
+    return age[1] === ">"
+      ? (a) => a.opened_at.getTime() > edge
+      : (a) => a.opened_at.getTime() <= edge;
+  }
+
   throw new Error(
     `fakePostgres does not know the predicate \`${c}\` — if a filter was ` +
       `rewritten, teach this fake before trusting the result`,
   );
+}
+
+/**
+ * `ILIKE pattern ESCAPE '\'`, as Postgres applies it.
+ *
+ * Written out so the fake can be WRONG about escaping: `%` and `_` are wildcards
+ * unless escaped, and the console searches with `String.includes` where both are
+ * ordinary characters. A fake that treated the pattern as a plain substring
+ * could not tell a correctly escaped filter from an unescaped one.
+ */
+function ilike(value: string, pattern: string): boolean {
+  let regex = "";
+  for (let i = 0; i < pattern.length; i += 1) {
+    const ch = pattern[i]!;
+    if (ch === "\\") {
+      const next = pattern[i + 1];
+      if (next !== undefined) { regex += next.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); i += 1; continue; }
+    }
+    if (ch === "%") { regex += ".*"; continue; }
+    if (ch === "_") { regex += "."; continue; }
+    regex += ch.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  }
+  return new RegExp(`^${regex}$`, "i").test(value);
 }
 
 const SEVERITY_RANK: Record<string, number> = { critical: 0, high: 1, medium: 2 };
@@ -602,4 +673,363 @@ test("deviceIds rides in the same envelope and pagination as any other alert que
   assert.equal(meta.page["page"], 2);
   assert.equal(meta.page["limit"], 10);
   assert.equal(meta.page["totalPages"], 1, "totalPages is never 0, or the UI renders no pages");
+});
+
+// ─── the triage queue moved server-side (Epic 8.5) ───────────────────────────
+//
+// The console filtered the queue in the browser: `apiAll` walked every page and
+// `alertBands()` applied search, rule, age, severity and sort to the array. That
+// is correct only while every page fits — the walk caps at 2,000 rows, which the
+// alert collection reaches at roughly 1,600 devices, and past the cap the client
+// filters a TRUNCATED set while still reporting a total.
+//
+// Moving it into SQL puts every one of those predicates into the pair of
+// statements that must agree, so each test below asserts the same three things:
+// the predicate is legal in the COUNT as well as the LIST, the two receive the
+// identical WHERE and parameters, and the rows it returns are the rows the
+// console would have kept.
+
+const NOW = new Date("2026-09-16T12:00:00Z");
+const opened = (iso: string) => ({ opened_at: new Date(iso), last_fired_at: new Date(iso) });
+
+/** Both statements, asserted to be the same filter before anything else. */
+function assertStatementsAgree(fake: Fake): void {
+  const count = fake.countSql();
+  const list = fake.listSql();
+  assert.equal(whereClause(count.sql), whereClause(list.sql),
+    "the COUNT and the LIST must carry the identical WHERE, or a count can disagree with its own list");
+  assert.deepEqual(count.values, list.values, "and the identical parameters");
+  assert.ok(!/\bd\./.test(whereClause(count.sql)),
+    "no filter may reference the LIST query's devices alias — it does not exist in the COUNT");
+  assert.ok(!/JOIN devices/i.test(flat(count.sql)), "the COUNT query must stay join-free");
+}
+
+// ─── q: free-text search ─────────────────────────────────────────────────────
+
+test("search is one bound parameter, legal in both statements", async () => {
+  const fake = fakePostgres();
+  await new ReadQueries(fake.pool).alerts({ ...base, q: "lobby" });
+  assertStatementsAgree(fake);
+  assert.deepEqual(fake.countSql().values, ["%lobby%"]);
+  // Device name and location are reached by a CORRELATED subquery, which is the
+  // only form legal in the join-free COUNT.
+  assert.ok(/EXISTS \(SELECT 1 FROM devices [a-z_]+ WHERE/i.test(whereClause(fake.countSql().sql)));
+});
+
+test("search matches the fields the console searches, and the count agrees with the list", async () => {
+  // The console's haystack: device name, device id, title, rule id, severity,
+  // location. One alert per field, each matched by a term that hits only it.
+  const alerts = [
+    alert({ id: "by-title", device_id: "d-title", title: "Screen is black" }),
+    alert({ id: "by-device-id", device_id: "zebra-77" }),
+    alert({ id: "by-rule", device_id: "d-rule", rule_id: "showing-logo" }),
+    alert({ id: "by-severity", device_id: "d-sev", severity: "critical" }),
+    alert({ id: "by-name", device_id: "d-name" }),
+    alert({ id: "by-location", device_id: "d-loc" }),
+    alert({ id: "no-match", device_id: "d-none" }),
+  ];
+  const devices: DeviceRow[] = [
+    { id: "d-title", name: "A", location: "B", retired_at: null },
+    { id: "zebra-77", name: "A", location: "B", retired_at: null },
+    { id: "d-rule", name: "A", location: "B", retired_at: null },
+    { id: "d-sev", name: "A", location: "B", retired_at: null },
+    { id: "d-name", name: "Reception Canvas", location: "B", retired_at: null },
+    { id: "d-loc", name: "A", location: "Gustavsberg", retired_at: null },
+    { id: "d-none", name: "A", location: "B", retired_at: null },
+  ];
+  const cases: Array<[string, string]> = [
+    ["black", "by-title"],
+    ["zebra", "by-device-id"],
+    ["showing-logo", "by-rule"],
+    ["critical", "by-severity"],
+    ["reception", "by-name"],
+    ["gustavsberg", "by-location"],
+  ];
+  for (const [term, expected] of cases) {
+    const fake = fakePostgres({ alerts, devices });
+    const result = await new ReadQueries(fake.pool).alerts({ ...base, q: term });
+    assert.deepEqual(result.items.map((i) => i["id"]), [expected], `q=${term}`);
+    assert.equal(result.totalItems, 1, `q=${term}: the COUNT must see the same one row`);
+    assertStatementsAgree(fake);
+  }
+});
+
+test("search is case-insensitive, matching the console's lowercased includes", async () => {
+  const fake = fakePostgres({
+    alerts: [alert({ id: "a", device_id: "d1", title: "Screen is BLACK" })],
+    devices: [device("d1")],
+  });
+  const result = await new ReadQueries(fake.pool).alerts({ ...base, q: "black" });
+  assert.equal(result.totalItems, 1);
+});
+
+test("search does NOT reach the evidence blob", async () => {
+  // Ported deliberately: the console excludes evidence because matching free
+  // text inside it makes a search for "logo" return rows whose rule is not
+  // showing-logo. A server filter that widened the haystack would return rows
+  // the client would have hidden.
+  const fake = fakePostgres({
+    alerts: [alert({ id: "a", device_id: "d1", title: "Offline", evidence: { note: "logo" } })],
+    devices: [device("d1")],
+  });
+  const result = await new ReadQueries(fake.pool).alerts({ ...base, q: "logo" });
+  assert.equal(result.totalItems, 0);
+  assert.deepEqual(result.items, []);
+});
+
+test("a `%` or `_` in the search term is a LITERAL character, not a wildcard", async () => {
+  // `devices()` binds `%${search}%` unescaped, so "50%" there matches every row.
+  // The console searches with String.includes, where both are ordinary
+  // characters, so the alert queue escapes them. Without this, one keystroke of
+  // punctuation silently returns the entire queue as if it had matched.
+  const fake = fakePostgres({
+    alerts: [
+      alert({ id: "pct", device_id: "d1", title: "Storage at 95% full" }),
+      alert({ id: "plain", device_id: "d1", rule_id: "other", title: "Offline for 4h" }),
+    ],
+    devices: [device("d1")],
+  });
+  const wild = await new ReadQueries(fake.pool).alerts({ ...base, q: "%" });
+  assert.deepEqual(wild.items.map((i) => i["id"]), ["pct"],
+    "a bare % must match the row containing a literal percent sign — not every row");
+  assert.equal(wild.totalItems, 1, "and the count must not swell to the whole queue either");
+
+  const fake2 = fakePostgres({
+    alerts: [
+      alert({ id: "under", device_id: "d1", title: "a_b" }),
+      alert({ id: "any", device_id: "d1", rule_id: "other", title: "axb" }),
+    ],
+    devices: [device("d1")],
+  });
+  const under = await new ReadQueries(fake2.pool).alerts({ ...base, q: "a_b" });
+  assert.deepEqual(under.items.map((i) => i["id"]), ["under"],
+    "`_` must match an underscore, not any character");
+});
+
+test("likeContains escapes the escape character itself, first", () => {
+  assert.equal(likeContains("plain"), "%plain%");
+  assert.equal(likeContains("50%"), "%50\\%%");
+  assert.equal(likeContains("a_b"), "%a\\_b%");
+  // A backslash the user typed must survive as a backslash, not become the
+  // escape for the character after it.
+  assert.equal(likeContains("a\\b"), "%a\\\\b%");
+  assert.equal(likeContains("\\%"), "%\\\\\\%%");
+});
+
+test("a search term carrying SQL is data, never syntax", async () => {
+  const hostile = "'); DROP TABLE alerts; --";
+  const fake = fakePostgres();
+  await new ReadQueries(fake.pool).alerts({ ...base, q: hostile });
+  for (const captured of [fake.countSql(), fake.listSql()]) {
+    assert.ok(!captured.sql.includes("DROP TABLE"), "the term must never reach the statement text");
+    assert.deepEqual(captured.values, [`%${hostile}%`]);
+  }
+});
+
+test("an alert whose device row has not landed is still searchable by its own columns", async () => {
+  // The orphan case, again: the correlated subquery cannot match a missing
+  // device, but the alert's own title must still be findable. Hiding it would be
+  // the search deciding an alert does not exist.
+  const fake = fakePostgres({
+    alerts: [alert({ id: "orphan", device_id: "unknown-1", title: "Screen is black" })],
+    devices: [],
+  });
+  assert.equal((await new ReadQueries(fake.pool).alerts({ ...base, q: "black" })).totalItems, 1);
+  assert.equal((await new ReadQueries(fake.pool).alerts({ ...base, q: "canvas" })).totalItems, 0);
+});
+
+// ─── rule ────────────────────────────────────────────────────────────────────
+
+test("the rule filter is an equality on a column of the table both statements share", async () => {
+  const fake = fakePostgres({
+    alerts: [
+      alert({ id: "match", device_id: "d1", rule_id: "offline-4h" }),
+      alert({ id: "other", device_id: "d1", rule_id: "firmware-behind" }),
+    ],
+    devices: [device("d1")],
+  });
+  const result = await new ReadQueries(fake.pool).alerts({ ...base, rule: "offline-4h" });
+  assert.deepEqual(result.items.map((i) => i["id"]), ["match"]);
+  assert.equal(result.totalItems, 1);
+  assertStatementsAgree(fake);
+  assert.deepEqual(fake.countSql().values, ["offline-4h"]);
+});
+
+test("the console's `(no rule id)` bucket selects rows with no rule id, not a rule named that", async () => {
+  // The console labels a missing rule id `(no rule id)` and sends the LABEL back
+  // as the filter. Matched literally it would search for a rule so named and
+  // return an empty queue for an option the UI says has rows behind it.
+  const fake = fakePostgres({
+    alerts: [
+      alert({ id: "blank", device_id: "d1", rule_id: "" }),
+      alert({ id: "named", device_id: "d1", rule_id: NO_RULE_ID }),
+      alert({ id: "real", device_id: "d1", rule_id: "offline-4h" }),
+    ],
+    devices: [device("d1")],
+  });
+  const result = await new ReadQueries(fake.pool).alerts({ ...base, rule: NO_RULE_ID });
+  assert.deepEqual(result.items.map((i) => i["id"]), ["blank"]);
+  assert.equal(result.totalItems, 1);
+  // No parameter is bound: the predicate is pure SQL about nullness.
+  assert.deepEqual(fake.countSql().values, []);
+  assertStatementsAgree(fake);
+});
+
+// ─── age ─────────────────────────────────────────────────────────────────────
+
+test("every age window is measured against ONE bound clock, shared by count and list", async () => {
+  // Two statements on two connections. Reading `now()` in each lets an alert on
+  // the boundary land in one and not the other, and a count that disagrees with
+  // its own list is the bug this file exists to catch.
+  const fake = fakePostgres();
+  await new ReadQueries(fake.pool).alerts({ ...base, age: "24h", now: NOW });
+  assertStatementsAgree(fake);
+  assert.deepEqual(fake.countSql().values, [NOW]);
+  assert.ok(/\$1::timestamptz/.test(whereClause(fake.countSql().sql)),
+    "the clock must be a bound parameter, not now()");
+  assert.ok(!/\bnow\(\)/i.test(whereClause(fake.countSql().sql)));
+});
+
+test("the age windows keep the console's cumulative semantics", async () => {
+  const alerts = [
+    alert({ id: "future", device_id: "d1", rule_id: "r0", ...opened("2026-09-16T13:00:00Z") }),
+    alert({ id: "min-30", device_id: "d1", rule_id: "r1", ...opened("2026-09-16T11:30:00Z") }),
+    alert({ id: "hr-6", device_id: "d1", rule_id: "r2", ...opened("2026-09-16T06:00:00Z") }),
+    alert({ id: "day-3", device_id: "d1", rule_id: "r3", ...opened("2026-09-13T12:00:00Z") }),
+    alert({ id: "day-10", device_id: "d1", rule_id: "r4", ...opened("2026-09-06T12:00:00Z") }),
+    alert({ id: "day-60", device_id: "d1", rule_id: "r5", ...opened("2026-07-18T12:00:00Z") }),
+  ];
+  const expected: Record<string, string[]> = {
+    all: ["future", "min-30", "hr-6", "day-3", "day-10", "day-60"],
+    // A clock-skewed future timestamp satisfies the "within" windows in the
+    // console too (now - t is negative, which is < the window). A reading, not
+    // a reason to hide a row.
+    "1h": ["future", "min-30"],
+    "24h": ["future", "min-30", "hr-6"],
+    "7d": ["future", "min-30", "hr-6", "day-3"],
+    o7d: ["day-10", "day-60"],
+    o30d: ["day-60"],
+  };
+  for (const [window, ids] of Object.entries(expected)) {
+    const fake = fakePostgres({ alerts, devices: [device("d1")] });
+    const result = await new ReadQueries(fake.pool).alerts({
+      ...base, age: window as "all", now: NOW,
+    });
+    assert.deepEqual(result.items.map((i) => i["id"]).sort(), [...ids].sort(), `age=${window}`);
+    assert.equal(result.totalItems, ids.length, `age=${window}: the COUNT must agree`);
+  }
+  // `7d` and `o7d` are complements over the same set — no alert in both, none in
+  // neither. The dormant band's sum invariant, applied to the age chips.
+  assert.equal(
+    expected["7d"]!.length + expected["o7d"]!.length, expected["all"]!.length,
+    "the 7-day pair must partition the queue exactly",
+  );
+});
+
+test("age=all adds no predicate and binds no clock", async () => {
+  const fake = fakePostgres();
+  await new ReadQueries(fake.pool).alerts({ ...base, age: "all" });
+  assert.deepEqual(fake.countSql().values, [], "an unfiltered window must not bind a parameter");
+  assert.ok(!/interval/i.test(whereClause(fake.countSql().sql)));
+});
+
+test("alertAgePredicate: `all` is the absence of a filter, never a predicate that drops rows", () => {
+  assert.equal(alertAgePredicate("all", "$1::timestamptz"), null);
+  assert.equal(alertAgePredicate("1h", "$1::timestamptz"),
+    "a.opened_at > $1::timestamptz - interval '1 hour'");
+  assert.equal(alertAgePredicate("o30d", "$1::timestamptz"),
+    "a.opened_at <= $1::timestamptz - interval '30 days'");
+});
+
+// ─── composition: the whole queue at once ────────────────────────────────────
+
+test("search, rule, age, severity and state compose, and the count counts exactly them", async () => {
+  const alerts = [
+    alert({ id: "keep", device_id: "d-keep", rule_id: "offline-4h", severity: "critical",
+            title: "Lobby screen offline", ...opened("2026-09-14T12:00:00Z") }),
+    alert({ id: "wrong-sev", device_id: "d-keep", rule_id: "offline-4h", severity: "info",
+            title: "Lobby screen offline", ...opened("2026-09-14T12:00:00Z") }),
+    alert({ id: "wrong-rule", device_id: "d-keep", rule_id: "firmware-behind", severity: "critical",
+            title: "Lobby screen behind", ...opened("2026-09-14T12:00:00Z") }),
+    alert({ id: "wrong-age", device_id: "d-keep", rule_id: "offline-4h", severity: "critical",
+            title: "Lobby screen offline", ...opened("2026-07-01T12:00:00Z") }),
+    alert({ id: "wrong-text", device_id: "d-keep", rule_id: "offline-4h", severity: "critical",
+            title: "Kitchen screen offline", ...opened("2026-09-14T12:00:00Z") }),
+    alert({ id: "resolved", device_id: "d-keep", rule_id: "offline-4h", severity: "critical",
+            title: "Lobby screen offline", ...opened("2026-09-14T12:00:00Z"),
+            resolved_at: new Date("2026-09-15T12:00:00Z") }),
+  ];
+  const fake = fakePostgres({
+    alerts,
+    devices: [{ id: "d-keep", name: "Store 12", location: "Barcelona", retired_at: null }],
+  });
+  const result = await new ReadQueries(fake.pool).alerts({
+    ...base, q: "lobby", rule: "offline-4h", age: "7d", severity: "critical", now: NOW,
+  });
+  assert.deepEqual(result.items.map((i) => i["id"]), ["keep"]);
+  assert.equal(result.totalItems, 1, "the count must be of the filtered set, not of the queue");
+  assertStatementsAgree(fake);
+  // Every dimension is bound in order, and the same values reach both statements.
+  assert.deepEqual(fake.countSql().values, ["critical", "%lobby%", "offline-4h", NOW]);
+});
+
+test("limit=0 returns the filtered TOTAL and no rows — the same statement, page thrown away", async () => {
+  const alerts = [
+    alert({ id: "a", device_id: "d1", rule_id: "offline-4h" }),
+    alert({ id: "b", device_id: "d1", rule_id: "offline-4h", severity: "info" }),
+    alert({ id: "c", device_id: "d1", rule_id: "firmware-behind" }),
+  ];
+  const listed = await new ReadQueries(
+    fakePostgres({ alerts, devices: [device("d1")] }).pool,
+  ).alerts({ ...base, rule: "offline-4h" });
+  const fake = fakePostgres({ alerts, devices: [device("d1")] });
+  const counted = await new ReadQueries(fake.pool).alerts({ ...base, limit: 0, rule: "offline-4h" });
+
+  assert.equal(listed.totalItems, 2);
+  assert.equal(counted.totalItems, listed.totalItems, "the count-only total must equal the list's");
+  assert.deepEqual(counted.items, [], "and carry no rows");
+  assert.ok(/LIMIT 0 OFFSET 0/.test(flat(fake.listSql().sql)));
+});
+
+// ─── sort ────────────────────────────────────────────────────────────────────
+
+test("alertOrderBy: every order is total, ending in a.id", () => {
+  // LIMIT/OFFSET over a non-total order can return one row on two pages and drop
+  // another entirely — and the console pages 200 rows at a time, so every tie is
+  // a chance to lose an alert.
+  for (const sort of ["sev", "recent", "oldest", "device", "rule"] as const) {
+    assert.ok(alertOrderBy(sort).endsWith("a.id"), `${sort} must break ties on the primary key`);
+  }
+});
+
+test("alertOrderBy: the default is the order this endpoint has always returned", () => {
+  assert.equal(
+    alertOrderBy("sev"),
+    "CASE a.severity WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END, " +
+      "a.opened_at DESC, a.id",
+  );
+});
+
+test("alertOrderBy: only `device` reaches for the join, and only a sort may", async () => {
+  // A sort may use the LIST query's `d` alias because the COUNT has no ORDER BY
+  // at all — the constraint that binds every WHERE predicate does not bind this.
+  assert.ok(/\bd\.name\b/.test(alertOrderBy("device")));
+  for (const sort of ["sev", "recent", "oldest", "rule"] as const) {
+    assert.ok(!/\bd\./.test(alertOrderBy(sort)), `${sort} must not depend on the join`);
+  }
+  const fake = fakePostgres();
+  await new ReadQueries(fake.pool).alerts({ ...base, sort: "device" });
+  assert.ok(/ORDER BY lower\(COALESCE\(NULLIF\(d\.name/.test(flat(fake.listSql().sql)));
+  assert.ok(!/ORDER BY/i.test(flat(fake.countSql().sql)),
+    "the COUNT must not sort — it has nothing to sort and no alias to sort by");
+});
+
+test("the sort reaches the statement, and an unspecified sort changes nothing", async () => {
+  const fake = fakePostgres();
+  await new ReadQueries(fake.pool).alerts({ ...base, sort: "oldest" });
+  assert.ok(/ORDER BY a\.opened_at ASC, a\.id/.test(flat(fake.listSql().sql)));
+
+  const plain = fakePostgres();
+  await new ReadQueries(plain.pool).alerts(base);
+  assert.ok(/ORDER BY CASE a\.severity/.test(flat(plain.listSql().sql)));
 });

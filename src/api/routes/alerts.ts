@@ -12,14 +12,31 @@ import {
   loadSuppressionView,
 } from "../../alerting/suppression.js";
 import type { DeviceIntentKind } from "../../intelligence/device-intent.js";
+import { COUNT_ONLY_LIMIT, countOnlyMeta, isCountOnly, pageMeta } from "../count-only.js";
+import { sendConditional } from "../etag.js";
 
 /** Uuid shape check, so a malformed id is a 400 rather than a database 500. */
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const ListQuery = z.object({
   page: z.coerce.number().int().min(1).default(1),
-  limit: z.coerce.number().int().min(1).max(200).default(50),
-  severity: z.enum(["critical", "high", "medium", "info"]).optional(),
+  /**
+   * `0` is the count-only sentinel (see count-only.ts): a total with no rows,
+   * for a nav badge that needs one integer rather than ten pages. Adopted here
+   * because the alert collection is the one that hits `apiAll`'s 2,000-row cap
+   * first — at ~1.25 alerts per device, at roughly 1,600 devices.
+   */
+  limit: z.coerce.number().int().min(COUNT_ONLY_LIMIT).max(200).default(50),
+  /**
+   * `all` is accepted and means UNFILTERED, because that is the value the
+   * console's severity chip holds when nothing is chosen. Rejecting it would
+   * make the obvious client request a 400, and — worse — accepting it as a
+   * literal severity would return an empty queue for "show me everything".
+   */
+  severity: z
+    .enum(["critical", "high", "medium", "info", "all"])
+    .optional()
+    .transform((v) => (v === undefined || v === "all" ? undefined : v)),
   state: z.enum(["open", "resolved", "all"]).default("open"),
   deviceId: z.string().min(1).max(100).optional(),
   /**
@@ -87,7 +104,71 @@ const ListQuery = z.object({
    * claims an alert has not fixed it.
    */
   acknowledged: z.enum(["yes", "no", "all"]).default("all"),
+  /**
+   * ── the triage queue's filters, moved server-side (Epic 8.5) ───────────────
+   *
+   * These four were applied in the BROWSER: the console walked every page of
+   * this endpoint and then filtered the array in `alertBands()`. That is correct
+   * only while every page fits — `apiAll` stops at 2,000 rows, and past that the
+   * client is filtering a truncated set while still reporting a total, which is
+   * a wrong answer rather than a slow one.
+   *
+   * Semantics are ported field for field from `alertBands()` (see
+   * `queries.ts`'s alert-filter block), including the values the console uses
+   * for "no filter" — `q=` empty, `rule=all`, `age=all` — because a client
+   * sending its own idle state must get the unfiltered queue, not a search for
+   * a rule literally named "all".
+   *
+   * Anything NOT in this schema is a 400 (see UNKNOWN_PARAMS below). A filter
+   * parameter this endpoint quietly ignored would be the `x-tenant_id` mistake
+   * again: the caller believes they narrowed, the server served everything, and
+   * nothing in the response says otherwise.
+   */
+  q: z
+    .string()
+    .max(200)
+    .optional()
+    // Whitespace-only is NOT a filter, matching the console: an empty search box
+    // shows the whole queue. Dropped to `undefined` rather than 400'd, because
+    // `q=` is what a form submits and it unambiguously means "no search".
+    .transform((v) => {
+      const trimmed = v?.trim();
+      return trimmed ? trimmed : undefined;
+    }),
+  /** One rule id. `all` = every rule; `(no rule id)` = the console's null bucket. */
+  rule: z
+    .string()
+    .max(200)
+    .optional()
+    .transform((v) => {
+      const trimmed = v?.trim();
+      return !trimmed || trimmed === "all" ? undefined : trimmed;
+    }),
+  /** Cumulative age window over `openedAt`, exactly the console's list. */
+  age: z.enum(["all", "1h", "24h", "7d", "o7d", "o30d"]).default("all"),
+  /** Queue order. `sev` is the order this endpoint has always returned. */
+  sort: z.enum(["sev", "recent", "oldest", "device", "rule"]).default("sev"),
 });
+
+/**
+ * Every parameter `/api/alerts` understands, read off the schema itself so the
+ * two cannot drift.
+ *
+ * WHY A 400 AND NOT A SHRUG. Zod strips unknown keys, so before this an
+ * unrecognised filter was accepted and ignored: `?serverity=critical` returned
+ * the entire queue with a 200 and no hint that the filter had not been applied.
+ * That is this project's signature failure — a request parameter the platform
+ * silently dropped (`x-tenant_id`) cost weeks, because a silently ignored filter
+ * is indistinguishable from a filter that matched everything. Refusing the
+ * request is the only answer a client can act on.
+ */
+const KNOWN_PARAMS = new Set(Object.keys(ListQuery.shape));
+
+/** Unknown query keys, in the order they were sent. */
+function unknownParams(query: unknown): string[] {
+  if (!query || typeof query !== "object") return [];
+  return Object.keys(query as Record<string, unknown>).filter((k) => !KNOWN_PARAMS.has(k));
+}
 
 /**
  * ── the technician's work surface (Epic 8.2, GAP-2 + GAP-3) ─────────────────
@@ -224,6 +305,21 @@ const AcknowledgeBody = z.object({
 
 export async function registerAlertRoutes(app: FastifyInstance, ctx: ApiContext): Promise<void> {
   app.get("/api/alerts", async (request, reply) => {
+    // Unknown parameters first: a typo'd filter name must never reach the query
+    // as "unfiltered". See KNOWN_PARAMS.
+    const unknown = unknownParams(request.query);
+    if (unknown.length > 0) {
+      return reply.code(400).send({
+        error: "unknown_parameter",
+        message:
+          `Unrecognised query parameter(s): ${unknown.join(", ")}. This endpoint ` +
+          `refuses rather than ignores them — an ignored filter looks exactly like ` +
+          `a filter that matched everything. Accepted: ` +
+          `${[...KNOWN_PARAMS].sort().join(", ")}.`,
+        unknown,
+        accepted: [...KNOWN_PARAMS].sort(),
+      });
+    }
     const parsed = ListQuery.safeParse(request.query);
     if (!parsed.success) {
       return reply.code(400).send({
@@ -258,7 +354,7 @@ export async function registerAlertRoutes(app: FastifyInstance, ctx: ApiContext)
       ctx.freshness(),
     ]);
 
-    return envelope(
+    const payload = envelope(
       result.items.map((item) => ({
         ...item,
         /**
@@ -283,12 +379,38 @@ export async function registerAlertRoutes(app: FastifyInstance, ctx: ApiContext)
       // block is a closed shape shared by every paginated endpoint, and this
       // endpoint's contract stays exactly as it was. Same division of labour as
       // dormancy: `/api/alerts` lists, `/api/alerts/hygiene` bands.
-      {
-        page: filters.page,
-        limit: filters.limit,
-        totalItems: result.totalItems,
-        totalPages: Math.max(1, Math.ceil(result.totalItems / filters.limit)),
-      },
+      // `pageMeta` rather than the hand-rolled block, so `limit=0` reports
+      // `totalPages: 0` instead of the `Infinity` that `ceil(n/0)` serialises to
+      // as null. The count itself comes from the SAME filtered statement that
+      // totals the list — it IS the list's count.
+      pageMeta(filters.page, filters.limit, result.totalItems),
+    );
+    const countOnly = countOnlyMeta(filters.limit);
+    const body = countOnly
+      ? {
+          ...payload,
+          meta: {
+            ...payload.meta,
+            // Present only on a count-only request, so an empty `data` is never
+            // read as "nothing matched your filters".
+            countOnly: countOnly.countOnly,
+            countNote: countOnly.note,
+          },
+        }
+      : payload;
+
+    /**
+     * The validator covers the WHOLE body plus every parsed parameter, so it
+     * cannot ignore a filter — including the four added above and any added
+     * later. An ETag that varied with less than its response would serve one
+     * filter's rows for another filter's request; see etag.ts.
+     */
+    return sendConditional(
+      request,
+      reply,
+      { route: "GET /api/alerts", params: filters },
+      body,
+      freshness,
     );
   });
 
@@ -297,9 +419,13 @@ export async function registerAlertRoutes(app: FastifyInstance, ctx: ApiContext)
    * database, not from DEFAULT_RULES, so what the UI shows is what runs even
    * after an operator has tuned a threshold.
    */
-  app.get("/api/alerts/rules", async () => {
+  app.get("/api/alerts/rules", async (request, reply) => {
     const [rules, freshness] = await Promise.all([ctx.queries.alertRules(), ctx.freshness()]);
-    return envelope(rules, freshness);
+    // Rule definitions change only when an operator tunes one, so this is the
+    // cheapest 304 on the API and the console re-reads it every load.
+    return sendConditional(
+      request, reply, { route: "GET /api/alerts/rules" }, envelope(rules, freshness), freshness,
+    );
   });
 
   /**
@@ -469,9 +595,12 @@ export async function registerAlertRoutes(app: FastifyInstance, ctx: ApiContext)
    * alerts that came back because of it. Re-escalation you cannot count is
    * re-escalation you have to take on trust.
    */
-  app.get("/api/alerts/suppressions", async (_request, reply) => {
+  app.get("/api/alerts/suppressions", async (request, reply) => {
     const [view, freshness] = await Promise.all([loadSuppressionView(ctx.repo), ctx.freshness()]);
-    return reply.send(
+    return sendConditional(
+      request,
+      reply,
+      { route: "GET /api/alerts/suppressions" },
       envelope(
         {
           ...view,
@@ -486,6 +615,7 @@ export async function registerAlertRoutes(app: FastifyInstance, ctx: ApiContext)
         },
         freshness,
       ),
+      freshness,
     );
   });
 
@@ -703,7 +833,11 @@ export async function registerAlertRoutes(app: FastifyInstance, ctx: ApiContext)
 
     const events = await ctx.repo.alertEvents(request.params.id);
     const view = await loadSuppressionView(ctx.repo);
-    return reply.send(
+    return sendConditional(
+      request,
+      reply,
+      // The id is part of the validator, or two drawers would share one tag.
+      { route: "GET /api/alerts/:id", params: { id: request.params.id } },
       envelope(
         {
           ...detail,
@@ -726,6 +860,7 @@ export async function registerAlertRoutes(app: FastifyInstance, ctx: ApiContext)
         },
         freshness,
       ),
+      freshness,
     );
   });
 
