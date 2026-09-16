@@ -43,6 +43,19 @@ import {
   isReachableStatus,
 } from "./screen-state.js";
 import { resolveIntent, type DeviceIntent, type RecordedIntent } from "./device-intent.js";
+/**
+ * Type-only, and it has to stay that way: `churn.ts` imports THIS module's types
+ * the same way, so the two files reference each other in the type graph and in
+ * neither one at runtime. An actual value import in either direction would make
+ * that a real module cycle.
+ */
+import type {
+  ChurnDepartureCause,
+  ChurnFigure,
+  ChurnObservationVerdict,
+  ChurnRead,
+  ChurnReport,
+} from "./churn.js";
 
 /** The assembled per-device facts the engine reasons over. Honest nulls throughout. */
 export interface DeviceView {
@@ -601,6 +614,144 @@ export function recommendationsFor(
   });
 }
 
+// ── why the set moved: `byCause` on the summary (Epic 8.6, US-8.6.3) ─────────
+
+/**
+ * A cause breakdown is a DIFF, and a diff needs a baseline.
+ *
+ * US-8.6.3 asks this summary itself to say why the set moved, so an operator who
+ * saw 20 auto-safe items and now sees 2 does not have to make a second call to
+ * learn that eighteen panels crossed a scheduled-OFF boundary in their own
+ * timezone (docs/25 GAP-7). The obstacle is structural rather than lazy: nothing
+ * stores what the recommendation set looked like an hour ago — 21 tables in
+ * `src/db/schema.sql`, none of them a recommendation log — and reconstructing one
+ * from stored device facts would mean reconstructing the device facts as they
+ * were then, which we do not keep either.
+ *
+ * `/api/remediation` is a GET, so it arrives with no prior set of its own. For a
+ * bare GET the only honest value here is therefore null WITH the reason and the
+ * recipe. It is emphatically NOT a map of zeros: `{applied: 0, ...}` reads as
+ * "nothing left the set", and what we mean is "we have nothing to compare
+ * against", which is a different sentence and a different day of work.
+ *
+ * A caller that DOES hold its previous read can attest to it on the query string
+ * and get the real breakdown in this same response — the console holds exactly
+ * one such read, the payload it last rendered. Either way the baseline is the
+ * CALLER's and is labelled `attestedBy: "caller"`, because we cannot verify it.
+ *
+ * The block is folded from `analyzeChurn`'s own `byCause` figure rather than
+ * recounted here: the churn tally is counted over exactly the departures that
+ * engine published, and a second count derived from anything else is a count
+ * that can disagree with the list it describes.
+ */
+export type RemediationByCauseProblem =
+  /** No baseline was asked for. The normal GET, and not an error. */
+  | "no-baseline"
+  /** A baseline was supplied and cannot be used; `reason` names which part. */
+  | "unusable-baseline"
+  /** We could not read our OWN collection for the window, so no gate could be judged. */
+  | "window-unreadable"
+  /** Baseline fine, but we watched too little of the window to attribute anything. */
+  | "unobserved-window";
+
+export const BY_CAUSE_HOW_TO_GET =
+  "Add your own previous read to the query string: `?since=<the meta.freshness-stamped instant " +
+  "you last read this endpoint, i.e. the `observedAt` you rendered>&previous=<comma-separated " +
+  "recommendation ids you held then>`. Send only the ids of the set named by `churnKind` " +
+  "(default `auto-safe`) — sending the whole list would put manual items in the `from` end of " +
+  "the movement and overstate it. For the ITEMISED diff (which item left, and the evidence " +
+  "behind each cause) POST the same baseline to /api/trends/churn; this block is that " +
+  "endpoint's `byCause` figure and nothing more.";
+
+export const NO_BASELINE_REASON =
+  "Unknown, because this request carried no baseline to diff against. No recommendation " +
+  "snapshot is stored anywhere in this system, so the server cannot know what your last read " +
+  "held; a breakdown of zeros would claim nothing left the set, which is not what we mean. " +
+  "This is null for lack of a comparison, not for lack of movement.";
+
+export interface RemediationByCauseUnavailable {
+  available: false;
+  /** Null, never `{}` and never a zeroed map. `reason` says which null this is. */
+  value: null;
+  problem: RemediationByCauseProblem;
+  reason: string;
+  howToGet: string;
+  baseline: null;
+}
+
+export interface RemediationByCauseAvailable {
+  available: true;
+  problem: null;
+  /**
+   * The tally, keyed by departure cause. Assigned from `figure.value` rather
+   * than recomputed, so the convenient shallow read and the figure it came from
+   * cannot drift apart.
+   */
+  value: Record<ChurnDepartureCause, number>;
+  /** The read this is a diff against: yours, reported as yours. */
+  baseline: ChurnRead;
+  /**
+   * Which set was diffed. The `recommendations` array beside this summary is
+   * still the FULL list — nothing is filtered out of it by asking for churn.
+   */
+  kind: RecommendationKind;
+  /** e.g. 20 → 2, both ends counted from the `kind` set only. */
+  movement: { from: number; to: number; net: number };
+  /** `value` plus its basis and the coverage it was measured under. */
+  figure: ChurnFigure<Record<ChurnDepartureCause, number>>;
+  /** How much of the window between the two reads we were actually collecting. */
+  window: ChurnObservationVerdict;
+  /** One sentence, built from the tally so the prose cannot drift from it. */
+  headline: string;
+  itemisedBy: string;
+}
+
+export type RemediationByCause = RemediationByCauseAvailable | RemediationByCauseUnavailable;
+
+export const byCauseUnavailable = (
+  problem: RemediationByCauseProblem,
+  reason: string,
+): RemediationByCauseUnavailable => ({
+  available: false,
+  value: null,
+  problem,
+  reason,
+  howToGet: BY_CAUSE_HOW_TO_GET,
+  baseline: null,
+});
+
+/**
+ * Fold a churn report into the summary block. Pure; the route does the IO.
+ *
+ * `report.byCause === null` is the churn engine refusing attribution because it
+ * observed nothing at all between the two reads, and it is carried through as a
+ * null with that engine's own reason rather than being softened into zeros here.
+ */
+export function byCauseFromChurn(report: ChurnReport): RemediationByCause {
+  if (report.byCause === null) {
+    return byCauseUnavailable(
+      "unobserved-window",
+      report.window.reason ??
+        "The churn engine declined to attribute this window and gave no reason, which is a bug " +
+          "in that engine rather than a fact about the fleet.",
+    );
+  }
+  return {
+    available: true,
+    problem: null,
+    value: report.byCause.value,
+    baseline: report.reads.previous,
+    kind: report.kind,
+    movement: report.movement.value,
+    figure: report.byCause,
+    window: report.window,
+    headline: report.headline,
+    itemisedBy:
+      "POST the same baseline to /api/trends/churn for the itemised diff — which item left, " +
+      "which reading each cause rests on, and what entered since you looked.",
+  };
+}
+
 /** Counts by kind and severity — the endpoint's summary block. */
 export interface RemediationSummary {
   total: number;
@@ -623,13 +774,32 @@ export interface RemediationSummary {
     fromWeakNameMatch: number;
     byKind: Record<string, number>;
   };
+  /**
+   * Why the set moved since the caller last looked (US-8.6.3). ALWAYS present,
+   * and null-with-a-reason whenever there was no usable baseline — see
+   * `RemediationByCauseProblem`. Never omitted: a caller that has to test for
+   * the key cannot tell "this build does not answer that" from "there was
+   * nothing to say".
+   */
+  byCause: RemediationByCause;
 }
 
-export function summarize(recs: Recommendation[]): RemediationSummary {
+/**
+ * `byCause` is a parameter rather than something computed here because it needs
+ * two things this function is not given and should not be: the caller's prior
+ * read, and the collector's coverage of the window between the two reads. Both
+ * are the route's to fetch. Omitted means "nobody asked for a diff", which is
+ * reported as the `no-baseline` null — not as an absent key.
+ */
+export function summarize(
+  recs: Recommendation[],
+  byCause?: RemediationByCause,
+): RemediationSummary {
   const summary: RemediationSummary = {
     total: recs.length,
     byKind: { "auto-safe": 0, manual: 0 },
     bySeverity: { critical: 0, high: 0, medium: 0, low: 0 },
+    byCause: byCause ?? byCauseUnavailable("no-baseline", NO_BASELINE_REASON),
     intent: {
       onIntentDevices: 0,
       demotedFromAutoSafe: 0,
