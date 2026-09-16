@@ -541,6 +541,12 @@ table.dt td .prov{display:block;margin-top:2px;white-space:normal;max-width:34ch
    unplaced at a glance instead of disappearing into the column. */
 .unres{color:var(--tx-3);font-style:italic;font-size:11.5px;white-space:normal;
   display:inline-block;max-width:34ch;line-height:1.35}
+/* The incident queue's flap chip. `indeterminate` is NOT a fault: it is 177 of
+   267 incidents on today's corpus (1-2 transitions, or nothing resolved yet to
+   measure a duration from), so it gets the muted neutral treatment and never
+   the red one. Styling "we could not classify this" as a failure would mislabel
+   two thirds of the queue as broken. */
+.tag.und{background:var(--na-2);color:var(--tx-3);font-weight:600;letter-spacing:0}
 /* The correlated-finding drilldown: the device list a finding expands into.
    Indented under the finding it belongs to so 43 rows cannot be mistaken for
    43 findings. */
@@ -656,6 +662,7 @@ table.dt td .prov{display:block;margin-top:2px;white-space:normal;max-width:34ch
 <nav class="navbar"><div class="navbar-in" id="nav">
   <button aria-selected="true"  data-v="overview">&#128202; Overview</button>
   <button aria-selected="false" data-v="alerts">&#128680; Alerts <span class="nb hot" id="nb-alerts">0</span></button>
+  <button aria-selected="false" data-v="incidents">&#129518; Incidents</button>
   <button aria-selected="false" data-v="actions">&#128736;&#65039; Actions <span class="nb" id="nb-actions">0</span></button>
   <button aria-selected="false" data-v="devices">&#128421; Devices <span class="nb" id="nb-devices">0</span></button>
   <button aria-selected="false" data-v="compliance">&#128737; Compliance <span class="nb" id="nb-comp">0</span></button>
@@ -777,6 +784,10 @@ table.dt td .prov{display:block;margin-top:2px;white-space:normal;max-width:34ch
       <div class="chd">
         <h2>&#128276; Active alerts <span class="cnt" id="acount">&#8212;</span></h2>
         <div class="r"><span class="prov" id="asub"></span>
+          <!-- The way into the incident queue. Deliberately carries NO count:
+               that view is loaded when it is opened, and a badge here would be
+               a number this tab had not read. -->
+          <button class="btn" id="toincidents">&#129518; View as incidents &#8594;</button>
           <button class="btn" id="reload">&#8635; Refresh</button></div>
       </div>
       <div id="abands"></div>
@@ -804,6 +815,44 @@ table.dt td .prov{display:block;margin-top:2px;white-space:normal;max-width:34ch
         <span class="d gry"></span>
         <span class="l" id="inerttext"></span>
       </div>
+    </div>
+  </section>
+
+  <!-- ============ INCIDENTS (the queue, collapsed) ============ -->
+  <section id="v-incidents" class="hide">
+    <!-- The reconciliation gate. Its own container, above everything, for the
+         reason the banners at the top of the page have theirs: if the incident
+         view has lost a transition it must say so where it cannot be missed,
+         and a re-render must never be able to wipe that. -->
+    <div id="incgate"></div>
+    <div class="card" style="margin-bottom:16px">
+      <div class="chd"><h2>&#129518; What the collapse is</h2>
+        <div class="r"><span class="prov" id="incmeta"></span>
+          <button class="btn" id="increload">&#8635; Refresh</button></div></div>
+      <div class="wbody" id="inccollapse"></div>
+    </div>
+    <div class="card">
+      <div class="chd">
+        <h2>&#128203; Incident queue <span class="cnt" id="inccount">?</span></h2>
+        <div class="r"><span class="prov" id="incsub"></span></div>
+      </div>
+      <div class="tbar" id="incctl"></div>
+      <!-- WHICH number is which on this screen. Static markup, like the audit
+           view's: the badge beside the heading counts the rows in the list
+           below it and nothing else, and every wider figure on this page is
+           the server's own count over the whole filtered queue, labelled as
+           such. A count that came from a wider set than the list it heads has
+           shipped in this file three times. -->
+      <div class="prov" style="padding:0 16px 10px">The number beside the
+        heading counts the incident rows in the list below it. Every other
+        figure on this page is the endpoint's own count over the whole filtered
+        queue &#8212; the line under the heading says which is which, and the
+        filters are server-side, so narrowing them refetches rather than hiding
+        rows.</div>
+      <div id="inclist"><div class="skel"><span class="sk row"></span><span class="sk row"></span>
+        <span class="sk row"></span></div></div>
+      <div id="incpager"></div>
+      <div id="incnote"></div>
     </div>
   </section>
 
@@ -849,15 +898,22 @@ table.dt td .prov{display:block;margin-top:2px;white-space:normal;max-width:34ch
       </div>
       <div class="tbar" id="audctl"></div>
       <div class="pills" id="audfp"></div>
-      <!-- WHY the outcome pills carry no numbers. Static markup, like the
-           truncation banner: it is the sentence that keeps the header count
-           honest, and a re-render must never be able to drop it. -->
+      <!-- WHERE the pills' numbers come from, and where they do not. Static
+           markup, like the truncation banner: it is the sentence that keeps the
+           header count honest, and a re-render must never be able to drop it.
+           The pills shipped NUMBERLESS because a tally over the 50 rows on
+           screen is a page count in a log count's clothes; the numbers now come
+           from /api/audit/counts, which groups over every row the SAME filters
+           match. So there are two different figures on this screen on purpose,
+           and neither is the other. -->
       <div class="prov" style="padding:0 16px 10px">The pills above are
-        server-side filters and deliberately carry no counts. This endpoint
-        filters and pages in the database, so a per-outcome tally taken from the
-        rows on screen would be a count of ONE PAGE wearing the clothes of a
-        count of the log. The number beside the heading counts the rows in the
-        table below it, and nothing else.</div>
+        server-side filters, and their numbers come from
+        <code>/api/audit/counts</code> &#8212; a count over <b>every row these
+        filters match</b>, not over the page below. The number beside the
+        heading is the other figure: it counts the rows in the table below it
+        and nothing else. A pill with no number is one this request did not
+        count, which the pill says on hover and is never the same as zero.</div>
+      <div id="audcnote"></div>
       <div id="audlist"><div class="skel"><span class="sk row"></span><span class="sk row"></span>
         <span class="sk row"></span></div></div>
       <div id="audpager"></div>
@@ -1222,6 +1278,32 @@ const S = { summary: null, alerts: [], devices: [], compliance: [], pipeline: nu
                the header count and the rows can only ever be one page. */
             audit: null, audPage: null, audErr: null, audLoading: false, audAt: 0,
             aud: { page: 1, outcome: "all", action: "all", actor: null, deviceId: null },
+            /* Epic 8.7 read half, part two -- the outcome pills' NUMBERS.
+               `audCounts` is /api/audit/counts over the SAME filters the list
+               was read with (minus the page controls, which that endpoint
+               400s). null means the counts could not be read, and the pills
+               then carry no number at all -- which is what they shipped as, and
+               is a different statement from a zero. */
+            audCounts: null, audCountsErr: null,
+            /* Epic 8.8 -- the incident queue. `inc` is one PAGE of
+               /api/incidents (the endpoint filters and pages server-side),
+               `incPage` its meta.page, `incAt` when we read it. `inc: null`
+               with `incErr` set means the queue could not be READ, which is
+               never rendered as "there are no incidents". `incOpen` is the one
+               expanded row and `incDrill` holds, per incident id, the
+               underlying /api/alerts transitions once somebody asks for them --
+               a fetch, because the drilldown filter is handed to us in the
+               payload and re-deriving it here is how a client gets a grouping
+               rule wrong. */
+            inc: null, incPage: null, incErr: null, incLoading: false, incAt: 0,
+            incF: { page: 1, state: "all", severity: "all", rule: null, deviceId: null, sinceDays: null },
+            incOpen: null, incDrill: {},
+            /* US-8.6.3 -- the baseline `summary.byCause` needs. The ids of the
+               auto-safe set plus THE INSTANT WE READ THEM, held from the first
+               read of the session so the diff answers "since I opened this
+               console" rather than "since the last two-minute refresh", which
+               would be a window nobody looked at. Re-baselining is a button. */
+            remMark: null, remCauseAt: 0, remCauseErr: null,
             /* Who is claiming. `acknowledge` requires `by` and there is no user
                model behind the shared token, so this is a self-declared name,
                remembered locally and recorded as the claim it is — never
@@ -1588,6 +1670,10 @@ function showView(v) {
      paged read of an append-only table that no other surface consumes, and the
      two-minute refresh has no business walking it. */
   if (v === "audit" && !S.audit && !S.audLoading) loadAudit();
+  /* Same rule for the incident queue, and the same reason: it collapses every
+     alert transition we hold on every request, so the two-minute refresh has no
+     business asking for it on a tab nobody has opened. */
+  if (v === "incidents" && !S.inc && !S.incLoading) loadIncidents();
 }
 
 /** Repaint every surface a link can address. Used by popstate only: a fresh
@@ -1701,6 +1787,7 @@ function urlResolveLink() {
 const PAGES = {
   overview:   ["Fleet Overview", "Everything measurable, and everything that is not"],
   alerts:     ["Active Alerts", "Search, filter by rule or age, group by rule — severity first, newest evidence first"],
+  incidents:  ["Incident Queue", "One row per real-world condition — with the grouping axis named, and every transition still reachable"],
   actions:    ["Recommended Actions", "Self-heal: what to do, ranked — one-click where we hold a verified fix, advice everywhere else"],
   devices:    ["Devices", "Sortable, searchable; click any row for full detail"],
   compliance: ["Configuration Compliance", "Calibrated drift scored apart from policy adoption"],
@@ -6245,6 +6332,668 @@ function renderTrends() {
 }
 
 /* ===================================================================
+   INCIDENTS -- the queue as CONDITIONS, not as transitions (Epic 8.8).
+
+   WHY THIS SCREEN EXISTS. The Alerts tab lists the append-only `alerts`
+   rows, which is the right surface for a drilldown and the wrong one for a
+   work queue: on today's corpus it presents 1,222 transitions where there
+   are 267 distinct real-world conditions -- a 78.2% collapse that until now
+   existed only inside /api/incidents. An operator cannot work a queue that
+   re-raises the same condition, and calling those rows 1,222 problems
+   overstates the estate's condition by a wide margin.
+
+   FOUR THINGS THIS VIEW MUST NOT GET WRONG, each named in the epic's own
+   CORRECTIONS section because each was got wrong once already.
+
+   1. THE AXIS IS NAMED, NEVER ASSUMED. With no tenant credential there is no
+      group tree, so the endpoint groups by the device's LEAF GROUP and says
+      so on every incident's `scope`. A leaf-group name printed in a column
+      headed "site" is the misrepresentation this whole project's docs exist
+      to prevent, so the axis travels with the label -- and `siteResolved:
+      false` raises a badge next to it rather than a footnote somewhere else.
+
+   2. BOTH OCCURRENCE NUMBERS. The worked example (five screens, group "Jay",
+      device names Leedy_Home_Spark*) is 21 half-hour windows of which 14
+      carry three or more screens firing together. Printing only the 14 hides
+      seven real recurrences, so the headline states `total` AND `coFiring`.
+
+   3. `indeterminate` IS NOT A FAULT. It is 177 of 267 incidents here -- 1-2
+      transitions, or nothing resolved yet to measure a duration from. It is
+      rendered as "too few occurrences to classify" in the muted neutral
+      style, never as a red verdict, because styling it as a failure would
+      mislabel two thirds of the queue.
+
+   4. `reconciliation.balanced` IS A GATE, NOT A FOOTER. Every transition
+      handed to the engine must land in exactly one incident and in exactly
+      one of its occurrence windows. If that ever fails, this view refuses to
+      render the incidents at all and sends the reader to the transitions: an
+      incident view that has lost a transition is worse than the noisy queue
+      it replaced, and the endpoint says so in those words itself.
+
+   Filters here are QUERY PARAMETERS, not a client-side pass: the endpoint
+   selects whole incidents and then REBUILDS the queue from just those
+   incidents' rows, so every figure it publishes was computed over exactly the
+   rows being described. Narrowing therefore refetches -- and the badge beside
+   the heading still counts only the rows in the list beneath it.
+   =================================================================== */
+
+/** Page size. The endpoint clamps `limit` at 200 and 0 is its count-only
+ *  sentinel, so this is a real page size and not a smuggled total. */
+const INC_LIMIT = 50;
+
+/**
+ * How many occurrence windows one expanded incident lists inline.
+ *
+ * The largest incident on this corpus has 81 of them (`black-screen` on one
+ * device in "Front Sitting Area"), and 81 rows inside a row stops being a row.
+ * The cap is PRINTED with the remainder whenever it bites: hitting a cap must
+ * never look like reaching the end of the partition.
+ */
+const INC_WINDOWS_SHOWN = 20;
+
+/**
+ * The `deviceIds` ceiling on /api/alerts, which that endpoint SLICES at
+ * silently rather than refusing. So the refusal has to happen here: a drilldown
+ * that quietly dropped devices would return fewer transitions than the incident
+ * claims and read as a lost partition -- the one thing this view exists to make
+ * impossible. The largest roster on this corpus is 13.
+ */
+const INC_DRILL_ID_CAP = 500;
+
+/** The filter vocabularies, in the endpoint's own words. `all` is the absence
+ *  of a filter and is not sent, exactly as the audit view treats it. */
+const INC_STATES = [["all", "Any state"], ["open", "Open"], ["resolved", "Resolved"]];
+const INC_SEVS = [["all", "Any severity"], ["critical", "Critical"], ["high", "High"],
+  ["medium", "Medium"], ["info", "Info"]];
+/** The history window, which is the ONE filter that changes what an occurrence
+ *  count describes -- so the payload's `corpus.windowNote` is always printed
+ *  beside whatever is chosen here. */
+const INC_WINDOWS = [["", "All history held"], ["1", "Opened in the last day"],
+  ["7", "Opened in the last 7 days"], ["30", "Opened in the last 30 days"]];
+
+/** The query string for one incident-queue read. Only parameters the endpoint
+ *  declares; it refuses unknown ones with a 400 rather than ignoring them. */
+function incQuery() {
+  const f = S.incF;
+  const p = ["page=" + Math.max(1, Number(f.page) || 1), "limit=" + INC_LIMIT];
+  if (f.state && f.state !== "all") p.push("state=" + encodeURIComponent(f.state));
+  if (f.severity && f.severity !== "all") p.push("severity=" + encodeURIComponent(f.severity));
+  if (f.rule) p.push("rule=" + encodeURIComponent(f.rule));
+  if (f.deviceId) p.push("deviceId=" + encodeURIComponent(f.deviceId));
+  if (f.sinceDays) p.push("sinceDays=" + encodeURIComponent(f.sinceDays));
+  return p.join("&");
+}
+
+/**
+ * Read one page of the incident queue.
+ *
+ * `inc: null` with `incErr` set is "we could not ask", and renderIncidents()
+ * prints "?" for the count rather than 0 -- a zero here would be a claim that
+ * this estate has no recurring conditions, made on the strength of a failed
+ * request.
+ */
+async function loadIncidents(over) {
+  if (over) {
+    Object.assign(S.incF, over);
+    // A filter change can remove the expanded row from the page entirely, and
+    // its fetched transitions describe counts that have just moved.
+    S.incOpen = null;
+    S.incDrill = {};
+  }
+  S.incLoading = true;
+  renderIncidents();
+  try {
+    const res = await api("/api/incidents?" + incQuery());
+    S.inc = res.data;
+    S.incPage = (res.meta && res.meta.page) || null;
+    S.incAt = Date.now();
+    S.incErr = null;
+  } catch (e) {
+    S.inc = null;
+    S.incPage = null;
+    S.incErr = e.message;
+  }
+  S.incLoading = false;
+  renderIncidents();
+}
+
+/**
+ * WHICH AXIS this incident was grouped on, and its label -- together, always.
+ *
+ * The badge is driven by `scope.siteResolved`, not by the axis name: it is the
+ * payload's own statement that the row was NOT grouped on the axis the product
+ * shows. `scope.reason` is the pre-written sentence that says which axis was
+ * used instead and why, and it is printed in full in the expansion.
+ */
+function incAxis(scope) {
+  const s = scope || {};
+  const noun = s.axis === "site" ? "site" : s.axis === "group" ? "leaf group" : "single device";
+  const label = s.label
+    ? `<b>${esc(s.label)}</b>`
+    : `<span class="unres">the platform supplies no name for this ${esc(noun)}</span>`;
+  const badge = s.siteResolved === false
+    ? `<span class="tag warn" data-axisbadge="${esc(s.axis || "unknown")}"
+         title="${esc(s.reason || "This row was not grouped by site, and the payload gave no reason.")}">${
+        s.axis === "group" ? "leaf group, not site"
+          : s.axis === "device" ? "no group, not site"
+            : "not grouped by site"}</span>`
+    : "";
+  return { noun, label, badge, axis: s.axis || "unknown" };
+}
+
+/**
+ * "recurred 21 times, 14 of them site-wide" -- BOTH numbers, always.
+ *
+ * Correction 3 to the epic is explicit: the worked example is 21 windows, of
+ * which 14 carry three or more devices, and a UI that prints only the 14 hides
+ * seven real recurrences. The word for "together" follows the AXIS: on a leaf
+ * group this is group-wide and calling it site-wide would be the same mislabel
+ * as printing a group name in a site column.
+ */
+function incRecurrence(o, axis) {
+  const total = o && typeof o.total === "number" ? o.total : null;
+  const co = o && typeof o.coFiring === "number" ? o.coFiring : null;
+  if (total === null || co === null) {
+    return `<span class="unres">this row carried no occurrence counts, so how often the
+      condition recurred is unknown &#8212; which is not the same as once, and not the same
+      as never</span>`;
+  }
+  const together = axis === "site" ? "site-wide" : axis === "group" ? "group-wide" : "multi-device";
+  const floor = (o && o.minCoFiringDevices) || 3;
+  const mins = (o && o.windowMinutes) || 30;
+  return `recurred <b>${total}</b> time${total === 1 ? "" : "s"}, <b>${co}</b> of them
+    <span title="${esc(`A window is ${mins} fixed minutes in which this incident opened at least once; ` +
+      `${floor} or more distinct devices firing inside one is the signature of a cause above the device.`)}">${together}</span>`;
+}
+
+/**
+ * The flap verdict, and its own stated basis.
+ *
+ * `indeterminate` gets the muted neutral chip and the words "too few
+ * occurrences to classify" -- it is 177 of 267 incidents here and it is an
+ * honest refusal, not a fault. `flap.reason` is pre-written and states which of
+ * the three refusals this is, so it is printed rather than paraphrased.
+ */
+function incFlap(f) {
+  const v = f || {};
+  const cls = v.classification === "oscillating" ? "warn"
+    : v.classification === "sustained" ? "bad" : "und";
+  const label = v.classification === "indeterminate" ? "too few occurrences to classify"
+    : v.classification === "oscillating" ? "oscillating"
+      : v.classification === "sustained" ? "sustained"
+        : "no classification in the payload";
+  // Honest nulls, both of them: a mean with nothing resolved to average and a
+  // rate with too short a span are nulls WITH the reason, never zeros. Zero
+  // minutes open is a condition that cleared instantly, which is a finding.
+  const mean = v.meanOpenMinutes == null
+    ? `<span class="unres">no mean time-open${v.resolvedTransitions === 0
+        ? " &#8212; nothing has resolved yet, so there is no closed duration to average"
+        : " &#8212; the payload carried none"}</span>`
+    : `mean time-open <b>${esc(v.meanOpenMinutes)}</b> min`;
+  const rate = v.opensPerDay == null
+    ? `<span class="unres">no daily rate &#8212; observed over ${v.observedSpanHours == null
+        ? "no measurable span"
+        : esc(v.observedSpanHours) + "h"}, too short for a rate to mean anything</span>`
+    : `opens <b>${esc(v.opensPerDay)}</b>&#215;/day`;
+  return `<span class="tag ${cls}">${esc(label)}</span>
+    <span class="mt">${mean} &#183; ${rate} &#183; in <b>${esc(v.distinctHoursOfDay == null
+      ? "?" : v.distinctHoursOfDay)}</b> of the 24 hours of the day</span>
+    <span class="mt"><span class="unres">${esc(v.reason || "The payload stated no basis for this classification, which is itself worth reporting.")}</span></span>`;
+}
+
+/** The device roster, with each device's own share of the transitions. Never a
+ *  fabricated zero: every entry is counted from the rows the incident holds. */
+function incRosterHtml(i) {
+  return (i.roster || []).map((r) => `<div class="fdr">
+      <span class="fdn">${r.deviceName
+        ? esc(r.deviceName)
+        : `<span class="unres">no name held for ${esc(r.deviceId)}</span>`}</span>
+      <span class="fds">${esc(r.deviceId)} &#183; <b>${r.transitionCount}</b> transition(s),
+        ${r.openTransitions} still open &#183; ${ago(r.lastSeenAt)}</span>
+      <button class="btn sm" data-inc-only-dev="${esc(r.deviceId)}"
+        title="Every incident whose roster contains this device. It does NOT reduce this incident to that one device: a roster of five is the finding, and narrowing it to one would turn a site event back into a device fault.">Only this device</button>
+      <button class="btn sm" data-inc-dev="${esc(r.deviceId)}">Open</button></div>`).join("");
+}
+
+/**
+ * The occurrence windows -- the partition itself.
+ *
+ * `transitionIds` across the windows partitions the incident, so the sum is
+ * checked here against `transitionCount` and PRINTED. It is the same invariant
+ * the endpoint publishes fleet-wide in `reconciliation`, asserted again per row
+ * because this is the row a technician will act on.
+ */
+function incWindowsHtml(i) {
+  const o = i.occurrences || {};
+  const all = o.windows || [];
+  const shown = all.slice(0, INC_WINDOWS_SHOWN);
+  const partition = all.reduce((n, w) => n + ((w.transitionIds || []).length), 0);
+  const rows = shown.map((w) => `<div class="fdr">
+      <span class="fdn">${esc(String(w.windowStart).replace("T", " ").slice(0, 16))}</span>
+      <span class="fds">${w.coFiring
+        ? `<b>${w.deviceCount}</b> devices together`
+        : `${w.deviceCount} device(s)`} &#183;
+        ${(w.transitionIds || []).length} transition(s)
+        ${w.coFiring ? `<span class="tag warn">co-firing</span>` : ""}</span></div>`).join("");
+  return `<div class="fdr" style="padding-bottom:9px">
+      <span class="fds">${esc(o.basis || "The payload stated no basis for these windows.")}</span></div>
+    ${rows}
+    ${all.length > shown.length
+      ? `<div class="fdr"><span class="fds"><b>${all.length - shown.length}</b> further window(s)
+           are not listed here &#8212; this list stops at ${INC_WINDOWS_SHOWN}, which is a cap on
+           the LIST and not the end of the partition. All ${all.length} are in the payload.</span></div>`
+      : ""}
+    <div class="fdr"><span class="fds">${partition === i.transitionCount
+      ? `The ${all.length} window(s) hold <b>${partition}</b> transition ids between them, which is
+         exactly this incident's ${i.transitionCount} transition(s): the windows partition it, so
+         nothing on this row is outside a window.`
+      : `<b>These windows hold ${partition} transition ids but the incident claims
+         ${i.transitionCount}.</b> The windows are supposed to partition the incident exactly, so
+         trust the transitions below and treat this row's counts as suspect.`}</span></div>`;
+}
+
+/**
+ * The underlying transitions, fetched with the filter the PAYLOAD hands us.
+ *
+ * `drilldown` is the endpoint's own answer to "which /api/alerts rows are
+ * behind this row", and it is used verbatim rather than rebuilt from the
+ * roster. The dormant band's lesson, recorded in its own comment: a client that
+ * re-derived a grouping got it wrong, and the divergence was silent.
+ */
+async function loadIncidentTransitions(id) {
+  const inc = ((S.inc && S.inc.incidents) || []).find((x) => x.id === id);
+  if (!inc) return;
+  const d = inc.drilldown || {};
+  const ids = (d.deviceIds || []).filter(Boolean);
+  if (!d.ruleId || ids.length === 0) {
+    S.incDrill[id] = { error: "This row carries no drilldown filter, so there is nothing to ask for." };
+    renderIncidents();
+    return;
+  }
+  if (ids.length > INC_DRILL_ID_CAP) {
+    // REFUSED, not trimmed. /api/alerts slices the id list silently past its
+    // cap, and a trimmed drilldown would return fewer transitions than this
+    // incident claims and read as a lost partition.
+    S.incDrill[id] = {
+      error: `This incident's roster is ${ids.length} devices and /api/alerts accepts ` +
+        `${INC_DRILL_ID_CAP} ids, past which it drops the rest without saying so. Refused ` +
+        `rather than trimmed: a short list here would understate the incident. Filter the ` +
+        `queue to one device and open the row again.`,
+    };
+    renderIncidents();
+    return;
+  }
+  S.incDrill[id] = { loading: true };
+  renderIncidents();
+  /* `state=all` is load-bearing: /api/alerts DEFAULTS to state=open, and both
+     rows this epic was designed from are fully resolved right now (the group
+     "Jay" condition, 72 transitions, 0 open). On the endpoint's default this
+     drilldown would return nothing and read as a lost partition. */
+  const q = "rule=" + encodeURIComponent(d.ruleId) +
+    "&deviceIds=" + encodeURIComponent(ids.join(",")) + "&state=all";
+  const res = await apiAll("/api/alerts?" + q).catch((e) => ({ error: e.message }));
+  S.incDrill[id] = res.error
+    ? { error: res.error }
+    : { rows: res.data || [], loaded: res.loaded, total: res.total,
+        truncated: res.truncated, capped: res.capped };
+  renderIncidents();
+}
+
+/** The transitions behind one incident, once somebody has asked for them. */
+function incDrillHtml(i) {
+  const d = S.incDrill[i.id];
+  if (!d) {
+    return `<div class="fdr"><button class="btn sm pri" data-inc-drill="${esc(i.id)}">Open the
+        ${i.transitionCount} underlying transition(s) &#8594;</button>
+      <span class="fds">Asks /api/alerts for exactly the filter this row carries
+        (rule <code>${esc(i.ruleId)}</code>, ${(i.drilldown && i.drilldown.deviceIds || []).length}
+        device id(s), every state) &#8212; nothing about the grouping is re-derived here.</span></div>`;
+  }
+  if (d.loading) return `<div class="fdr"><span class="fds">Reading the transitions&#8230;</span></div>`;
+  if (d.error) {
+    return `<div class="fdr"><span class="unres">The underlying transitions could not be read:
+      ${esc(d.error)} That is a failure to ask, not a finding &#8212; this incident's own counts
+      above still stand.</span></div>`;
+  }
+  const rows = d.rows || [];
+  return `<div class="fdr" style="padding-bottom:9px"><span class="fds">${
+      rows.length === i.transitionCount
+        ? `<b>${rows.length}</b> transition(s), which is exactly what this incident claims.`
+        : `<b>${rows.length} transition(s) came back and this incident claims
+           ${i.transitionCount}.</b> The two describe the same rows, so the difference is a
+           discrepancy worth reporting rather than a filter working.`}
+      ${d.truncated
+        ? ` <b>This is ${d.loaded} of ${d.total}</b> &#8212; the walk came up short, so the list
+            below is a subset.`
+        : ""}</span></div>
+    <div class="tblwrap"><table class="dt"><thead><tr>
+      <th>Device</th><th>Opened</th><th>Last evidence</th><th>Resolved</th><th>Severity</th>
+    </tr></thead><tbody>${rows.map((a) => `<tr>
+      <td>${a.deviceName ? esc(a.deviceName) : `<span class="unres">no name held</span>`}
+        <div class="prov">${esc(a.deviceId)}</div></td>
+      <td class="n">${ago(a.openedAt)}
+        <div class="prov">${esc(String(a.openedAt).replace("T", " ").slice(0, 19))} UTC</div></td>
+      <td class="n">${ago(a.lastFiredAt)}</td>
+      <td class="n">${a.resolvedAt
+        ? ago(a.resolvedAt)
+        : `<span class="unres">still open</span>`}</td>
+      <td><span class="sev ${esc(a.severity)}">${esc(a.severity)}</span>
+        <div class="prov">${esc(a.evidence || "no evidence text on this row")}</div></td>
+    </tr>`).join("")}</tbody></table></div>`;
+}
+
+/** One incident row, collapsed or expanded. */
+function incidentRow(i) {
+  const open = S.incOpen === i.id;
+  const ax = incAxis(i.scope);
+  const dot = (SEV.find((x) => x[0] === i.severity) || ["", "gry"])[1];
+  const head = `<button class="arow" data-inc="${esc(i.id)}" aria-expanded="${open}"
+      style="align-items:flex-start;text-align:left;width:100%">
+    <span class="thumb" style="display:flex;align-items:center;justify-content:center">
+      <span class="d ${esc(dot)}"></span></span>
+    <span><span class="ti">${esc(i.title)}
+        <span class="tag ${i.state === "open" ? "bad" : "on"}">${esc(i.state)}</span></span>
+      <span class="ds">${esc(ax.noun)} ${ax.label} ${ax.badge} &#183;
+        rule <code>${esc(i.ruleId)}</code></span>
+      <span class="mt">${incRecurrence(i.occurrences, ax.axis)} &#183;
+        <b>${i.deviceCount}</b> device(s) &#183; <b>${i.transitionCount}</b> transition(s)
+        (${i.openTransitions} open, ${i.resolvedTransitions} resolved) &#183;
+        last ${ago(i.lastSeenAt)}</span>
+      ${incFlap(i.flap)}</span>
+    <span class="btn sm">${open ? "Hide &#9652;" : "Expand &#9662;"}</span></button>`;
+  if (!open) return head;
+  return head + `<div class="fdrill">
+      <div class="fdr" style="padding-bottom:9px"><span class="fds">${esc(i.scope.reason
+        || "The payload gave no reason for this scope, which is itself worth reporting.")}</span></div>
+      <div class="fdr"><span class="fds">First seen ${ago(i.firstSeenAt)}, last evidence
+        ${ago(i.lastSeenAt)} &#183; ${i.acknowledgedTransitions} of ${i.transitionCount}
+        transition(s) acknowledged &#183; severities
+        ${Object.entries(i.severityCounts || {}).filter(([, n]) => n > 0)
+          .map(([k, n]) => `${n} ${esc(k)}`).join(", ") || "none recorded"}</span></div>
+      ${(i.correlationFindings || []).length
+        ? `<div class="fdr"><span class="fds">Live correlation findings touching this roster:
+             ${i.correlationFindings.map((f) => esc(f.summary)).join("; ")}</span></div>`
+        : ""}
+      <div class="fdr"><button class="btn sm" data-inc-rule="${esc(i.ruleId)}">Only rule
+          ${esc(i.ruleId)}</button>
+        <span class="fds">The rule is part of the incident key, so filtering the transitions by
+          it and filtering the incidents by it are the same set &#8212; the endpoint pushes it
+          into SQL.</span></div>
+      <div class="sechd">Device roster (${i.deviceCount})</div>
+      ${incRosterHtml(i)}
+      <div class="sechd">Occurrence windows (${(i.occurrences && i.occurrences.total) || 0})</div>
+      ${incWindowsHtml(i)}
+      <div class="sechd">The transitions underneath</div>
+      ${incDrillHtml(i)}
+    </div>`;
+}
+
+/**
+ * Paint the incident queue.
+ *
+ * Order is deliberate: the reconciliation gate, then what the collapse IS, then
+ * the rows. A reader who has lost a transition must be stopped before they read
+ * a single incident row.
+ */
+function renderIncidents() {
+  const host = $("#inclist");
+  if (!host) return;
+  const gate = $("#incgate");
+  const coll = $("#inccollapse");
+  const count = $("#inccount");
+  const sub = $("#incsub");
+  const pager = $("#incpager");
+  const note = $("#incnote");
+  const meta = $("#incmeta");
+
+  // The controls are rebuilt every render so the handlers are attached to the
+  // elements now on screen -- the pattern renderAuditFilters() uses. Every one
+  // of them REFETCHES: these are query parameters, not a client-side pass.
+  const ctl = $("#incctl");
+  if (ctl) {
+    /* The three <option> lists, written with their ids SPELLED OUT rather than
+       passed to a helper: a console-invariant test scans this file for the ids
+       it wires listeners to, and an id that only exists as a function argument
+       reads to that test as a listener bound to a dead element -- which is a
+       real bug it has caught before (a renamed button left one TypeError at
+       parse time and rendered the whole console empty). */
+    const opts = (options, value) => options.map(([k, label]) =>
+      `<option value="${esc(k)}"${String(k) === String(value == null ? "" : value)
+        ? " selected" : ""}>${esc(label)}</option>`).join("");
+    ctl.innerHTML =
+      `<label for="incstate">State</label>
+       <select id="incstate">${opts(INC_STATES, S.incF.state)}</select>` +
+      `<label for="incsev">Severity</label>
+       <select id="incsev">${opts(INC_SEVS, S.incF.severity)}</select>` +
+      `<label for="incwin">Window</label>
+       <select id="incwin">${opts(INC_WINDOWS, S.incF.sinceDays || "")}</select>` +
+      (S.incF.rule
+        ? `<button class="fp" id="incruleclr">&#10005; rule ${esc(S.incF.rule)}</button>` : "") +
+      (S.incF.deviceId
+        ? `<button class="fp" id="incdevclr">&#10005; device ${esc(S.incF.deviceId)}</button>` : "");
+    const st = $("#incstate");
+    if (st) st.addEventListener("change", () => loadIncidents({ state: st.value, page: 1 }));
+    const sv = $("#incsev");
+    if (sv) sv.addEventListener("change", () => loadIncidents({ severity: sv.value, page: 1 }));
+    const wn = $("#incwin");
+    if (wn) wn.addEventListener("change", () =>
+      loadIncidents({ sinceDays: wn.value ? Number(wn.value) : null, page: 1 }));
+    const rc = $("#incruleclr");
+    if (rc) rc.addEventListener("click", () => loadIncidents({ rule: null, page: 1 }));
+    const dc = $("#incdevclr");
+    if (dc) dc.addEventListener("click", () => loadIncidents({ deviceId: null, page: 1 }));
+  }
+
+  if (S.incLoading) {
+    count.textContent = "…";
+    count.title = "Collapsing the alert transitions…";
+    sub.textContent = "Reading the incident queue…";
+    host.innerHTML = `<div class="skel"><span class="sk row"></span><span class="sk row"></span>
+      <span class="sk row"></span></div>`;
+    gate.innerHTML = ""; coll.innerHTML = ""; pager.innerHTML = ""; note.innerHTML = "";
+    return;
+  }
+  if (!S.inc) {
+    /* "?" and not 0. A zero would be a claim about the estate -- that it holds
+       no recurring conditions -- made on the strength of a failed request. */
+    count.textContent = "?";
+    count.title = "The incident queue could not be read, so there is no count. This is not zero.";
+    sub.textContent = "unread";
+    gate.innerHTML = "";
+    coll.innerHTML = `<div class="note"><b>The incident queue could not be read.</b>
+      ${esc(S.incErr || "The request failed and gave no reason.")}
+      So this console cannot say how many distinct conditions are behind the alert
+      transitions &#8212; which is <b>not</b> the same as saying there are none. The
+      Alerts tab still lists the transitions themselves.</div>`;
+    host.innerHTML = ""; pager.innerHTML = ""; note.innerHTML = "";
+    return;
+  }
+
+  const v = S.inc;
+  const rec = v.reconciliation || null;
+  /* THE GATE. `balanced` is the endpoint's own client-assertable invariant:
+     every transition in exactly one incident and in exactly one of that
+     incident's windows. If it is false the incidents are NOT rendered, because
+     a queue that has lost a transition is worse than the noisy one it replaced
+     -- and the endpoint's own note says to trust the transitions, not these
+     rows. */
+  if (!rec || rec.balanced !== true) {
+    count.textContent = "?";
+    count.title = "The collapse did not reconcile, so no incident count is trustworthy. This is not zero.";
+    sub.textContent = "refused — the collapse did not reconcile";
+    gate.innerHTML = `<div class="banner bad"><span>&#9888;&#65039;</span>
+      <span><b>This collapse has lost a transition, so the incidents below are not shown.</b>
+      ${rec
+        ? `${rec.transitionsIn} transition(s) went in; ${rec.transitionsInIncidents} landed in an
+           incident, ${rec.transitionsInOccurrenceWindows} landed in an occurrence window, and
+           ${rec.distinctTransitionIds} distinct transition id(s) came back. Those four are
+           supposed to be the same number.`
+        : `The response carried no reconciliation block at all, so the invariant could not be
+           checked &#8212; which is the same refusal.`}
+      ${esc((rec && rec.note) || "")}
+      Work from the transitions instead: they are the append-only rows and nothing here
+      deletes them.</span></div>`;
+    coll.innerHTML = "";
+    host.innerHTML = `<div class="note"><b>Incident rows withheld.</b> An incident view that
+      has dropped one of its own transitions would hide a real recurrence, which is the one
+      failure this queue must not have. Nothing was deleted &#8212; the
+      <b>${rec ? rec.transitionsIn : "?"}</b> transition(s) are still in the alerts table.
+      <div class="prov"><button class="btn sm pri" id="incgatealerts">Open the transition queue
+        &#8594;</button></div></div>`;
+    pager.innerHTML = ""; note.innerHTML = "";
+    const go = $("#incgatealerts");
+    if (go) go.addEventListener("click", () => switchTab("alerts"));
+    return;
+  }
+
+  const rows = Array.isArray(v.incidents) ? v.incidents : [];
+  const pg = S.incPage;
+  const t = v.totals || {};
+  const c = v.corpus || {};
+  const g = v.grouping || {};
+
+  /* THE ONE COUNT TAKEN FROM THE ROWS, and it is taken from the very array the
+     list below is built from. Everything else on this screen is the endpoint's
+     own count over the whole filtered queue, and #incsub says which is which in
+     words. */
+  count.textContent = String(rows.length);
+  count.title = "Incident rows in the list below. The queue is paged server-side; " +
+    "see the line beneath the list.";
+
+  const named = [];
+  if (S.incF.state !== "all") named.push("state " + S.incF.state);
+  if (S.incF.severity !== "all") named.push("worst severity " + S.incF.severity);
+  if (S.incF.rule) named.push("rule " + S.incF.rule);
+  if (S.incF.deviceId) named.push("roster contains " + S.incF.deviceId);
+  if (S.incF.sinceDays) named.push("opened in the last " + S.incF.sinceDays + " day(s)");
+  const where = named.length ? named.join(" · ") : "no filter applied";
+  const first = pg ? (pg.page - 1) * pg.limit + 1 : 1;
+  sub.textContent = (rows.length === 0
+    ? "0 incident rows on this page"
+    : `rows ${first}–${first + rows.length - 1} of ${pg ? pg.totalItems : rows.length} matching` +
+      (pg ? ` · page ${pg.page} of ${pg.totalPages}` : "")) + ` · ${where}`;
+  meta.textContent = `read ${ago(new Date(S.incAt || Date.now()).toISOString())}`;
+
+  const fig = (n, label, colour) =>
+    `<div><div style="font-size:30px;font-weight:800;letter-spacing:-.02em${
+      colour ? ";color:" + colour : ""}">${n}</div>
+      <div class="na" style="font-size:12px">${label}</div></div>`;
+  coll.innerHTML =
+    `<div style="display:flex;gap:22px;flex-wrap:wrap;align-items:baseline">
+      ${fig(t.transitions == null ? "?" : t.transitions, "alert transitions read")}
+      ${fig(t.incidents == null ? "?" : t.incidents, "incidents they collapse into", "var(--green)")}
+      ${fig(t.collapsePercent == null
+        ? `<span class="unres">no collapse figure &#8212; there was nothing to collapse</span>`
+        : t.collapsePercent + "%", "collapsed away", "var(--green)")}
+      ${fig(t.openIncidents == null ? "?" : t.openIncidents, "still open")}
+      <div style="flex:1"></div>
+     </div>
+     <div class="na" style="font-size:12px;margin-top:10px">
+       ${t.coFiringEvents == null
+        ? `<span class="unres">no co-firing figure in this payload</span>`
+        : `<b>${t.coFiringEvents}</b> of those occurrences carried ${
+            (rows[0] && rows[0].occurrences && rows[0].occurrences.minCoFiringDevices) || 3
+          } or more devices firing together, covering <b>${t.coFiringTransitions}</b> transition(s)
+          &#8212; ${t.coFiringSharePercent == null ? "an unstated share" : t.coFiringSharePercent + "%"}
+          of everything read, and ${t.coFiringShareOfAttributedPercent == null
+            ? "an unstated share"
+            : t.coFiringShareOfAttributedPercent + "%"} of the transitions we could place in a
+          group or at a site. An unattributed transition can never co-fire, which is why the two
+          shares differ.`}
+       ${t.unattributedTransitions
+        ? ` <b>${t.unattributedTransitions}</b> transition(s) are on devices in no group at all and
+            are reported as single-device incidents rather than folded into a neighbour.`
+        : ""}
+     </div>
+     <div class="note ${g.siteAxisAvailable ? "na" : ""}" style="margin-top:12px">
+       <b>Grouped by ${esc(g.axisLabel || "an axis the payload did not name")}.</b>
+       ${esc(g.reason || "")}</div>
+     <div class="na" style="font-size:12px;margin-top:10px">
+       <b>${c.transitionsRead == null ? "?" : c.transitionsRead}</b> of
+       <b>${c.transitionsInWindow == null ? "?" : c.transitionsInWindow}</b> transition(s) in this
+       window were read.
+       <div class="prov">${esc(c.retirementNote || "")} ${esc(c.windowNote || "")}</div>
+       <div class="prov">${c.incidentsSelected == null || c.incidentsInWindow == null
+        ? `<span class="unres">the payload did not say how many incidents the filters selected</span>`
+        : `${c.incidentsSelected} of ${c.incidentsInWindow} incident(s) in the window match these
+           filters. Filters select whole incidents and the queue is then rebuilt from just those
+           incidents' rows, so every figure above describes exactly the set named beside the
+           list.`}</div></div>`;
+
+  gate.innerHTML = "";
+  host.innerHTML = rows.length === 0
+    /* WHICH empty this is. Three different facts, and flattening them into "no
+       results" is how a narrowed window reads as a healthy estate: the filter
+       matched none of the incidents in the window, or the WINDOW itself holds no
+       transition to collapse, or the corpus does and the collapse produced
+       nothing — the last of which would be a bug in the endpoint. */
+    ? `<div class="note na"><b>No incident matches these filters.</b>
+        ${c.incidentsInWindow
+          ? `The window holds ${c.incidentsInWindow} incident(s), so this is the filter matching
+             none of them rather than a quiet estate.`
+          : c.transitionsRead === 0
+            ? `No alert transition OPENED inside this window at all, so there was nothing to
+               collapse. That is a statement about the window, not about the estate &#8212;
+               widen it above.`
+            : `The window holds ${c.transitionsRead == null ? "?" : c.transitionsRead}
+               transition(s) and yet produced no incident, which cannot happen from a correct
+               collapse. Treat that as a bug in /api/incidents rather than a quiet estate.`}</div>`
+    : rows.map(incidentRow).join("");
+
+  pager.innerHTML = !pg
+    ? `<div class="pg"><span>The response carried no page meta, so this console <b>cannot
+         say</b> whether more incidents exist. Treat this list as possibly partial.</span></div>`
+    : rows.length === 0 && pg.totalItems === 0
+      ? ""
+      : `<div class="pg"><span>Showing <b>${rows.length}</b> of <b>${pg.totalItems}</b> matching
+           incident(s) &#8212; page ${pg.page} of ${pg.totalPages}, ${pg.limit} rows a page.
+           ${pg.totalPages > 1
+             ? "<b>This page is not the whole queue</b>; page through it or narrow the filters."
+             : "This page is the whole queue."}</span>
+         <button class="btn sm" id="incprev"${pg.page <= 1 ? " disabled" : ""}>&#8592; Previous</button>
+         <button class="btn sm" id="incnext"${pg.page >= pg.totalPages ? " disabled" : ""}>Next &#8594;</button>
+         </div>`;
+  const prev = $("#incprev");
+  if (prev) prev.addEventListener("click", () => loadIncidents({ page: Math.max(1, S.incF.page - 1) }));
+  const next = $("#incnext");
+  if (next) next.addEventListener("click", () => loadIncidents({ page: S.incF.page + 1 }));
+
+  const corr = v.correlation || {};
+  note.innerHTML = `<div class="note na"><b>Nothing is hidden by this collapse.</b>
+      ${esc(rec.note || "")}
+      <div class="prov">Checked in this response: ${rec.transitionsIn} transition(s) in,
+        ${rec.transitionsInIncidents} in an incident, ${rec.transitionsInOccurrenceWindows} in an
+        occurrence window, ${rec.distinctTransitionIds} distinct transition id(s) &#8212; all four
+        equal, so the partition holds.</div>
+      <div class="prov">Live correlation cross-link: ${corr.available
+        ? `${corr.findings} finding(s) were computed and stamped onto the incidents whose rosters
+           they touch.${corr.reason ? " " + esc(corr.reason) : ""}`
+        : `<span class="unres">${esc(corr.reason
+            || "not available, and the payload gave no reason")}</span>`}</div>
+      <div class="prov">Read from /api/incidents
+        ${ago(new Date(S.incAt || Date.now()).toISOString())} &#8212; a direct read, not the poll
+        snapshot the rest of this console carries, so the freshness pill in the header does not
+        describe it.</div></div>`;
+
+  host.querySelectorAll("[data-inc]").forEach((b) =>
+    b.addEventListener("click", () => {
+      S.incOpen = S.incOpen === b.dataset.inc ? null : b.dataset.inc;
+      const id = S.incOpen;
+      renderIncidents();
+      const now = id && host.querySelector(`[data-inc="${id}"]`);
+      if (now) now.scrollIntoView({ behavior: "smooth", block: "center" });
+    }));
+  host.querySelectorAll("[data-inc-drill]").forEach((b) =>
+    b.addEventListener("click", () => loadIncidentTransitions(b.dataset.incDrill)));
+  host.querySelectorAll("[data-inc-dev]").forEach((b) =>
+    b.addEventListener("click", () => openDevice(b.dataset.incDev)));
+  host.querySelectorAll("[data-inc-rule]").forEach((b) =>
+    b.addEventListener("click", () => loadIncidents({ rule: b.dataset.incRule, page: 1 })));
+  host.querySelectorAll("[data-inc-only-dev]").forEach((b) =>
+    b.addEventListener("click", () => loadIncidents({ deviceId: b.dataset.incOnlyDev, page: 1 })));
+}
+
+/* ===================================================================
    AUDIT -- what VFI changed on this estate, and who asked for it.
 
    `device_action_log` and GET /api/audit were built BEFORE the bulk write
@@ -6324,6 +7073,20 @@ function auditQuery(over) {
 }
 
 /**
+ * The same query string, minus the page controls -- which is exactly what
+ * /api/audit/counts takes, and it 400s `page` and `limit` rather than ignoring
+ * them: a caller sending them is asking for a tally over one page, and that is
+ * the question the numberless pills existed to avoid answering.
+ *
+ * DERIVED from auditQuery() by removing two parameters rather than rebuilt, so
+ * the list and its counts cannot drift into describing different sets. That
+ * drift is the whole failure mode here.
+ */
+function auditCountsQuery() {
+  return auditQuery().split("&").filter((part) => !/^(page|limit)=/.test(part)).join("&");
+}
+
+/**
  * Read one page of the log.
  *
  * Filtering refetches rather than slicing what is on screen: the rows here are
@@ -6334,20 +7097,38 @@ async function loadAudit(over) {
   if (over) Object.assign(S.aud, over);
   S.audLoading = true;
   renderAudit();
-  try {
-    const res = await api("/api/audit?" + auditQuery());
-    S.audit = res.data;
-    S.audPage = (res.meta && res.meta.page) || null;
+  /* Both reads in one go, and the COUNTS ARE ALLOWED TO FAIL ALONE. The rows
+     are the payload an operator came for; a tally beside them is an annotation,
+     and an annotation must never take the list away. A failed count leaves the
+     pills numberless, which is what they shipped as and is a different
+     statement from a zero. */
+  const [list, counts] = await Promise.all([
+    api("/api/audit?" + auditQuery()).then((r) => ({ r }), (e) => ({ e })),
+    // The "?" is unconditional, exactly as the line above writes it: an
+    // unfiltered counts read is `/api/audit/counts?` with nothing after it,
+    // which is a legal empty query and keeps the two calls one shape.
+    api("/api/audit/counts?" + auditCountsQuery()).then((r) => ({ r }), (e) => ({ e })),
+  ]);
+  if (list.r) {
+    S.audit = list.r.data;
+    S.audPage = (list.r.meta && list.r.meta.page) || null;
     S.audAt = Date.now();
     S.audErr = null;
-  } catch (e) {
+  } else {
     // null, never []. "We could not read the log" and "the log is empty" are
     // different facts, and rendering the first as the second would tell a
     // technician that nothing was done to an estate we simply failed to ask
     // about. renderAudit() prints "?" for the count, not 0.
     S.audit = null;
     S.audPage = null;
-    S.audErr = e.message;
+    S.audErr = list.e.message;
+  }
+  if (counts.r) {
+    S.audCounts = counts.r.data;
+    S.audCountsErr = null;
+  } else {
+    S.audCounts = null;
+    S.audCountsErr = counts.e.message;
   }
   S.audLoading = false;
   renderAudit();
@@ -6509,7 +7290,27 @@ function renderAuditFilters() {
   }
   const fp = $("#audfp");
   if (!fp) return;
-  // No counts on these, and the reason is stated in the markup beneath them.
+  /* THE PILLS' NUMBERS (US-8.7.x) come from /api/audit/counts, which groups
+     over every row the same filters match -- never from the rows on screen,
+     which are one page of 50.
+
+     THE RULE THAT MAKES THEM HONEST: an outcome ABSENT from `byOutcome` was
+     EXCLUDED BY THE CALLER'S OWN FILTER and was therefore never counted. It is
+     rendered with no number and the reason on hover, because a 0 meaning "you
+     filtered it out" sitting beside a 0 meaning "it never happened" is exactly
+     the fabricated zero this project treats as its worst bug class. The
+     endpoint seeds the outcomes IN SCOPE at 0 itself, so a 0 that IS printed is
+     a count we performed.
+
+     `S.audCounts` null covers both "not read yet" and "the count failed": both
+     leave every pill numberless, which is what they shipped as. */
+  const C = S.audCounts;
+  const by = (C && C.byOutcome) || null;
+  // An active `outcome=` filter means the breakdown only covers the outcomes it
+  // admits, so "All outcomes" and "Needs attention" have no countable answer in
+  // THIS response. Said, rather than summed from the keys that happen to be
+  // present -- which would silently under-report.
+  const outcomeFiltered = !!(C && C.filters && C.filters.outcome);
   const pills = [["all", "All outcomes"], ["attention", "Needs attention"]]
     .concat(AUD_OUTCOMES.map((x) => [x[0], x[0]]));
   fp.innerHTML = pills.map(([k, label]) => {
@@ -6518,8 +7319,35 @@ function renderAuditFilters() {
       : k === "attention"
         ? `${AUD_ATTENTION.join(", ")} — the writes that did not end where they were asked to. A refusal is excluded: there, the device was never touched.`
         : auditOutcome(k).why;
+    // n === null is "not counted"; only a number is ever printed as one.
+    let n = null;
+    let unc = "";
+    if (!by) {
+      unc = S.audCountsErr
+        ? `The counts could not be read (${S.audCountsErr}), so this pill carries no number. That is not zero.`
+        : "The counts have not been read yet, so this pill carries no number. That is not zero.";
+    } else if (k === "all") {
+      if (outcomeFiltered) {
+        unc = "Your own outcome filter narrowed this request, so the whole-log total was not " +
+          "counted. Clear the outcome filter to count every outcome.";
+      } else n = C.matched;
+    } else if (k === "attention") {
+      const missing = AUD_ATTENTION.filter((o) => !(o in by));
+      if (missing.length) {
+        unc = `Not counted: ${missing.join(", ")} ${missing.length === 1 ? "is" : "are"} excluded ` +
+          `by your own outcome filter, so summing what is left would under-report. That is not zero.`;
+      } else n = AUD_ATTENTION.reduce((sum, o) => sum + by[o], 0);
+    } else if (k in by) {
+      n = by[k];
+    } else {
+      unc = "Not counted: this outcome is excluded by your own outcome filter, so we never " +
+        "counted it. That is not zero — drop the filter to count it.";
+    }
     return `<button class="fp" data-audout="${esc(k)}"
-      aria-pressed="${String(S.aud.outcome === k)}" title="${esc(why)}">${esc(label)}</button>`;
+      aria-pressed="${String(S.aud.outcome === k)}"
+      title="${esc(why + (unc ? " — " + unc : ""))}">${n === null
+        ? `${esc(label)} <span class="unres">not counted</span>`
+        : `<b>${n}</b> ${esc(label)}`}</button>`;
   }).join("");
   fp.querySelectorAll("[data-audout]").forEach((b) =>
     b.addEventListener("click", () => loadAudit({ outcome: b.dataset.audout, page: 1 })));
@@ -6533,6 +7361,40 @@ function renderAudit() {
   const pager = $("#audpager");
   const note = $("#audnote");
   renderAuditFilters();
+
+  /* The counts' own line, painted here rather than inside the pills because it
+     is about the WHOLE MATCH and the pills are one filter each. Rendered in
+     every state, including while the page is loading: the pills' numbers
+     describe the match, not the page, so they do not go stale when the page
+     turns -- and the sentence that says which figure is which must not blink.
+
+     Three distinct facts live here and none may be flattened into the others:
+     how many rows match, how many the log holds at all, and -- when nothing
+     matched -- WHICH empty that is, in the endpoint's own words. */
+  const cn = $("#audcnote");
+  if (cn) {
+    const C = S.audCounts;
+    cn.innerHTML = !C
+      ? `<div class="prov" style="padding:0 16px 10px"><span class="unres">${esc(S.audCountsErr
+          ? `The per-outcome counts could not be read (${S.audCountsErr}), so the pills above
+             carry no numbers. That is a failure to ask, not a log with nothing in it.`
+          : "The per-outcome counts have not been read yet, so the pills above carry no numbers.")
+        }</span></div>`
+      : `<div class="prov" style="padding:0 16px 10px">
+          <b>${C.matched}</b> row(s) match these filters, of <b>${C.logSize}</b> in the log.
+          ${C.matched === 0 && C.emptyReason ? esc(C.emptyReason) : ""}
+          ${C.matched > 0 && C.oldestActionAt
+            ? `The matched rows run from ${esc(String(C.oldestActionAt).slice(0, 10))} to
+               ${esc(String(C.newestActionAt).slice(0, 10))}.`
+            : ""}
+          ${C.outcomeScope ? esc(C.outcomeScope.note || "") : ""}
+          ${(C.byAction || []).length
+            ? `By action: ${C.byAction.map((a) => `<b>${a.count}</b> ${esc(a.action)}`).join(" · ")}.
+               ${esc((C.actionScope && C.actionScope.note) || "")}`
+            : `<span class="unres">No action name has a matching row, and \`action\` is an open
+                 column &#8212; so there is no list here rather than a list of zeros.</span>`}
+          Counted at ${esc(String(C.countedAt || "").replace("T", " ").slice(0, 19))} UTC.</div>`;
+  }
 
   if (S.audLoading) {
     count.textContent = "…";
@@ -6806,6 +7668,199 @@ function drillToDevices(ids, label) {
   urlSync("replace");
 }
 
+/* ===================================================================
+   `summary.byCause` -- WHY the recommendation set moved (US-8.6.3).
+
+   The block is ALWAYS in the payload and its `value` is usually null with a
+   NAMED problem, because the server stores no snapshot of anybody's last read:
+   without a baseline from the caller there is nothing to diff, and a breakdown
+   of zeros would claim nothing left the set. So this surface renders the
+   `reason`, never a zero, and `howToGet` is a literal recipe rather than a
+   paraphrase of one.
+
+   The baseline is OURS to keep: the ids of the auto-safe set plus the instant
+   we read them (S.remMark), held from the first read of the session so the
+   question is "since I opened this console" rather than "since the last
+   two-minute refresh" -- a window nobody looked at. Re-baselining is a button,
+   because moving the watermark is a decision.
+
+   TWO REFUSALS THAT ARE NOT ERRORS, and must not be painted as any:
+
+     `no-baseline`       nobody has asked for a diff yet.
+     `unobserved-window` we were not collecting across the window, so no cause
+                         is attributable. On this deployment the collector is
+                         stopped, so a short window legitimately lands here --
+                         that is the honest answer, not a fault.
+
+   And one that IS ours: `window-unreadable` means we could not read our own
+   collection coverage, which is a fault on our side and is styled as one.
+   =================================================================== */
+
+/**
+ * The id ceiling on the query string. The endpoint REFUSES past it rather than
+ * truncating -- a trimmed baseline would report departures that never happened
+ * -- so this console must refuse too, and say where the full diff lives. Five
+ * auto-safe items today; GAP-7 recorded 20 at the collapse.
+ */
+const BY_CAUSE_ID_CAP = 120;
+
+/** How a byCause refusal should LOOK. A refusal that is not our fault must not
+ *  wear the colour of one: `unobserved-window` is two thirds of the honest
+ *  nulls on this deployment and is a statement about our collection window, not
+ *  an error the operator can act on by retrying. */
+function byCauseTone(problem) {
+  if (problem === "no-baseline") {
+    return { cls: "na", label: "Not measured — no baseline was sent." };
+  }
+  if (problem === "unobserved-window") {
+    return { cls: "na", label: "Not attributable — we were not watching across that window." };
+  }
+  if (problem === "unusable-baseline") {
+    return { cls: "", label: "The baseline could not be used." };
+  }
+  if (problem === "window-unreadable") {
+    return { cls: "", label: "Our own collection coverage could not be read — this one is on us." };
+  }
+  return { cls: "", label: "No breakdown, and the payload named no problem." };
+}
+
+/**
+ * Ask the endpoint to explain the movement, with our own held baseline.
+ *
+ * The WHOLE response replaces `S.remediation`, deliberately: `byCause` is
+ * computed from the same `recommendations` array that response returns, and
+ * keeping the old list beside the new diff would put a breakdown next to a set
+ * it does not describe.
+ */
+async function loadRemediationDiff() {
+  const mark = S.remMark;
+  if (!mark) return;
+  S.remCauseErr = null;
+  if (mark.ids.length > BY_CAUSE_ID_CAP) {
+    // Refused here rather than trimmed, for the same reason the endpoint
+    // refuses: a short baseline invents departures. Never silently sliced.
+    S.remCauseErr =
+      `Your baseline holds ${mark.ids.length} ids and this endpoint accepts ${BY_CAUSE_ID_CAP} ` +
+      `on a query string, past which it refuses outright rather than trimming. Nothing was ` +
+      `sent. POST the full baseline to /api/trends/churn, which takes 3,000 and returns the ` +
+      `itemised diff as well.`;
+    renderActions();
+    return;
+  }
+  const q = "since=" + encodeURIComponent(mark.at) +
+    "&previous=" + encodeURIComponent(mark.ids.join(","));
+  try {
+    const res = await api("/api/remediation?" + q);
+    S.remediation = res.data;
+    S.remCauseAt = Date.now();
+  } catch (e) {
+    // The QUEUE IS NEVER WITHHELD over a baseline problem -- the endpoint's own
+    // rule, and it holds on this side too: the list already on screen stays,
+    // and only this annotation reports the failure.
+    S.remCauseErr = e.message;
+  }
+  renderActions();
+}
+
+/** Move the watermark to now. A decision, so it is a button and it says what it
+ *  costs: the movement before this instant stops being answerable. */
+function rebaselineRemediation() {
+  const recs = (S.remediation && S.remediation.recommendations) || [];
+  S.remMark = {
+    at: new Date().toISOString(),
+    ids: recs.filter((r) => r.kind === "auto-safe").map((r) => r.id),
+  };
+  S.remCauseErr = null;
+  renderActions();
+}
+
+/** The card. `bc` is `summary.byCause`, which is always present. */
+function byCauseCard(bc) {
+  const mark = S.remMark;
+  const baseline = mark
+    ? `Your held baseline: <b>${mark.ids.length}</b> auto-safe id(s) as of
+       ${esc(mark.at.replace("T", " ").slice(0, 19))} UTC (${ago(mark.at)}).
+       ${mark.ids.length > BY_CAUSE_ID_CAP
+         ? `<span class="unres">That is past the ${BY_CAUSE_ID_CAP}-id ceiling on a query
+              string, so it cannot be sent &#8212; the endpoint refuses rather than trimming,
+              and so does this button.</span>`
+         : ""}`
+    : `<span class="unres">No baseline has been held yet this session, so there is nothing to
+         diff against.</span>`;
+  const controls = `<div class="pg" style="justify-content:flex-start">
+      <button class="btn sm pri" id="bcask"${mark ? "" : " disabled"}>Explain the movement
+        since then</button>
+      <button class="btn sm" id="bcrebase">Re-baseline to now</button>
+      <span class="fds">${baseline}</span></div>
+    ${S.remCauseErr
+      ? `<div class="note"><b>The diff could not be asked for.</b> ${esc(S.remCauseErr)}
+           The recommendation list above is unaffected &#8212; only this breakdown is.</div>`
+      : ""}`;
+
+  if (!bc) {
+    return `<div class="card" style="margin-bottom:16px"><div class="chd">
+        <h2>&#128201; Why this set moved</h2></div>
+      <div class="wbody"><div class="note"><b>This build served no
+        <code>summary.byCause</code> block at all.</b> It is supposed to be present on every
+        response, null-with-a-reason included, so a caller can tell "this build does not answer
+        that" from "there was nothing to say". Its absence is worth reporting.</div>
+        ${controls}</div></div>`;
+  }
+
+  if (!bc.available) {
+    const tone = byCauseTone(bc.problem);
+    /* THE REASON, NEVER A ZERO. Every branch here is a null with a named cause,
+       and the endpoint writes the sentence -- so it is printed verbatim rather
+       than summarised into something that reads like a measurement. */
+    return `<div class="card" style="margin-bottom:16px"><div class="chd">
+        <h2>&#128201; Why this set moved</h2>
+        <span class="na" style="font-size:12px">${esc(bc.problem || "problem not named")}
+          &#8212; no tally, and no zeros standing in for one</span></div>
+      <div class="wbody">
+        <div class="note ${tone.cls}"><b>${esc(tone.label)}</b> ${esc(bc.reason || "")}</div>
+        <div class="na" style="font-size:12px"><b>How to get it.</b>
+          ${esc(bc.howToGet || "The payload carried no recipe, which is itself worth reporting.")}</div>
+        ${controls}</div></div>`;
+  }
+
+  const val = bc.value || {};
+  const mv = bc.movement || {};
+  const win = bc.window || {};
+  const fig = bc.figure || {};
+  const cov = fig.coverage || {};
+  /* Every key in `value` is a cause the endpoint COUNTED over the same window,
+     so a 0 here is a measurement and is printed as one. That is the opposite of
+     the null above, and the difference is the whole point of this surface. */
+  const pills = Object.entries(val).map(([k, n]) =>
+    `<span class="fp" style="cursor:default"${n === 0
+      ? ` title="Counted, and none of the departures had this cause."`
+      : ""}><b>${n}</b> ${esc(k)}</span>`).join("");
+  return `<div class="card" style="margin-bottom:16px"><div class="chd">
+      <h2>&#128201; Why this set moved</h2>
+      <span class="na" style="font-size:12px">${esc(bc.kind || "")} set &#183; against your read
+        of ${ago(bc.baseline && bc.baseline.observedAt)}</span></div>
+    <div class="wbody">
+      <div class="note na"><b>${esc(bc.headline || "The payload carried no headline.")}</b>
+        ${mv.from == null || mv.to == null
+          ? `<span class="unres">the movement's two ends were not reported</span>`
+          : `<b>${mv.from}</b> &#8594; <b>${mv.to}</b> (net ${mv.net > 0 ? "+" : ""}${mv.net}).`}</div>
+      <div class="pills">${pills}</div>
+      <div class="na" style="font-size:12px;margin-top:10px">${esc(fig.basis || "")}
+        <div class="prov">${esc(cov.note || "")}${cov.share == null
+          ? ` <span class="unres">No share could be computed, so this figure covers an
+                unstated fraction of its scope.</span>`
+          : ""}</div>
+        <div class="prov">${win.clearsGates
+          ? `Collection covered the window well enough for <code>applied</code> to be claimed.`
+          : `<span class="unres">${esc(win.reason || "The window's coverage was not reported.")}</span>`}</div>
+        <div class="prov">Baseline: ${bc.baseline
+          ? `${bc.baseline.count} item(s) at ${esc(String(bc.baseline.observedAt)
+              .replace("T", " ").slice(0, 19))} UTC, attested by ${esc(bc.baseline.attestedBy)}.`
+          : `<span class="unres">the response named no baseline</span>`}</div>
+        <div class="prov">${esc(bc.itemisedBy || "")}</div></div>
+      ${controls}</div></div>`;
+}
+
 function renderActions() {
   const el = $("#actionsbody");
   const R = S.remediation;
@@ -7050,7 +8105,9 @@ function renderActions() {
 
   const CAP = 60;
   const advShown = advisory.slice(0, CAP);
-  el.innerHTML = header + planCard + corrCard + popCard +
+  /* byCause goes directly under the header, because it is the answer to the
+     question those two big numbers raise: "it said 5 yesterday, why 2 now?" */
+  el.innerHTML = header + byCauseCard(sum.byCause) + planCard + corrCard + popCard +
     (oneClick.length
       ? `<div class="card" style="margin-bottom:16px"><div class="chd"><h2>&#9889; One-click fixes</h2>
            <span class="na" style="font-size:12px">${oneClick.length} device${oneClick.length===1?"":"s"} with a verified fix available</span></div>
@@ -7062,6 +8119,10 @@ function renderActions() {
         : `<div class="empty">No advisory items — everything actionable is a one-click fix.</div>`}
         ${advisory.length>CAP?`<div class="na" style="font-size:12px;padding:10px 4px 0">+ ${advisory.length-CAP} more, ranked below the cut.</div>`:""}</div></div>`;
 
+  const bcask = $("#bcask");
+  if (bcask) bcask.addEventListener("click", () => loadRemediationDiff());
+  const bcrebase = $("#bcrebase");
+  if (bcrebase) bcrebase.addEventListener("click", () => rebaselineRemediation());
   el.querySelectorAll("[data-act-open]").forEach((b) =>
     b.addEventListener("click", () => { const id = b.dataset.actOpen; if (id) openDevice(id); }));
   el.querySelectorAll("[data-pop-open]").forEach((b) =>
@@ -7107,6 +8168,7 @@ function palIndex() {
   const fixed = [
     { kind: "view", name: "Brief", act: () => switchTab("brief") },
     { kind: "view", name: "Alerts", act: () => switchTab("alerts") },
+    { kind: "view", name: "Incidents", act: () => switchTab("incidents") },
     { kind: "view", name: "Devices", act: () => switchTab("devices") },
     { kind: "view", name: "Insights", act: () => switchTab("insights") },
     { kind: "view", name: "Audit — what VFI changed", act: () => switchTab("audit") },
@@ -7861,7 +8923,7 @@ $("#aq").addEventListener("input", (e) => {
 });
 $("#reload").addEventListener("click", () => load());
 
-const VIEWS_ALL = ["overview", "alerts", "actions", "devices", "compliance", "brief", "insights", "sla", "trends", "audit"];
+const VIEWS_ALL = ["overview", "alerts", "incidents", "actions", "devices", "compliance", "brief", "insights", "sla", "trends", "audit"];
 document.querySelectorAll("#nav button").forEach((b) => b.addEventListener("click", () => {
   // The switch itself, the lazy audit read included, lives in showView(): the
   // nav, the command palette and a Back press must all land on the same view
@@ -7872,6 +8934,8 @@ document.querySelectorAll("#nav button").forEach((b) => b.addEventListener("clic
   urlSync("push");
 }));
 $("#audreload").addEventListener("click", () => loadAudit({ page: 1 }));
+$("#increload").addEventListener("click", () => loadIncidents({ page: 1 }));
+$("#toincidents").addEventListener("click", () => switchTab("incidents"));
 
 document.querySelectorAll("[data-goto]").forEach((b) =>
   b.addEventListener("click", () => switchTab(b.dataset.goto)));
@@ -8025,6 +9089,18 @@ async function load() {
     S.brief = brief && brief.data;
     S.shots = shots && shots.data;
     S.remediation = remediation && remediation.data;
+    /* US-8.6.3's baseline, recorded ONCE per session at the instant we read the
+       set. Not refreshed by the two-minute poll on purpose: a watermark that
+       moved with every refresh would only ever ask about a window nobody
+       looked at, and the endpoint would answer it with `unobserved-window`
+       forever. Moving it is a button on the Actions tab. */
+    if (S.remediation && !S.remMark) {
+      S.remMark = {
+        at: new Date().toISOString(),
+        ids: (S.remediation.recommendations || [])
+          .filter((r) => r.kind === "auto-safe").map((r) => r.id),
+      };
+    }
     S.correlation = correlation && correlation.data;
     S.pop = pop && pop.data;
     S.plan = plan && plan.data;
