@@ -34,6 +34,7 @@ import { registerActionPlanRoutes } from "./routes/action-plan.js";
 import { registerTrendRoutes } from "./routes/trends.js";
 import { registerAuditRoutes } from "./routes/audit.js";
 import { registerReportRoutes } from "./routes/reports.js";
+import { registerIncidentRoutes } from "./routes/incidents.js";
 
 export interface BuildServerOptions {
   pool: Pool;
@@ -156,6 +157,9 @@ export async function buildServer(options: BuildServerOptions): Promise<FastifyI
   await registerFleetRoutes(app, ctx);
   await registerDeviceRoutes(app, ctx);
   await registerAlertRoutes(app, ctx);
+  // The same queue as incidents rather than transitions (Epic 8.8). Registered
+  // next to /api/alerts because it is a VIEW over exactly those rows.
+  await registerIncidentRoutes(app, ctx);
   await registerSlaRoutes(app, ctx);
   await registerCommandRoutes(app, ctx);
   await registerScreenshotRoutes(app, ctx);
