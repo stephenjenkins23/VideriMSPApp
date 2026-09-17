@@ -127,28 +127,51 @@ const lane = (report: ReturnType<typeof build>, name: string) => {
 // ── 1. an unobservable lane is UNKNOWN, never 0% ─────────────────────────────
 
 test("a lane that records nothing anywhere reports unknown, not 0%, and never claimable", () => {
-  const report = build({ fleetObservedBuckets: 8000 });
+  // Pinned on a SYNTHETIC lane on purpose. This test used to use
+  // alert-cross-check / retention / prune-raw, and f32d600 gave all three a
+  // record() call, so no lane in the real registry is unobservable any more.
+  // The property still has to hold for the next lane that ships without
+  // instrumentation, so the roster is injected rather than the assertion dropped.
+  const ghost = {
+    lane: "ghost", feeds: "nothing",
+    observability: { kind: "none", why: "it records nothing" },
+  } as const;
+  const report = build({ fleetObservedBuckets: 8000, expectedLanes: [ghost] });
+  const l = lane(report, "ghost");
 
-  // All three are declared with observability `none` in the lane registry.
-  for (const name of ["alert-cross-check", "retention", "prune-raw"]) {
-    const l = lane(report, name);
-    assert.equal(l.state, "unobservable", `${name} leaves no trace, so it cannot be measured`);
-    assert.equal(l.coverage.value, null, `${name} coverage must be NULL, not 0 — 0 claims a rate`);
-    assert.equal(l.observedFires, null);
-    assert.equal(l.expectedFires, null);
-    assert.equal(l.claim.claimable, false, `${name} can never carry a claim; we did not look`);
-    assert.notEqual(l.health, "healthy", `${name} must never read as healthy`);
-    assert.ok(l.observability.why, "the registry's reason must travel with the unknown");
-    assert.match(l.coverage.basis, /UNKNOWN, not zero/);
-  }
-  assert.equal(report.fleet.lanes.unobservable, 3);
+  assert.equal(l.state, "unobservable", "no trace anywhere means it cannot be measured");
+  assert.equal(l.coverage.value, null, "coverage must be NULL, not 0 — 0 claims a rate");
+  assert.equal(l.observedFires, null);
+  assert.equal(l.expectedFires, null);
+  assert.equal(l.claim.claimable, false, "it can never carry a claim; we did not look");
+  assert.notEqual(l.health, "healthy", "it must never read as healthy");
+  assert.ok(l.observability.why, "the registry's reason must travel with the unknown");
+  assert.match(l.coverage.basis, /UNKNOWN, not zero/);
+  assert.equal(report.fleet.lanes.unobservable, 1);
 
   // And it is a blocker of its own kind, not a coverage number.
   const blockers = report.verdict.missing.filter((m) => m.kind === "lane-unobservable");
-  assert.deepEqual(blockers.map((b) => b.subject).sort(), [
-    "alert-cross-check", "prune-raw", "retention",
-  ]);
+  assert.deepEqual(blockers.map((b) => b.subject), ["ghost"]);
   for (const b of blockers) assert.doesNotMatch(b.detail, /0\.0%/);
+});
+
+test("the three lanes that gained a record() call are SILENT now, not unobservable", () => {
+  // The distinction is the whole point of f32d600. `unobservable` means we
+  // cannot tell; `silent` means we can tell, and the answer is that nothing has
+  // been recorded. Same zero rows, two completely different claims — and the
+  // earlier one of them was asserted as "never ran" before it was true.
+  const report = build({ fleetObservedBuckets: 8000 });
+
+  for (const name of ["alert-cross-check", "retention", "prune-raw"]) {
+    const l = lane(report, name);
+    assert.equal(l.state, "silent", `${name} records now, so its silence is measurable`);
+    assert.notEqual(l.state, "unobservable");
+    // Still never a fabricated rate: no runs means no coverage, not 0%.
+    assert.equal(l.coverage.value, null, `${name} coverage must be NULL, not 0`);
+    assert.equal(l.claim.claimable, false, `${name} has no runs, so it carries no claim`);
+    assert.notEqual(l.health, "healthy", `${name} must not read as healthy while silent`);
+  }
+  assert.equal(report.fleet.lanes.unobservable, 0, "no registry lane is unobservable any more");
 });
 
 // ── 2. a daily lane's normal cadence is not an outage ────────────────────────
