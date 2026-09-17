@@ -21,6 +21,7 @@ import { registerDeviceRoutes } from "./routes/devices.js";
 import { registerAlertRoutes } from "./routes/alerts.js";
 import { registerSystemRoutes } from "./routes/system.js";
 import { registerHealthRoutes } from "./routes/health.js";
+import { registerCollectorRoutes } from "./routes/collector.js";
 import { registerSlaRoutes } from "./routes/sla.js";
 import type { Repository } from "../db/repository.js";
 import type { VideriHttp } from "../videri/http.js";
@@ -172,6 +173,10 @@ export async function buildServer(options: BuildServerOptions): Promise<FastifyI
   await registerAuditRoutes(app, ctx);
   await registerReportRoutes(app, ctx);
   await registerHealthRoutes(app, ctx);
+  // Registered next to /api/pipeline/health because it is the same subject — our
+  // own collection — asked over a caller-supplied window and judged against
+  // SLA_GRADE_BARS. It shares that route's engine rather than re-measuring.
+  await registerCollectorRoutes(app, ctx);
 
   return app;
 }
