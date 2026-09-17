@@ -248,6 +248,19 @@ button{font:inherit;cursor:pointer}
 .banner.bad{background:var(--red-2);border-color:var(--red-bd);color:var(--tx-2)}
 .banner.bad b{color:var(--red)}
 .banner ul{margin:4px 0 0;padding-left:16px}
+/* A disclosure, used wherever something must stay REACHABLE without being the
+   default read (US-8.5.3). GAP-9: the Overview was 8,843px and the decisions a
+   shift opens on were below the fold, mostly because our own collector's
+   16-lane self-diagnosis and its 11 repeated impact paragraphs were above
+   them. Nothing here hides anything: the summary carries the state and the
+   count, and one click restores every word. A fold whose summary said nothing
+   would be worse than the scroll it replaces. */
+.fold>summary{cursor:pointer;color:var(--blue);font-size:11.5px;margin-top:5px;
+  list-style:none;display:inline-flex;align-items:center;gap:5px}
+.fold>summary::-webkit-details-marker{display:none}
+.fold>summary::after{content:"\25BE"}
+.fold[open]>summary::after{content:"\25B4"}
+.fold>summary:hover{text-decoration:underline}
 .fresh{display:inline-flex;align-items:center;gap:5px;font-size:11.5px;font-weight:600;
   padding:2px 8px;border-radius:999px;border:1px solid var(--bd);font-variant-numeric:tabular-nums}
 .fresh.ok{color:var(--green);background:var(--green-2);border-color:var(--bd)}
@@ -449,6 +462,15 @@ table.dt td.n{font-variant-numeric:tabular-nums}
 .w-7{grid-column:span 7}.w-8{grid-column:span 8}.w-12{grid-column:span 12}
 @media(max-width:1080px){.w-4,.w-5,.w-6,.w-7,.w-8{grid-column:span 12}}
 .whd{display:flex;align-items:center;gap:8px;padding:12px 15px;border-bottom:1px solid var(--bd-2)}
+/* A whole widget that folds. Closed, its header still reads as a status line —
+   that is the condition on which folding a widget is honest rather than a way
+   of losing it. */
+details.w>summary{list-style:none;cursor:pointer}
+details.w>summary::-webkit-details-marker{display:none}
+details.w>summary::after{content:"\25BE";color:var(--tx-3);font-size:11px;margin-left:7px}
+details.w[open]>summary::after{content:"\25B4"}
+details.w:not([open])>summary{border-bottom:0}
+details.w>summary:hover h3{color:var(--tx)}
 .whd h3{margin:0;font-size:11px;font-weight:700;letter-spacing:.07em;text-transform:uppercase;
   color:var(--tx-2);display:flex;align-items:center;gap:7px}
 .whd .wr{margin-left:auto;display:flex;gap:7px;align-items:center}
@@ -714,6 +736,19 @@ table.dt td .prov{display:block;margin-top:2px;white-space:normal;max-width:34ch
   <div id="trunc"></div>
 
   <!-- ============ OVERVIEW ============ -->
+  <!-- GAP-9: this view was 8,843px (6,167px on the current corpus) and NOTHING
+       of the estate's status was in the first viewport — the section began at
+       y=962 on a 900px screen, under a 643px self-diagnosis of our own
+       collector. Measured, not guessed: our collection pipeline alone was
+       4,627px of the 6,167.
+
+       So the order is now the order a shift is opened in. Row one is the three
+       things a technician decides on — the score, the status split, and the
+       named criticals. Row two is the two small pieces of evidence that qualify
+       them. Everything below row two is reference: it is a <details>, its
+       header still reads as a status line when closed, and one click restores
+       every word of it. Nothing was deleted and nothing was summarised away —
+       a fold whose summary said nothing would be worse than the scroll. -->
   <section id="v-overview">
     <div class="wgrid">
       <div class="w w-4">
@@ -734,13 +769,6 @@ table.dt td .prov{display:block;margin-top:2px;white-space:normal;max-width:34ch
           <div class="wr"><button class="btn sm" data-goto="alerts">View all &#8594;</button></div></div>
         <div id="walerts"></div>
       </div>
-      <div class="w w-12">
-        <div class="whd"><h3>&#128268; Our collection pipeline
-          <span class="prov">&#8212; VFI's own collector, not the screens</span></h3>
-          <div class="wr"><span class="prov" id="wpipesub"></span></div></div>
-        <div class="pills" id="wpipepills" style="border-bottom:0;padding:12px 15px 0"></div>
-        <div class="wbody" id="wpipeline"></div>
-      </div>
       <div class="w w-5">
         <div class="whd"><h3>&#128230; Firmware</h3>
           <div class="wr"><span class="prov" id="wfwsub"></span></div></div>
@@ -754,10 +782,26 @@ table.dt td .prov{display:block;margin-top:2px;white-space:normal;max-width:34ch
           </div></div>
         <div class="wbody" id="wshots"></div>
       </div>
-      <div class="w w-5">
-        <div class="whd"><h3>&#128683; What this platform cannot tell us</h3></div>
+      <!-- Folded: our collector's own 16-lane self-check. The BANNER at the top
+           of the page is what shouts when a lane stops, and it names the lanes;
+           this is the table and the per-finding detail behind it, which is a
+           diagnosis rather than a decision. #wpipesub stays in the summary, so
+           closed it still reads "11 of 16 lanes delivering · worst: stalled". -->
+      <details class="w w-12" id="wpipefold">
+        <summary class="whd"><h3>&#128268; Our collection pipeline
+          <span class="prov">&#8212; VFI's own collector, not the screens</span></h3>
+          <div class="wr"><span class="prov" id="wpipesub"></span></div></summary>
+        <div class="pills" id="wpipepills" style="border-bottom:0;padding:12px 15px 0"></div>
+        <div class="wbody" id="wpipeline"></div>
+      </details>
+      <!-- Folded: the platform's permanent blind spots. This list does not
+           change between shifts — it is the answer to "why is that empty",
+           asked once — and the header button "What we cannot see" opens it. -->
+      <details class="w w-12" id="wgapsfold">
+        <summary class="whd"><h3>&#128683; What this platform cannot tell us
+          <span class="prov">&#8212; permanent blind spots, not today's news</span></h3></summary>
         <div class="wbody" id="wgaps"></div>
-      </div>
+      </details>
       <div class="w w-12">
         <div class="whd"><h3>&#128250; Content &amp; canvas health
           <span class="prov">— aggregator rollup across all groups</span></h3></div>
@@ -881,9 +925,42 @@ table.dt td .prov{display:block;margin-top:2px;white-space:normal;max-width:34ch
   <!-- ============ COMPLIANCE ============ -->
   <section id="v-compliance" class="hide">
     <div class="card">
-      <div class="chd"><h2>&#128737; Configuration compliance</h2>
-        <div class="r"><span class="prov" id="compsub"></span></div></div>
+      <div class="chd">
+        <h2>&#128737; Configuration compliance <span class="cnt" id="ccount">&#8212;</span></h2>
+        <div class="r"><span class="prov" id="compsub"></span></div>
+      </div>
+      <!-- The score AND what is wrong with it, in the same breath (US-8.5.5).
+           The "flags 118 of 118" admission used to be a footnote under the
+           table; a check that flags almost everything is a scoring problem, so
+           it now sits beside the number it distorts and NAMES the checks. -->
+      <div id="cscore"></div>
+      <!-- Static markup and wired once, so typing never loses focus to a
+           re-render -- the same reason the alert search box is static. -->
+      <div class="srch">
+        <input id="cq" type="search"
+               placeholder="Search compliance by device, class, template or failing check&#8230;"
+               aria-label="Search compliance">
+      </div>
+      <div class="tbar" id="cctl"></div>
+      <!-- The band chips. Deliberately NOT inside #cctl: that host's children
+           are the selects, and every child of a .pills host in this console is
+           asserted to read "<b>N</b> label". -->
+      <div class="pills" id="cfp"></div>
+      <!-- WHICH number is which, in static markup for the reason the audit and
+           incident views have theirs: it is the sentence that keeps the header
+           count honest and a re-render must never be able to drop it. Here
+           every figure is computed in the browser over the whole collection
+           this page holds, so there is no server-side total to confuse it
+           with -- the badge counts the rows drawn, and the line under the
+           heading says how many matched. -->
+      <div class="prov" style="padding:0 16px 10px">The badge beside the heading
+        counts the rows drawn below it; the line under the heading says how many
+        of the <span id="cscoped">&#8212;</span> scored devices these filters
+        matched, and which page of them this is. Filtering happens in the
+        browser over every scored device this page loaded, so the option counts
+        are counts of real rows, not of a page.</div>
       <div id="comptable"></div>
+      <div id="cpager"></div>
       <div id="ctrunc"></div>
     </div>
   </section>
@@ -1236,6 +1313,12 @@ const S = { summary: null, alerts: [], devices: [], compliance: [], pipeline: nu
             // Alert triage controls. A queue of 110 with no search is a queue a
             // technician works by scrolling, which is not working it.
             aq: "", arule: "all", aage: "all", asort: "sev",
+            // Compliance triage controls (US-8.5.5). The table shipped with
+            // zero controls over 117 rows, so "show me every device missing
+            // nightly reboot" was inexpressible. `ccheck` is a checkId, not a
+            // free-text rule: the check vocabulary comes from the scored rows
+            // themselves, so it can never name a check this tenant does not run.
+            cq: "", ccheck: "all", cband: "all", csort: "score", cpage: 1,
             // Our own collector's health, and the lane-status filter for it.
             pipe: null, plane: "all",
             // Trends: the window is state because every figure is labelled with it.
@@ -1382,10 +1465,22 @@ const URL_DEFAULTS = {
   drill: "", drilln: "", drilllabel: "",
   // Alerts
   band: "incidents", sev: "all", aq: "", rule: "all", age: "all", asort: "sev",
+  // Compliance. Client-side filters over the collection this page holds, so
+  // they are page parameters in the plainest sense -- and "every device missing
+  // nightly reboot" is the hand-off this tab exists for, which is not a
+  // hand-off until it is a link.
+  cq: "", ccheck: "all", cband: "all", csort: "score", cpage: "",
   // The open layers, drawer tab included
   device: "", dtab: "overview", alert: "",
   // Trends / Insights / our own pipeline
   trwin: "", trdir: "all", plane: "all",
+  /* The incident queue's three filters. Server-side, like the audit log's, and
+     named separately from the endpoint's own words for rule 2 above: `incstate`
+     is this page's name for `state`, `incsev` for `severity`, `incwin` for
+     `sinceDays`. `rule` and `deviceId` are deliberately absent -- those two are
+     drilldowns a row hands over, not a filter anybody typed, and a link that
+     pinned one would reproduce somebody else's click rather than their view. */
+  incstate: "all", incsev: "all", incwin: "",
   // Audit. These ARE server-side filters, but they are named separately here
   // for rule 2 above: `audout` is this page's word, `outcome` is the API's.
   audout: "", audact: "", audactor: "", auddev: "", audpage: "",
@@ -1462,6 +1557,12 @@ function urlParamsFor(s) {
   put("rule", s.arule);
   put("age", s.aage);
   put("asort", s.asort);
+  put("cq", String(s.cq || "").trim());
+  put("ccheck", s.ccheck);
+  put("cband", s.cband);
+  put("csort", s.csort);
+  // Page 1 is not a choice, so it is not in the link.
+  put("cpage", s.cpage, ["", "1"]);
   // `devOpen` rather than `S.dev.id`: the drawer is open from the click, and
   // the detail payload only arrives a round trip later. A link copied while
   // the drawer was still loading must still name the device being opened.
@@ -1473,6 +1574,13 @@ function urlParamsFor(s) {
   put("trwin", s.trpin ? s.trwin : "");
   put("trdir", s.trdir);
   put("plane", s.plane);
+  /* The incident filters. Both spellings of idle are accepted for the same
+     reason the audit filters accept two: `state` is "all" once the tab has been
+     opened and could be "" before, and either must produce the same link. */
+  const inc = s.incF || {};
+  put("incstate", inc.state, ["", "all"]);
+  put("incsev", inc.severity, ["", "all"]);
+  put("incwin", inc.sinceDays, [""]);
   const aud = s.aud || {};
   put("audout", aud.outcome, ["", "all"]);
   put("audact", aud.action, ["", "all"]);
@@ -1559,6 +1667,26 @@ function urlReadParams(query) {
   patch.arule = get("rule") || URL_DEFAULTS.rule;
   patch.aage = pick("age", URL_ALERT_AGES, "The link asked for the age window") || URL_DEFAULTS.age;
   patch.asort = pick("asort", URL_ALERT_SORTS, "The link asked to sort the alerts by") || URL_DEFAULTS.asort;
+  /* The compliance filters. `ccheck` and `cband` are free text CHECKED AGAINST
+     THE DATA rather than against this file -- a checkId and a band come from
+     the compliance payload, and a list here would reject a check this tenant
+     runs the day one is added. renderCompliance() prints "no scored device
+     matches these filters" with the estate total beside it, so a link naming a
+     check nothing fails reads as a filter, never as a clean estate.
+     `csort` IS a closed vocabulary and is checked, like the other sorts. */
+  patch.cq = get("cq") || "";
+  patch.ccheck = get("ccheck") || URL_DEFAULTS.ccheck;
+  patch.cband = get("cband") || URL_DEFAULTS.cband;
+  /* The sort keys are written INLINE rather than lifted to a constant, for the
+     reason the incident lists below are: this function is lifted and run in
+     isolation by the console-url-state tests against a fixed set of
+     declarations, and a top-level constant referenced here is undefined there
+     -- it fails every parser test at once. A test pins this list against
+     SORTS_C inside complianceRows() by source text. */
+  patch.csort = pick("csort", ["score", "scoretop", "gaps", "drift", "age", "name", "template"],
+    "The link asked to sort the compliance table by") || URL_DEFAULTS.csort;
+  const cpage = Number(get("cpage"));
+  patch.cpage = Number.isFinite(cpage) && cpage >= 1 ? Math.floor(cpage) : 1;
   patch.device = get("device") || "";
   patch.dtab = pick("dtab", DTABS.map((x) => x[0]), "The link asked for the drawer tab") || URL_DEFAULTS.dtab;
   patch.alert = get("alert") || "";
@@ -1573,6 +1701,25 @@ function urlReadParams(query) {
   patch.trdir = pick("trdir", URL_TREND_DIRS, "The link asked for a trend direction") || URL_DEFAULTS.trdir;
   patch.plane = pick("plane", ["all", ...Object.keys(LANE_DOT)], "The link asked for a lane status")
     || URL_DEFAULTS.plane;
+  /* The incident filters (US-8.5.x). Three closed vocabularies, so they are
+     CHECKED rather than passed through: a link asking for `incsev=urgent` must
+     not render the whole queue as though that is what was shared.
+     The option lists are written inline rather than read from INC_STATES /
+     INC_SEVS / INC_WINDOWS for the reason URL_ALERT_AGES records above: the
+     console-url-state tests lift these functions in isolation, and a top-level
+     constant referenced here would be undefined there. A test pins these three
+     lists against those tables by source text, so the two cannot drift.
+     Unlike the audit group, the absent ones ARE defaulted. Their default is
+     the absence of a filter, which is the state the tab opens in anyway, and
+     the popstate handler refetches only when one of the three actually moved --
+     so Back really does undo an incident filter without costing a request
+     nobody asked for. */
+  patch.incState = pick("incstate", ["all", "open", "resolved"],
+    "The link asked for an incident state") || "all";
+  patch.incSev = pick("incsev", ["all", "critical", "high", "medium", "info"],
+    "The link asked for an incident severity") || "all";
+  const incWin = pick("incwin", ["1", "7", "30"], "The link asked for an incident window");
+  patch.incWin = incWin ? Number(incWin) : null;
   /* The audit filters. Only the keys the link actually pins are returned: the
      log is a server-side read, and defaulting the absent ones would turn a
      Back press into a refetch of a page nobody asked for. */
@@ -1642,15 +1789,30 @@ function urlApplyPatch(patch) {
   S.dids = patch.dids;
   S.aband = patch.aband; S.sev = patch.sev; S.aq = patch.aq;
   S.arule = patch.arule; S.aage = patch.aage; S.asort = patch.asort;
+  S.cq = patch.cq; S.ccheck = patch.ccheck; S.cband = patch.cband;
+  S.csort = patch.csort; S.cpage = patch.cpage;
   S.dtab = patch.dtab; S.trdir = patch.trdir; S.plane = patch.plane;
   if (patch.trwin != null) { S.trwin = patch.trwin; S.trpin = true; }
   if (patch.aud) Object.assign(S.aud, patch.aud);
+  /* The incident filters, written UNCONDITIONALLY -- the opposite of the audit
+     group above, and deliberately so. Each of these three has a real "no
+     filter" value ("all", "all", null), so writing it back is exactly what
+     makes a Back press undo a filter; the audit group's idle value is a page
+     number, where the same move would mean refetching page 1 of a log nobody
+     asked for. The refetch itself is the popstate handler's, and only when one
+     of the three has actually moved. `S.incF` is created if absent so this
+     function stays safe to run against a bare state object. */
+  S.incF = Object.assign(S.incF || {}, {
+    state: patch.incState, severity: patch.incSev, sinceDays: patch.incWin,
+  });
   // The two search boxes hold their own value, so they are written too -- a
   // restored search with an empty box would be a filter with no visible cause.
   const box = $("#q");
   if (box) box.value = S.q;
   const abox = $("#aq");
   if (abox) abox.value = S.aq;
+  const cbox = $("#cq");
+  if (cbox) cbox.value = S.cq;
 }
 
 /** Show one view. The nav buttons, the command palette and popstate all come
@@ -1681,6 +1843,7 @@ function showView(v) {
 function urlRepaint() {
   renderAlertWidget(); renderAlertFilters(); renderAlerts();
   renderDeviceFilters(); renderDevices();
+  renderComplianceFilters(); renderCompliance();
   renderTrends(); renderPipelineWidget();
 }
 
@@ -2121,7 +2284,12 @@ function renderAlertWidget() {
   // Count the BAND being shown: the chips below the header filter this band, so
   // the header must report it. It previously printed S.alerts.length (290) above
   // chips summing to 90, with nothing saying the chips were incidents-only.
-  const { band, incidents, dormant, suppressed, scoped, mark } = alertBands();
+  const { band, incidents, dormant, suppressed, scoped, mark, scopeOf, scopeBadge } = alertBands();
+  /* How many rows this widget lists. Declared HERE rather than at the top level
+     for the reason renderAlerts() declares its own: the console-invariant tests
+     lift this function by name against a fixed set of declarations, so a
+     top-level constant it referenced would be undefined there. */
+  const CRIT_SHOWN = 5;
   /* The bands this widget is NOT showing, each with its count, so the number
      above the chips can never be read as every open alert. The suppressed band
      is named here for the same reason the dormant one is: it is a band this
@@ -2149,7 +2317,8 @@ function renderAlertWidget() {
   }
   // The listed rows come from the same split as the header and the chips, so a
   // row can never appear under a count that excludes it.
-  const crit = scoped.filter((a) => a.severity === "critical").slice(0, 4);
+  const critAll = scoped.filter((a) => a.severity === "critical");
+  const crit = critAll.slice(0, CRIT_SHOWN);
   const counts = {};
   for (const a of scoped) counts[a.severity] = (counts[a.severity] || 0) + 1;
   // Clickable: a severity count an operator can see is a filter they will try to
@@ -2157,18 +2326,61 @@ function renderAlertWidget() {
   const pills = SEV.filter(([s]) => counts[s]).map(([s, dot]) =>
     `<button class="fp" data-sev="${s}" title="Show only ${s} alerts">
        <span class="d ${dot}"></span><b>${counts[s]}</b> ${s}</button>`).join("");
+  /* WHICH rows these are, and WHERE they are (US-8.5.3).
+     `listed` is what renders; every number printed beside it is computed from
+     `listed` or from `critAll`/`scoped`, which is where `listed` came from.
+     The heading counts `critAll` and says how many of them are on screen --
+     "5 shown" over a section holding 34 is the count-the-thing-you-filter trap
+     in its politest costume. */
+  const listed = crit.length ? crit : scoped.slice(0, CRIT_SHOWN);
+  const listedScopes = listed.map(scopeOf);
+  // The distinct places the ROWS ON SCREEN name -- not the band, not the fleet.
+  const places = new Set(listedScopes.filter((s) => s.label).map((s) => s.noun + "\u0000" + s.label));
+  const nameless = listedScopes.filter((s) => !s.label).length;
+  const oneWord = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+  // The axis caveat, in the payload's OWN words, and only when a row is
+  // actually on an unresolved axis.
+  const unresolved = listedScopes.find((s) => s.siteResolved === false && s.reason);
   el.innerHTML =
     `<div class="pills">${pills}</div>` +
-    (crit.length ? `<div class="sechd">&#128308; Critical &#8212; requires action</div>` : "") +
-    (crit.length ? crit : scoped.slice(0, 4)).map((a) => `
-      <button class="arow" data-id="${esc(a.deviceId)}">
+    (crit.length
+      ? `<div class="sechd">&#128308; Critical &#8212; requires action
+           <span class="prov">${crit.length} of ${critAll.length}${mark} shown &#183;
+             ${places.size ? oneWord(places.size, "place", "places") + " named below" : "no place named below"}${
+               nameless ? ` &#183; ${nameless} with nowhere recorded` : ""}</span></div>`
+      : `<div class="sechd">Worst open in this band
+           <span class="prov">no critical is open &#183; ${listed.length} of ${scoped.length}${mark}
+             ${esc(band)} shown</span></div>`) +
+    listed.map((a, i) => {
+      const s = listedScopes[i];
+      const place = s.label
+        ? `${esc(s.noun)} <b>${esc(s.label)}</b> ${scopeBadge(s)}`
+        : `<span class="unres">${esc(s.reason)}</span>`;
+      return `
+      <button class="arow" data-id="${esc(a.deviceId)}"
+              title="Open ${esc(a.deviceName || a.deviceId)}">
         <span class="thumb">${thumbFor(a)}</span>
-        <span><span class="ti">${esc(a.title)}</span>
-          <span class="ds">${esc((a.evidence || "").slice(0, 120))}</span>
-          <span class="mt">${ago(a.lastFiredAt || a.openedAt)} &#183; <em>${esc(a.ruleId)}</em></span></span>
-        <span class="btn sm">Open</span></button>`).join("");
+        <span><span class="ti">${esc(a.deviceName || a.deviceId)} &#8212; ${esc(a.title)}</span>
+          <span class="ds">${place}</span>
+          <span class="mt">${ago(a.lastFiredAt || a.openedAt)} &#183; <em>${esc(a.ruleId)}</em>
+            &#183; ${esc((a.evidence || "").slice(0, 90))}</span></span>
+        <span class="btn sm">Open</span></button>`;
+    }).join("") +
+    /* Why the place is a group and not a site, and where a set of criticals in
+       one group becomes ONE finding. This widget deliberately does not group:
+       the incident queue owns that rule, and a second copy of it here is how
+       the band split broke three times. */
+    (unresolved
+      ? `<div class="prov" style="padding:8px 15px 0">${esc(unresolved.reason)}
+           Several criticals sharing one group are often one condition rather than several
+           &#8212; the incident queue is the surface that collapses them, on that same axis.
+           <button class="btn sm" data-goinc="1">&#129518; See them as incidents &#8594;</button></div>`
+      : "")
+  ;
   el.querySelectorAll(".arow").forEach((b) =>
     b.addEventListener("click", () => openDevice(b.dataset.id)));
+  el.querySelectorAll("[data-goinc]").forEach((b) =>
+    b.addEventListener("click", () => switchTab("incidents")));
   el.querySelectorAll("[data-sev]").forEach((b) =>
     b.addEventListener("click", () => {
       S.sev = b.dataset.sev;
@@ -2699,8 +2911,58 @@ function alertBands() {
   // in London. A row with no location shows none; the device table already
   // behaves this way.
   const where = new Map();
-  for (const d of (S.devices || [])) where.set(d.id, d.location || null);
+  const devById = new Map();
+  for (const d of (S.devices || [])) {
+    where.set(d.id, d.location || null);
+    devById.set(d.id, d);
+  }
   const locOf = (a) => a.location || where.get(a.deviceId) || null;
+
+  /* WHERE this alert is, on the axis the data actually supports (US-8.5.3).
+   *
+   * The Overview's CRITICAL rows shipped anonymous -- no device, no place --
+   * and four of them were the same group going dark inside one second. A
+   * critical an operator cannot act on is not a critical, so every row now
+   * names its device AND its scope. But the scope has to be named on the axis
+   * it really came from: with no tenant credential there is no group tree, so
+   * `site.resolved` is false on every device here and the finest true thing we
+   * hold is the LEAF GROUP. Printing a leaf-group name under the word "site"
+   * is the misrepresentation this project's docs exist to prevent, so the noun
+   * travels with the label and `siteResolved: false` raises the same badge the
+   * incident queue raises -- the wording is duplicated from incAxis() because
+   * the console-invariant harness lifts these renderers without it, and a test
+   * pins the two strings to each other.
+   *
+   * Order of preference: the canvas's own `location` (the alert row's when the
+   * API populated it, the device record's otherwise), then a RESOLVED site,
+   * then the leaf group. NOT `city`, which reads "LONDON" on 199 of 200
+   * devices including the Swedish ones. Nothing found is `label: null` with the
+   * payload's own reason, never a blank or a guess.
+   */
+  const scopeOf = (a) => {
+    const d = devById.get(a.deviceId) || null;
+    const loc = locOf(a);
+    if (loc) return { noun: "location", label: loc, siteResolved: true, reason: "" };
+    const site = d && d.site;
+    if (site && site.resolved && site.name) {
+      return { noun: "site", label: site.name, siteResolved: true, reason: "" };
+    }
+    if (d && d.groupName) {
+      return { noun: "leaf group", label: d.groupName, siteResolved: false,
+               reason: (site && site.reason) || "" };
+    }
+    return { noun: d ? "unplaced" : "unknown", label: null, siteResolved: false,
+             reason: d
+               ? "This device carries no location and no group, so where it is cannot be stated."
+               : "This device is not in the fleet list this page loaded, so where it is cannot be looked up." };
+  };
+  /* The badge, in the incident queue's own words. Pinned to incAxis() by a
+     test: two surfaces that say "not grouped by site" differently would read
+     as two different facts. */
+  const scopeBadge = (s) => s.siteResolved === false && s.label
+    ? `<span class="tag warn" title="${esc(s.reason
+        || "This row was not grouped by site, and the payload gave no reason.")}">leaf group, not site</span>`
+    : "";
 
   const q = String(S.aq || "").trim().toLowerCase();
   const rule = S.arule || "all";
@@ -2775,7 +3037,7 @@ function alertBands() {
 
   return { band, dormIds, incidents, dormant, authoritative: serverIds !== null, scoped,
            suppressed, supKnown,
-           matched, rows, locOf, rules, ages, sorts,
+           matched, rows, locOf, scopeOf, scopeBadge, rules, ages, sorts,
            active: { q, rule, age, sort, sev },
            filtered: q !== "" || rule !== "all" || age !== "all",
            // The "+" that marks a count over a collection apiAll could not
@@ -5622,39 +5884,377 @@ VIEWS.forEach(([k, l]) => {
 
 /* ===================================================================
    COMPLIANCE + SLA views
+
+   GAP-10: this table shipped with ZERO controls -- no search, no filter, no
+   sort, no paging -- over 117 rows, and its own footer conceded that the
+   scoring flags 117 of 117. Two separate problems, and only one of them is
+   about controls: a check that fires on 98% of the estate is not 115 faults,
+   it is a policy gap plus a scoring model that cannot discriminate. So the
+   controls are below, and the admission moved OUT of the footer to sit beside
+   the score, naming the checks responsible.
+
+   Everything here filters CLIENT-SIDE over the collection load() already
+   walked, exactly as the alert queue and the device table do. That is the
+   deliberate choice: every option count and every chip count is then a count
+   of real rows rather than of one page, which is the only way an option can
+   promise what choosing it will render. The cost is the apiAll cap, and that
+   is already marked everywhere by truncMark("compliance").
    =================================================================== */
+
+/**
+ * The compliance queue: search, check filter, band filter, sort and paging,
+ * with every option's count computed in the same tick as the rows.
+ *
+ * ONE function owns all of it for the reason alertBands() owns the alert
+ * queue: the count-the-thing-you-filter invariant has broken three times in
+ * this file, every time because a second surface re-derived a subset. The
+ * chips, the selects, the header badge, the subtitle, the table and the pager
+ * all consume this return value, and nothing re-derives any of it.
+ */
+function complianceRows() {
+  /* Rows per page. Declared inside this function on purpose -- the
+     console-invariant tests lift a renderer by name against a fixed set of
+     declarations, so a top-level constant it referenced would be undefined
+     there. 50 is the incident queue's page size, for the same reason: it is a
+     page a browser can draw. */
+  const COMP_PAGE = 50;
+  const all = S.compliance || [];
+
+  const q = String(S.cq || "").trim().toLowerCase();
+  const check = S.ccheck || "all";
+  const band = S.cband || "all";
+  const sort = S.csort || "score";
+
+  const driftOf = (c) => c.drift || [];
+  /* The searchable text. The failing CHECKS are in the haystack, unlike the
+     alert queue where the evidence blob is deliberately excluded: a check is a
+     structured label from a fixed vocabulary ("Nightly reboot enabled"), not
+     free prose, and "reboot" is exactly the word a technician types. The
+     numbers are NOT in it -- searching "65" must not match a score. */
+  const hay = (c) => [c.name, c.deviceId, c.deviceClass, c.templateId, c.band]
+    .concat(driftOf(c).map((x) => `${x.label} ${x.field} ${x.checkId}`))
+    .filter(Boolean).join(" | ").toLowerCase();
+  const flaggedBy = (c, id) => driftOf(c).some((x) => x.checkId === id);
+
+  const passQ = q ? (c) => hay(c).includes(q) : () => true;
+  const passCheck = check === "all" ? () => true : (c) => flaggedBy(c, check);
+  const passBand = band === "all" ? () => true : (c) => c.band === band;
+
+  /* `matched` is the queue after search and check: what the band chips count,
+     because those chips filter WITHIN it. `rows` is `matched` after the band
+     chip: exactly the set the table draws from. */
+  const matched = all.filter((c) => passQ(c) && passCheck(c));
+  const rows = matched.filter(passBand);
+
+  const policyGaps = (c) => driftOf(c).filter((x) => x.kind === "policy").length;
+  const age = (c) => (typeof c.settingsAgeSeconds === "number" ? c.settingsAgeSeconds : -1);
+  const byName = (c) => String(c.name || c.deviceId || "").toLowerCase();
+  const SORTS_C = {
+    // Worst first, which is the order this table has always opened on.
+    score:    (x, y) => x.score - y.score || byName(x).localeCompare(byName(y)),
+    scoretop: (x, y) => y.score - x.score || byName(x).localeCompare(byName(y)),
+    gaps:     (x, y) => policyGaps(y) - policyGaps(x) || x.score - y.score,
+    drift:    (x, y) => driftOf(y).length - driftOf(x).length || x.score - y.score,
+    // A config with no age recorded carries the -1 sentinel and sorts LAST
+    // here rather than reading as freshly collected.
+    age:      (x, y) => age(y) - age(x) || x.score - y.score,
+    name:     (x, y) => byName(x).localeCompare(byName(y)),
+    template: (x, y) => String(x.templateId).localeCompare(String(y.templateId)) || x.score - y.score,
+  };
+  rows.sort(SORTS_C[sort] || SORTS_C.score);
+
+  /* Option counts. Same rule as the alert queue's: the number beside an option
+     is how many rows CHOOSING IT would render, every other control held where
+     it is. So each option applies all the predicates except its own, and no
+     option's count can disagree with the list choosing it produces. */
+  const countIf = (pred) => { let n = 0; for (const c of all) if (pred(c)) n++; return n; };
+
+  /* The check vocabulary, from the DATA: every check that has flagged at least
+     one scored device, with how many devices it flags in total. A hardcoded
+     list would offer checks this tenant does not run and hide ones it does. */
+  const seen = new Map();
+  for (const c of all) {
+    for (const x of driftOf(c)) {
+      if (!seen.has(x.checkId)) {
+        seen.set(x.checkId, { id: x.checkId, label: x.label || x.field || x.checkId,
+                              kind: x.kind, flags: 0 });
+      }
+      seen.get(x.checkId).flags++;
+    }
+  }
+  const catalogue = [...seen.values()]
+    .sort((a, b) => b.flags - a.flags || a.label.localeCompare(b.label));
+  const checks = [["all", "any check", countIf((c) => passQ(c) && passBand(c))]].concat(
+    catalogue.map((k) => [k.id, `${k.label} (${k.kind})`,
+      countIf((c) => flaggedBy(c, k.id) && passQ(c) && passBand(c))]));
+
+  /* The bands present in the data, worst first. Derived, not fixed: hardcoding
+     a status list is what once dropped two "alert" devices on the floor in the
+     status widget, and the breakdown then summed to less than the total. */
+  const BAND_ORDER = ["non-compliant", "minor-drift", "compliant"];
+  const bandKeys = BAND_ORDER.filter((b) => all.some((c) => c.band === b))
+    .concat([...new Set(all.map((c) => c.band))].filter((b) => b && !BAND_ORDER.includes(b)));
+  const bands = bandKeys.map((b) =>
+    [b, b, countIf((c) => c.band === b && passQ(c) && passCheck(c))]);
+
+  const sorts = [["score", "worst score first"], ["scoretop", "best score first"],
+                 ["gaps", "most policy gaps first"], ["drift", "most flags first"],
+                 ["age", "oldest config read first"], ["name", "device name"],
+                 ["template", "template"]];
+
+  /* Paging over the FILTERED, SORTED set. The page is CLAMPED rather than
+     trusted: a filter change can shrink the set under a page number that was
+     valid a moment ago, and an out-of-range page renders nothing, which reads
+     as an estate with nothing in it. */
+  const pages = Math.max(1, Math.ceil(rows.length / COMP_PAGE));
+  const page = Math.min(Math.max(1, Number(S.cpage) || 1), pages);
+  const first = rows.length === 0 ? 0 : (page - 1) * COMP_PAGE + 1;
+  const pageRows = rows.slice((page - 1) * COMP_PAGE, page * COMP_PAGE);
+
+  /* THE SCORING CAVEAT (US-8.5.5). A check that flags nearly the whole estate
+     cannot discriminate between devices, so the score it feeds is measuring a
+     policy default rather than a per-device fault. Computed over every scored
+     row and labelled as such wherever it prints: it is a statement about the
+     MODEL, so it must not move when the filters do. */
+  const FLAGS_EVERYTHING = 0.8;
+  const dominant = catalogue.filter((k) => all.length > 0 && k.flags / all.length >= FLAGS_EVERYTHING);
+  const flaggedAtAll = all.filter((c) => driftOf(c).length > 0).length;
+  // null, not 0, when nothing has been scored: a mean over an empty set is not
+  // a zero score, and this table has a device drawer hanging off it.
+  const mean = all.length ? Math.round(all.reduce((a, c) => a + c.score, 0) / all.length) : null;
+
+  return { all, matched, rows, pageRows, page, pages, first, perPage: COMP_PAGE,
+           checks, bands, sorts, catalogue, dominant, flaggedAtAll, mean,
+           dominantThreshold: FLAGS_EVERYTHING,
+           active: { q, check, band, sort },
+           filtered: q !== "" || check !== "all" || band !== "all",
+           // The "+" that marks a count over a collection apiAll could not walk
+           // in full. Read once here so no compliance surface can disagree
+           // about whether its numbers are floors.
+           mark: truncMark("compliance") };
+}
+
+/** The controls. The search box is static markup wired once; the selects and
+ *  chips are rebuilt on every render, so their handlers are attached to the
+ *  elements that are now on screen. */
+function renderComplianceFilters() {
+  const c = complianceRows();
+  const ctl = $("#cctl");
+  if (ctl) {
+    /* The two <select> lists, written with their ids SPELLED OUT rather than
+       passed to a helper -- the pattern renderIncidents() uses and for the same
+       reason: a console-invariant test scans this file for the ids it wires
+       listeners to, and an id that exists only as a function argument reads to
+       that test as a listener bound to a dead element. That is a real bug it
+       has caught before (a renamed button left one TypeError at parse time and
+       rendered the whole console empty). */
+    const opts = (list, cur) => list.map(([k, text, n]) =>
+      `<option value="${esc(k)}"${k === cur ? " selected" : ""}>${esc(text)}` +
+      `${n == null ? "" : ` (${n})`}</option>`).join("");
+    ctl.innerHTML =
+      `<label for="ccheck">Failing check</label>
+       <select id="ccheck">${opts(c.checks, c.active.check)}</select>` +
+      `<label for="csort">Sort</label>
+       <select id="csort">${opts(c.sorts, c.active.sort)}</select>` +
+      (c.filtered ? `<button class="fp" id="cclear">&#10005; Clear filters</button>` : "");
+    // Looked up off the document, not off `ctl`: these elements were just
+    // replaced, so a handler bound to the old ones would be bound to nothing.
+    const ch = $("#ccheck");
+    if (ch) ch.addEventListener("change", () => {
+      S.ccheck = ch.value; S.cpage = 1;
+      renderComplianceFilters(); renderCompliance(); urlSync("replace");
+    });
+    const so = $("#csort");
+    if (so) so.addEventListener("change", () => {
+      S.csort = so.value;
+      renderComplianceFilters(); renderCompliance(); urlSync("replace");
+    });
+    const clr = c.filtered ? $("#cclear") : null;
+    if (clr) clr.addEventListener("click", () => {
+      S.cq = ""; S.ccheck = "all"; S.cband = "all"; S.cpage = 1;
+      const box = $("#cq");
+      if (box) box.value = "";
+      renderComplianceFilters(); renderCompliance(); urlSync("replace");
+    });
+  }
+  const wrap = $("#cfp");
+  if (wrap) {
+    wrap.innerHTML = "";
+    for (const [key, label, n] of c.bands) {
+      const b = document.createElement("button");
+      b.className = "fp";
+      b.innerHTML = `<span class="d ${key === "compliant" ? "grn"
+        : key === "non-compliant" ? "red" : "amb"}"></span><b>${n}</b> ${esc(label)}`;
+      b.setAttribute("aria-pressed", String(S.cband === key));
+      b.addEventListener("click", () => {
+        S.cband = S.cband === key ? "all" : key;
+        S.cpage = 1;
+        renderComplianceFilters(); renderCompliance(); urlSync("replace");
+      });
+      wrap.appendChild(b);
+    }
+  }
+}
+
 function renderCompliance() {
   const el = $("#comptable");
-  const rows = S.compliance.slice().sort((a, b) => a.score - b.score);
-  const scored = rows.length;
+  const pager = $("#cpager");
+  const score = $("#cscore");
+  /* ONE read of the queue, and every number below comes out of it. The table
+     draws `pageRows`; the badge counts `pageRows`; the subtitle reports
+     `rows`, which is what `pageRows` was sliced from; the chips count
+     `matched`, which is what `rows` was filtered from. Nothing here counts a
+     collection it is not showing. */
+  const c = complianceRows();
+  const scored = c.all.length;
+  const totalEl = $("#cscoped");
+  if (totalEl) totalEl.textContent = String(scored) + c.mark;
   // `devices - scored` is only a real figure when BOTH collections were fetched
   // in full. Short either one and the difference is arithmetic on two unrelated
   // fractions — it can even go negative — so it is refused rather than printed.
-  const short = truncMark("compliance") || truncMark("devices");
+  const short = c.mark || truncMark("devices");
   const unscored = S.devices.length - scored;
-  $("#compsub").textContent = short
+  const scopeLine = short
     ? `${scored}+ scored · how many lack a config snapshot cannot be counted while these lists are incomplete`
     : `${scored} scored · ${unscored} without a config snapshot (offline devices cannot be read)`;
-  if (scored === 0) { el.innerHTML = `<div class="empty">No device has returned a config snapshot yet.</div>`; return; }
+
+  /* THE BADGE COUNTS THE ROWS DRAWN, and the subtitle says how many matched
+     and which page this is. That split is the one this file has got wrong
+     three times: a badge over a page, carrying the size of the whole set. */
+  const count = $("#ccount");
+  if (count) {
+    count.textContent = String(c.pageRows.length);
+    count.title = "Compliance rows drawn below. The table is paged in the browser; "
+      + "the line under the heading says how many matched these filters.";
+  }
+  const named = [];
+  if (c.active.q) named.push(`search "${c.active.q}"`);
+  if (c.active.check !== "all") {
+    const k = c.catalogue.find((x) => x.id === c.active.check);
+    named.push(`failing "${k ? k.label : c.active.check}"`);
+  }
+  if (c.active.band !== "all") named.push(`band ${c.active.band}`);
+  $("#compsub").textContent =
+    (c.rows.length === 0
+      ? `no row matches ${named.length ? named.join(" · ") : "this view"}`
+      : `rows ${c.first}–${c.first + c.pageRows.length - 1} of ${c.rows.length}${c.mark} matching`
+        + (c.pages > 1 ? ` · page ${c.page} of ${c.pages}` : "")
+        + (named.length ? ` · ${named.join(" · ")}` : " · no filter applied"))
+    + ` · ${scopeLine}`;
+
+  /* The score, and the caveat that sits BESIDE it rather than under the table
+     (US-8.5.5). A mean of 92 over an estate where 117 of 117 devices carry a
+     flag is not a contradiction, it is two different scales — and the reason
+     the second one is useless is that two checks fire on nearly everything. So
+     they are named, with their share, and each is one click from the rows. */
+  if (score) {
+    score.innerHTML = scored === 0
+      ? ""
+      : `<div class="wbar" style="margin:12px 16px;align-items:flex-start">
+          <span class="l" style="flex:1">
+            <b>Mean drift score ${c.mean}%</b> across ${scored}${c.mark} scored device(s)
+            &#183; ${c.flaggedAtAll} of ${scored}${c.mark} carry at least one flag.
+            ${c.dominant.length
+              ? `<div class="prov" style="font-size:12px;line-height:1.5">
+                   <b>Read that second figure with care.</b>
+                   ${c.dominant.length === 1 ? "One check accounts" : `${c.dominant.length} checks account`}
+                   for most of it:
+                   ${c.dominant.map((k) => `<b>${esc(k.label)}</b> flags ${k.flags} of ${scored}
+                      (${Math.round((k.flags / scored) * 100)}%)`).join(", ")}.
+                   A check that fires on ${Math.round(c.dominantThreshold * 100)}%+ of the estate
+                   cannot tell one device from another: that is an estate-wide policy default
+                   and a scoring problem, not ${c.flaggedAtAll} separate faults. The
+                   per-device signal is in the checks below these.
+                   ${c.dominant.map((k) =>
+                      `<button class="btn sm" data-conly="${esc(k.id)}">Only ${esc(k.label)}</button>`).join(" ")}
+                 </div>`
+              : `<div class="prov" style="font-size:12px">No single check flags
+                   ${Math.round(c.dominantThreshold * 100)}% or more of the estate, so the flag count
+                   above discriminates between devices.</div>`}
+          </span></div>`;
+    score.querySelectorAll("[data-conly]").forEach((b) =>
+      b.addEventListener("click", () => {
+        S.ccheck = b.dataset.conly; S.cband = "all"; S.cpage = 1;
+        renderComplianceFilters(); renderCompliance(); urlSync("replace");
+      }));
+  }
+
+  if (scored === 0) {
+    el.innerHTML = `<div class="empty">No device has returned a config snapshot yet.</div>`;
+    if (pager) pager.innerHTML = "";
+    return;
+  }
+  if (c.rows.length === 0) {
+    /* Say WHY it is empty. "Nothing to show" is false when the truth is that a
+       filter excluded all 117 of them, and it is the kind of false that ends
+       with a technician telling a customer the estate is configured. */
+    el.innerHTML = `<div class="empty">No scored device matches these filters &#8212;
+      ${scored}${c.mark} device(s) are scored in total. Clear the filters to see them.</div>`;
+    if (pager) pager.innerHTML = "";
+    return;
+  }
   el.innerHTML =
     `<div class="tblwrap"><table class="dt"><thead><tr>
       <th>Device</th><th>Class</th><th>Template</th><th>Drift score</th>
-      <th>Passed</th><th>Policy gaps</th><th>Config age</th></tr></thead><tbody>` +
-    rows.map((c) => {
-      const policy = (c.drift || []).filter((x) => x.kind === "policy").length;
-      const cls = c.score >= 95 ? "ok" : c.score >= 75 ? "wn" : "bd";
-      return `<tr class="r" data-id="${esc(c.deviceId)}">
-        <td><b>${esc(c.name || c.deviceId)}</b></td>
-        <td>${esc(c.deviceClass)}</td>
-        <td>${esc(c.templateId)}</td>
-        <td class="n"><span class="v ${cls}">${c.score}%</span></td>
-        <td class="n">${c.checksPassed}/${c.checksTotal}${c.checksNotApplicable ? ` <span class="prov">+${c.checksNotApplicable} n/a</span>` : ""}</td>
+      <th>Passed</th><th>Policy gaps</th><th>Flagged checks</th>
+      <th>Config age</th></tr></thead><tbody>` +
+    c.pageRows.map((r) => {
+      const drift = r.drift || [];
+      const policy = drift.filter((x) => x.kind === "policy").length;
+      const cls = r.score >= 95 ? "ok" : r.score >= 75 ? "wn" : "bd";
+      /* WHICH checks failed, on the row. The table used to print only a count
+         of policy gaps, so "missing nightly reboot" was invisible without
+         opening the drawer — and the whole point of the filter above is that
+         the answer is readable in the list it produces. The check the filter is
+         SET to leads, so a filtered row shows the reason it matched first. */
+      const lead = drift.slice().sort((a, b) =>
+        (b.checkId === c.active.check ? 1 : 0) - (a.checkId === c.active.check ? 1 : 0));
+      const names = lead.slice(0, 3).map((x) =>
+        `<span class="tag ${x.checkId === c.active.check ? "warn" : "net"}"
+           title="${esc(`${x.label}: expected ${x.expected}, read ${x.actual}`)}">${esc(x.label)}</span>`).join(" ");
+      return `<tr class="r" data-id="${esc(r.deviceId)}">
+        <td><b>${esc(r.name || r.deviceId)}</b></td>
+        <td>${esc(r.deviceClass)}</td>
+        <td>${esc(r.templateId)}</td>
+        <td class="n"><span class="v ${cls}">${r.score}%</span></td>
+        <td class="n">${r.checksPassed}/${r.checksTotal}${r.checksNotApplicable ? ` <span class="prov">+${r.checksNotApplicable} n/a</span>` : ""}</td>
         <td class="n">${policy || "&#8212;"}</td>
-        <td class="n">${dur(c.settingsAgeSeconds)}</td></tr>`;
-    }).join("") + `</tbody></table></div>` +
-    `<div class="pg">Drift and policy are scored separately &#8212; combined they flag ${rows.filter((c) => (c.drift || []).length > 0).length} of ${scored} scored devices.</div>`;
+        <td>${names || `<span class="unres">nothing flagged on this device</span>`}${
+          drift.length > 3 ? ` <span class="prov">+${drift.length - 3} more</span>` : ""}</td>
+        <td class="n">${r.settingsAgeSeconds == null
+          ? `<span class="unres">no config read recorded</span>`
+          : dur(r.settingsAgeSeconds)}</td></tr>`;
+    }).join("") + `</tbody></table></div>`;
   el.querySelectorAll("tr.r").forEach((r) =>
     r.addEventListener("click", () => openDevice(r.dataset.id)));
+
+  /* The pager. It states the page AND the matching total, because "50 rows" and
+     "50 of 117 that matched" are different claims and only the second one tells
+     the reader whether they have seen the answer to their question. */
+  if (pager) {
+    pager.innerHTML =
+      `<div class="pg"><span>Showing <b>${c.pageRows.length}</b> of
+         <b>${c.rows.length}${c.mark}</b> matching device(s)
+         ${c.pages > 1
+           ? `&#8212; page ${c.page} of ${c.pages}, ${c.perPage} rows a page.
+              <b>This page is not the whole result</b>; page through it or narrow the filters.`
+           : "&#8212; this page is the whole result."}
+         Drift and policy are scored separately; the caveat above says which checks
+         dominate the flag count.</span>
+       <button class="btn sm" id="cprev"${c.page <= 1 ? " disabled" : ""}>&#8592; Previous</button>
+       <button class="btn sm" id="cnext"${c.page >= c.pages ? " disabled" : ""}>Next &#8594;</button>
+       </div>`;
+    const prev = $("#cprev");
+    if (prev) prev.addEventListener("click", () => {
+      S.cpage = Math.max(1, c.page - 1);
+      renderCompliance(); urlSync("replace");
+    });
+    const next = $("#cnext");
+    if (next) next.addEventListener("click", () => {
+      S.cpage = Math.min(c.pages, c.page + 1);
+      renderCompliance(); urlSync("replace");
+    });
+  }
 }
 
 function renderSla() {
@@ -5785,13 +6385,28 @@ function renderPipelineBanner() {
       ${n} of ${sp.lanes.length} lanes in <em>VFI's own pipeline</em> ${n === 1 ? "is" : "are"}
       not delivering. This is our health, not the fleet's: the screens can be
       perfectly fine while we are blind to them.
-      <ul>${sp.faults.map((f) =>
-        `<li><b>${esc(f.lane)}</b> &#8212; ${esc(f.headline)}. ${esc(f.dataImpact)}</li>`).join("")}</ul>
+      <!-- WHICH lanes, inline: the names are the actionable half and they cost
+           one line. The per-lane impact paragraph is the other half and it ran
+           to 643px of banner on this tenant -- eleven near-identical sentences
+           standing between the reader and the estate status underneath. So it
+           folds, with its own count in the summary; nothing is dropped. -->
+      Not delivering:
+      ${sp.faults.map((f) => `<b>${esc(f.lane)}</b>`).join(", ")}.
+      <details class="fold"><summary>what each of these
+        ${sp.faults.length === 1 ? "does" : "do"} to the device data
+        (${sp.faults.length})</summary>
+        <ul>${sp.faults.map((f) =>
+          `<li><b>${esc(f.lane)}</b> &#8212; ${esc(f.headline)}. ${esc(f.dataImpact)}</li>`).join("")}</ul>
+      </details>
       <button class="glink" id="pipejump">see all ${sp.lanes.length} lanes &#8595;</button>
       </span></div>`;
   const jump = $("#pipejump");
   if (jump) jump.addEventListener("click", () => {
     switchTab("overview");
+    // The lane table is inside a fold, so OPEN it before scrolling: landing on
+    // a closed summary reads as the content having gone away.
+    const fold = $("#wpipefold");
+    if (fold) fold.open = true;
     setTimeout(() => $("#wpipeline").scrollIntoView({ behavior: "smooth", block: "center" }), 60);
   });
 }
@@ -6411,6 +7026,19 @@ const INC_SEVS = [["all", "Any severity"], ["critical", "Critical"], ["high", "H
 const INC_WINDOWS = [["", "All history held"], ["1", "Opened in the last day"],
   ["7", "Opened in the last 7 days"], ["30", "Opened in the last 30 days"]];
 
+/**
+ * The three filters a link carries, as one comparable string (US-8.5.x).
+ *
+ * `rule` and `deviceId` are excluded on purpose: they are drilldowns a row
+ * hands over rather than filters anybody typed, they do not travel in a link,
+ * and including them here would make a Back press refetch over a drilldown the
+ * address bar never described.
+ */
+function incSignature() {
+  const f = S.incF || {};
+  return [f.state || "all", f.severity || "all", f.sinceDays == null ? "" : f.sinceDays].join("|");
+}
+
 /** The query string for one incident-queue read. Only parameters the endpoint
  *  declares; it refuses unknown ones with a 400 rather than ignoring them. */
 function incQuery() {
@@ -6439,6 +7067,11 @@ async function loadIncidents(over) {
     // its fetched transitions describe counts that have just moved.
     S.incOpen = null;
     S.incDrill = {};
+    /* The filters now live in the address bar (US-8.5.x), so a narrowed queue
+       is shareable. `replace`, not `push`: moving a select is incidental, the
+       same call the alert and device filters make. URL_SUSPEND makes this a
+       no-op when a Back press is what got us here. */
+    urlSync("replace");
   }
   S.incLoading = true;
   renderIncidents();
@@ -8921,6 +9554,16 @@ $("#aq").addEventListener("input", (e) => {
   renderAlertFilters(); renderAlerts();
   urlSync("replace");
 });
+// Both renderers again, and a reset to page 1: the band chips, the check
+// option counts, the header badge and the rows all describe the searched set,
+// so they move in one tick — and staying on page 3 of a set that just shrank
+// to one page renders an empty table over a header that counts 7 rows.
+$("#cq").addEventListener("input", (e) => {
+  S.cq = e.target.value;
+  S.cpage = 1;
+  renderComplianceFilters(); renderCompliance();
+  urlSync("replace");
+});
 $("#reload").addEventListener("click", () => load());
 
 const VIEWS_ALL = ["overview", "alerts", "incidents", "actions", "devices", "compliance", "brief", "insights", "sla", "trends", "audit"];
@@ -8944,6 +9587,10 @@ $("#gq").addEventListener("click", palOpen);
 $("#shotLive").addEventListener("click", toggleLive);
 $("#gapsbtn").addEventListener("click", () => {
   switchTab("overview");
+  // Same as the pipeline jump: the blind-spot list is folded by default, so the
+  // button that exists to show it opens it.
+  const fold = $("#wgapsfold");
+  if (fold) fold.open = true;
   setTimeout(() => $("#wgaps").scrollIntoView({ behavior: "smooth", block: "center" }), 60);
 });
 /* The export menu. Opening it REBUILDS it, so every count it shows is the
@@ -8971,6 +9618,9 @@ document.addEventListener("click", (e) => {
    entry over the one we are stepping back to. */
 addEventListener("popstate", () => {
   const { patch, problems } = urlReadParams(location.search);
+  // The three link-borne incident filters, BEFORE the patch overwrites them:
+  // the only honest way to know whether this Back press moved one.
+  const incWas = incSignature();
   URL_SUSPEND = true;
   try {
     urlApplyPatch(patch);
@@ -8989,6 +9639,12 @@ addEventListener("popstate", () => {
     }
     // The audit log is a server-side read, so a pinned filter means a refetch.
     if (patch.aud) loadAudit(patch.aud);
+    /* Same for the incident queue -- but only if one of its three link-borne
+       filters actually moved, and only if this tab has already read the queue
+       once. Refetching a queue nobody has opened would spend a request on a
+       tab that is not on screen, and the lazy read in showView() will pick the
+       restored filters up anyway. */
+    if ((S.inc || S.incLoading) && incWas !== incSignature()) loadIncidents({ page: 1 });
     urlRepaint();
   } finally {
     URL_SUSPEND = false;
@@ -9152,7 +9808,7 @@ async function load() {
     renderBrief();
     renderAlertFilters(); renderAlerts(); renderInert(); renderSuppressions();
     renderDeviceFilters(); renderDevices();
-    renderCompliance(); renderSla();
+    renderComplianceFilters(); renderCompliance(); renderSla();
     renderActions();
     renderPipelineWidget(); renderTrends();
     drawModules();
