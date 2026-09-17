@@ -199,17 +199,14 @@ export const LANE_REGISTRY: readonly LaneDecl[] = [
     lane: "alert-cross-check",
     intervalMs: 60 * 60_000,
     feeds: "the second opinion on our detection — where we and the platform disagree",
-    // It prints `renderCrossCheck(result)` to the log and persists NOTHING: no
-    // poller_runs row, no table of its own. So we cannot tell whether it has run
-    // hourly for a month or has never run once, and the report must say exactly
-    // that instead of picking the flattering reading.
-    observability: {
-      kind: "none",
-      why:
-        "it logs its result to stdout and persists nothing — no poller_runs row and no " +
-        "table of its own, so whether it ran is unknowable from the database. Making it " +
-        "measurable means calling record() in run-poller.ts, or persisting the verdict",
-    },
+    // It used to print `renderCrossCheck(result)` to the log and persist NOTHING,
+    // so we could not tell whether it had run hourly for a month or never once —
+    // and 0 rows was read as "never ran", which was a false claim about our own
+    // pipeline. It records now. `zeroRowsIsNormal` because it persists nothing by
+    // design: rows_written is 0 by nature, and batches_ok is what separates
+    // "compared, and we agreed" from "we could not look".
+    observability: POLLER_RUNS,
+    zeroRowsIsNormal: true,
   },
   {
     lane: "device-settings",
@@ -283,25 +280,15 @@ export const LANE_REGISTRY: readonly LaneDecl[] = [
     lane: "retention",
     intervalMs: 24 * 60 * 60_000,
     feeds: "the retention prune that keeps the time-series tables bounded",
-    observability: {
-      kind: "none",
-      why:
-        "it DELETES rows and records nothing, so a successful prune and a prune that " +
-        "never happened are identical in the database. Making it measurable means " +
-        "calling record() in run-poller.ts",
-    },
+    observability: POLLER_RUNS,
+    zeroRowsIsNormal: true,
   },
   {
     lane: "prune-raw",
     intervalMs: 24 * 60 * 60_000,
     feeds: "the raw-payload prune that keeps raw_payloads bounded",
-    observability: {
-      kind: "none",
-      why:
-        "it DELETES rows and records nothing, so a successful prune and a prune that " +
-        "never happened are identical in the database. Making it measurable means " +
-        "calling record() in run-poller.ts",
-    },
+    observability: POLLER_RUNS,
+    zeroRowsIsNormal: true,
   },
 ];
 

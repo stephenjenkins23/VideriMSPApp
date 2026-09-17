@@ -200,30 +200,73 @@ test("snapshot with no fleet_snapshots rows reads never-ran, not 0% and not heal
 // alert-cross-check: no source at all → unknown, never 0% and never healthy
 // ─────────────────────────────────────────────────────────────────────────────
 
-test("alert-cross-check has no source at all, so it reads UNKNOWN with the reason", () => {
-  // The brief asked for "never-ran" here, and the data will not support it:
-  // this lane calls no `record()` and writes no table, so 0 rows is not evidence
-  // it never ran — it is evidence we cannot tell. Claiming a fault would be the
-  // same class of false alarm as flagging a daily lane every day.
+test("alert-cross-check now RECORDS, so silence is a claim we are allowed to make", () => {
+  // History, because this test used to assert the opposite and the reversal is
+  // the point. This lane called no record() and wrote no table, so 0 rows meant
+  // "we cannot tell" and the honest report was `unknown`. Claiming "never ran"
+  // off 0 rows was a false statement about our OWN pipeline, and it was made.
+  // The lane records now, so absence of a row is finally evidence of absence.
   const report = assessPipelineHealth([], { now: NOW, expectedLanes: expectedLanesFor({}) });
   const lane = laneOf(report, "alert-cross-check");
 
-  assert.equal(lane.status, "unknown");
-  assert.notEqual(lane.status, "healthy");
+  assert.equal(lane.status, "never-ran");
+  assert.ok(!report.unobservableLanes.includes("alert-cross-check"), "it has a source now");
+  // Still never a fabricated measurement: no runs means no coverage RATIO, and
+  // the absence is carried by the finding rather than by a 0.
   assert.equal(lane.coverage.ratio, null, "never 0% — that would be a fabricated measurement");
-  assert.equal(lane.coverage.ratioExcludingOutages, null);
-  const finding = lane.findings.find((f) => f.kind === "lane-unobservable");
-  assert.ok(finding, "an unobservable lane must produce a finding, not silence");
-  assert.match(finding!.detail, /cannot tell whether it has run hourly for a month/);
-  // The fix is in our code, and the finding says where.
-  assert.match(lane.coverage.basis, /record\(\) in run-poller\.ts/);
-  // Info, not high: this is a gap in our instrumentation, not proof of a fault.
-  assert.equal(finding!.severity, "info");
-  assert.ok(report.unobservableLanes.includes("alert-cross-check"));
-  // And it must not drag `deviceDataAtRisk`, which means "we stopped collecting
-  // something we were collecting" — a claim this lane's silence cannot support.
-  assert.ok(report.unobservableLanes.includes("retention"));
-  assert.ok(report.unobservableLanes.includes("prune-raw"));
+  const finding = lane.findings.find((f) => f.kind === "lane-never-ran");
+  assert.ok(finding, "silence must produce a finding, not silence");
+  // The wording says RECORDED, not ran, which is the precise claim: a run before
+  // the instrumentation existed left no trace and cannot be ruled out.
+  assert.match(finding!.detail, /has ever been recorded/);
+
+  // And it self-clears on the first recorded run rather than needing a human to
+  // dismiss it — which is what makes it safe to raise at this severity.
+  const afterOneRun = assessPipelineHealth(
+    [{
+      poller: "alert-cross-check", startedAt: new Date(NOW.getTime() - 10 * 60_000),
+      durationMs: 500, devicesTargeted: 0, rowsWritten: 0,
+      batchesOk: 1, batchesFailed: 0, telemetryYield: null,
+    }],
+    { now: NOW, expectedLanes: expectedLanesFor({}) },
+  );
+  const cleared = laneOf(afterOneRun, "alert-cross-check");
+  assert.notEqual(cleared.status, "never-ran");
+  assert.equal(
+    cleared.findings.find((f) => f.kind === "lane-never-ran"), undefined,
+    "one recorded run must retire the finding entirely",
+  );
+});
+
+test("retention and prune-raw are measurable too, and 0 rows written is not a stall", () => {
+  // Both lanes DELETE and persist nothing of their own, so rows_written is 0 by
+  // design. zeroRowsIsNormal is what stops that reading as a stalled lane — the
+  // distinction between "nothing needed deleting" and "we could not look" is
+  // carried by batches_ok, not by the row count.
+  const runs = ["retention", "prune-raw"].map((poller, i) => ({
+    poller, startedAt: new Date(NOW.getTime() - (i + 1) * 60 * 60_000),
+    durationMs: 900, devicesTargeted: 0, rowsWritten: 0,
+    batchesOk: 6, batchesFailed: 0, telemetryYield: null,
+  }));
+  const report = assessPipelineHealth(runs, { now: NOW, expectedLanes: expectedLanesFor({}) });
+  for (const name of ["retention", "prune-raw"]) {
+    const lane = laneOf(report, name);
+    assert.ok(!report.unobservableLanes.includes(name), `${name} has a source now`);
+    // There is deliberately no "wrote nothing" finding kind to assert against —
+    // the real risk is these lanes being called stalled or overdue for writing
+    // zero rows, so assert the absence of a FAULT rather than of an invented one.
+    assert.ok(
+      !["stalled", "overdue", "never-ran"].includes(lane.status),
+      `${name} ran an hour ago on a 24 h cadence and wrote 0 rows by design; ` +
+        `status was ${lane.status}`,
+    );
+    for (const kind of ["lane-stalled", "lane-overdue", "lane-never-ran"] as const) {
+      assert.equal(
+        lane.findings.find((f) => f.kind === kind), undefined,
+        `${name} must not raise ${kind} for a by-design zero`,
+      );
+    }
+  }
 });
 
 test("a lane with no measurable source is unknown even when a run history exists", () => {

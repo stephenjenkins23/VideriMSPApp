@@ -53,8 +53,19 @@ test("the four lanes that drifted out of the old roster are declared, with how t
     timeColumn: "computed_at",
     why: "it writes one row per successful cycle, so its own output dates every run",
   });
+  // These three were `none` until they were given a record() call. The point of
+  // pinning them now is the opposite of before: a regression that removed the
+  // recording would make them unobservable again, and the last time that was
+  // true their silence got read as "never ran".
   for (const lane of ["alert-cross-check", "retention", "prune-raw"]) {
-    assert.equal(laneDecl(lane)?.observability.kind, "none", `${lane} records nothing`);
+    assert.equal(
+      laneDecl(lane)?.observability.kind, "poller-runs",
+      `${lane} records a poller_runs row, so its silence is measurable`,
+    );
+    assert.equal(
+      laneDecl(lane)?.zeroRowsIsNormal, true,
+      `${lane} writes no rows by design, so 0 rows_written must not read as a stall`,
+    );
   }
 });
 
