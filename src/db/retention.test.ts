@@ -232,3 +232,241 @@ test("a table with nothing to prune reports 0, not a missing key", async () => {
     assert.equal(deleted[label], 0, `${label} must report 0 rather than being absent`);
   }
 });
+
+// ─── never device rows ───────────────────────────────────────────────────────
+
+test("no prune ever deletes a device row", async () => {
+  // Standing rule in this project: device rows are RETIRED — soft, reversible,
+  // `retired_at` — and never hard-deleted (see pollers/devices.ts). Retention
+  // adding a `DELETE FROM devices` would silently destroy the registry rows an
+  // offline device's whole history hangs off. Now that these lanes are observed
+  // rather than invisible, this is the one thing that must not change with them.
+  const { statements } = await prune();
+  for (const statement of statements) {
+    assert.notEqual(statement.table, "devices", statement.sql);
+    assert.ok(!/DELETE FROM devices\b/i.test(statement.sql), statement.sql);
+  }
+});
+
+// ─── the lanes can now report that they ran ──────────────────────────────────
+//
+// `retention` and `prune-raw` DELETE rows and recorded nothing, so a successful
+// prune and a prune that never happened were identical in the database: the lane
+// registry had to declare them `observability: "none"` and pipeline-health
+// reported UNKNOWN. Note what that zero was NOT: with no `record()` call, zero
+// poller_runs rows is evidence WE CANNOT TELL, not evidence the lane never ran.
+//
+// What is pinned below is only the recording — nothing about WHAT is deleted,
+// which the tests above own and which did not change.
+
+import {
+  runRetentionLane,
+  runPruneRawLane,
+  toRetentionRun,
+  toPruneRawRun,
+  RETENTION_POLLER,
+  PRUNE_RAW_POLLER,
+  PRUNE_RAW_RETAIN_DAYS,
+} from "./retention.js";
+import type { PollerResult } from "../pipeline/pollers/types.js";
+
+/** Collects what the lane recorded. */
+function recorder(): { record: (r: PollerResult) => Promise<void>; runs: PollerResult[] } {
+  const runs: PollerResult[] = [];
+  return { record: async (r) => { runs.push(r); }, runs };
+}
+
+/** Distinct counts per table, so a swap lands a recognisable wrong number. */
+const RETENTION_COUNTS = {
+  health_samples: 11,
+  poller_runs: 22,
+  fleet_snapshots: 33,
+  alerts_resolved: 44,
+  device_settings: 55,
+  compliance_results: 66,
+};
+const RETENTION_TOTAL = Object.values(RETENTION_COUNTS).reduce((a, b) => a + b, 0);
+/** Deliberately unlike any retention count or their sum. */
+const RAW_COUNT = 907;
+
+const silent = () => {};
+/** Monotonic clock, so durationMs is asserted rather than hoped for. */
+const clock = (stepMs: number) => { let t = 5_000; return () => { const n = t; t += stepMs; return n; }; };
+
+test("each prune lane records exactly one run, under its OWN name", async () => {
+  const retention = recorder();
+  const raw = recorder();
+
+  await runRetentionLane({ prune: async () => ({ ...RETENTION_COUNTS }), record: retention.record, log: silent });
+  await runPruneRawLane({ prune: async () => RAW_COUNT, record: raw.record, log: silent });
+
+  assert.equal(retention.runs.length, 1, "one row per run — not zero, not two");
+  assert.equal(raw.runs.length, 1);
+  assert.equal(retention.runs[0]!.poller, RETENTION_POLLER);
+  assert.equal(raw.runs[0]!.poller, PRUNE_RAW_POLLER);
+  assert.equal(RETENTION_POLLER, "retention");
+  assert.equal(PRUNE_RAW_POLLER, "prune-raw");
+});
+
+test("a swap between the two lanes is caught: each reports its OWN count", async () => {
+  // The precedent this guards is real: a retention change handed
+  // `run("poller_runs", …)` the fleet_snapshots DELETE. The SQL worked, both
+  // labels appeared, both counts were plausible, and the report was about the
+  // wrong tables. One level up, `retention` recording prune-raw's count would be
+  // just as quiet — so the counts here are deliberately unmistakable.
+  const shared = recorder();
+  await runRetentionLane({ prune: async () => ({ ...RETENTION_COUNTS }), record: shared.record, log: silent });
+  await runPruneRawLane({ prune: async () => RAW_COUNT, record: shared.record, log: silent });
+
+  const byPoller = new Map(shared.runs.map((r) => [r.poller, r]));
+  assert.equal(byPoller.get("retention")!.rowsWritten, RETENTION_TOTAL);
+  assert.equal(byPoller.get("prune-raw")!.rowsWritten, RAW_COUNT);
+  // And neither carries the other's number.
+  assert.notEqual(byPoller.get("retention")!.rowsWritten, RAW_COUNT);
+  assert.notEqual(byPoller.get("prune-raw")!.rowsWritten, RETENTION_TOTAL);
+  // Nor the other's batch count: six tables vs one statement.
+  assert.equal(byPoller.get("retention")!.batchesOk, 6);
+  assert.equal(byPoller.get("prune-raw")!.batchesOk, 1);
+});
+
+test("rowsWritten means rows DELETED, summed over the tables this lane pruned", async () => {
+  // poller_runs has no rows_deleted column. For a lane whose whole output is
+  // deletion, the rows it removed are what every consumer means by the volume
+  // of work — stated here so the meaning is pinned rather than assumed.
+  const { record, runs } = recorder();
+  await runRetentionLane({ prune: async () => ({ health_samples: 3, poller_runs: 4 }), record, log: silent });
+  assert.equal(runs[0]!.rowsWritten, 7);
+  // …and the per-table breakdown is recorded, so the total can be audited back
+  // to the tables it came from.
+  assert.ok(
+    runs[0]!.errors.some((e) => /health_samples=3/.test(e) && /poller_runs=4/.test(e)),
+    JSON.stringify(runs[0]!.errors),
+  );
+});
+
+test("a zero-by-nature prune is distinguishable from a prune that could not look", async () => {
+  // This is the whole point of recording these lanes. Both runs report
+  // rowsWritten 0; only one of them means "nothing needed doing".
+  const checked = recorder();
+  const blind = recorder();
+
+  await runRetentionLane({
+    prune: async () => ({
+      health_samples: 0, poller_runs: 0, fleet_snapshots: 0,
+      alerts_resolved: 0, device_settings: 0, compliance_results: 0,
+    }),
+    record: checked.record, log: silent,
+  });
+  await runRetentionLane({
+    prune: async () => { throw new Error("relation health_samples does not exist"); },
+    record: blind.record, log: silent,
+  });
+
+  const measured = checked.runs[0]!;
+  const unknown = blind.runs[0]!;
+
+  assert.equal(measured.rowsWritten, 0);
+  assert.equal(unknown.rowsWritten, 0, "identical in the count — which is why it cannot be the signal");
+
+  assert.equal(measured.batchesOk, 6, "six windows were checked");
+  assert.equal(measured.batchesFailed, 0);
+  assert.equal(unknown.batchesOk, 0, "nothing completed, so nothing was checked");
+  assert.equal(unknown.batchesFailed, 1);
+
+  assert.ok(measured.errors.some((e) => /a measured zero/.test(e)), JSON.stringify(measured.errors));
+  assert.ok(unknown.errors.some((e) => /prune failed: relation health_samples does not exist/.test(e)));
+  assert.ok(!unknown.errors.some((e) => /a measured zero/.test(e)),
+    "a failed prune must never claim it checked anything");
+});
+
+test("prune-raw distinguishes its two zeros the same way", async () => {
+  const checked = recorder();
+  const blind = recorder();
+  await runPruneRawLane({ prune: async () => 0, record: checked.record, log: silent });
+  await runPruneRawLane({
+    prune: async () => { throw new Error("deadlock detected"); },
+    record: blind.record, log: silent,
+  });
+
+  assert.deepEqual(
+    [checked.runs[0]!.batchesOk, checked.runs[0]!.batchesFailed], [1, 0],
+    "the DELETE ran and found nothing old enough",
+  );
+  assert.deepEqual([blind.runs[0]!.batchesOk, blind.runs[0]!.batchesFailed], [0, 1]);
+  assert.ok(checked.runs[0]!.errors.some((e) => /a measured zero/.test(e)));
+  assert.ok(blind.runs[0]!.errors.some((e) => /deadlock detected/.test(e)));
+  assert.ok(checked.runs[0]!.errors.some((e) => new RegExp(`${PRUNE_RAW_RETAIN_DAYS} days`).test(e)));
+});
+
+test("neither lane targets a device, and the run row says the zero is by nature", async () => {
+  const { record, runs } = recorder();
+  await runRetentionLane({ prune: async () => ({ health_samples: 1 }), record, log: silent });
+  await runPruneRawLane({ prune: async () => 1, record, log: silent });
+
+  for (const run of runs) {
+    assert.equal(run.devicesTargeted, 0, `${run.poller} prunes tables, not devices`);
+    // Honest nulls: no telemetry is read, so 0.0 (which reads as "collected
+    // nothing") would be a different and false claim.
+    assert.equal(run.telemetryYield, null);
+  }
+  assert.ok(
+    runs.find((r) => r.poller === "retention")!.errors
+      .some((e) => /no device row was deleted/.test(e)),
+    "the retention row must state that no device row was touched",
+  );
+});
+
+test("a recording failure does not abort the prune, and does not throw", async () => {
+  // These run on the daemon. Bookkeeping must never be able to break the work —
+  // `record()` in run-poller.ts already swallows its own failures for this
+  // reason, and the lane holds the property whatever `record` it is handed.
+  let pruned = 0;
+  const exploding = async () => { throw new Error("poller_runs insert failed"); };
+
+  const retention = await runRetentionLane({
+    prune: async () => { pruned += 1; return { health_samples: 5 }; },
+    record: exploding, log: silent,
+  });
+  const raw = await runPruneRawLane({
+    prune: async () => { pruned += 1; return 6; },
+    record: exploding, log: silent,
+  });
+
+  assert.equal(pruned, 2, "both prunes must have run despite recording failing");
+  // The lane still returns the run it tried to record, so the caller and the log
+  // still have it.
+  assert.equal(retention.rowsWritten, 5);
+  assert.equal(raw.rowsWritten, 6);
+});
+
+test("both lanes record the run they actually performed, timed", async () => {
+  const { record, runs } = recorder();
+  await runRetentionLane({
+    prune: async () => ({ health_samples: 1 }), record, log: silent, now: clock(250),
+  });
+  await runPruneRawLane({ prune: async () => 1, record, log: silent, now: clock(90) });
+
+  assert.equal(runs[0]!.durationMs, 250);
+  assert.equal(runs[1]!.durationMs, 90);
+  for (const run of runs) assert.ok(run.startedAt instanceof Date);
+});
+
+test("the log line is unchanged in shape — the run row is the new part", async () => {
+  // A prune that deletes nothing stayed quiet in the log and still does; the
+  // measured zero now lives in the run row, which is where it is durable.
+  const lines: string[] = [];
+  await runRetentionLane({
+    prune: async () => ({ health_samples: 0, poller_runs: 0 }),
+    record: async () => {}, log: (m) => lines.push(m),
+  });
+  await runPruneRawLane({ prune: async () => 0, record: async () => {}, log: (m) => lines.push(m) });
+
+  assert.deepEqual(lines, ["[retention] nothing to prune"], "prune-raw stays silent on a quiet night");
+});
+
+test("the pure builders hardcode their own lane name", () => {
+  // No argument decides the name, so no caller can pass the wrong one.
+  const outcome = { startedAt: new Date(), durationMs: 1, error: null };
+  assert.equal(toRetentionRun({ ...outcome, counts: { health_samples: 1 } }).poller, "retention");
+  assert.equal(toPruneRawRun({ ...outcome, counts: 1 }).poller, "prune-raw");
+});

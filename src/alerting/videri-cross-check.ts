@@ -17,6 +17,18 @@
 
 import type { VideriHttp } from "../videri/http.js";
 import type { Pool } from "pg";
+import type { PollerResult } from "../pipeline/pollers/types.js";
+
+/**
+ * The lane name, written ONCE.
+ *
+ * Both the scheduler's task name and the recorded `poller` value come from here,
+ * so this lane cannot record under a sibling's name. A previous retention change
+ * in this project swapped two labels so a `run("poller_runs", …)` call executed
+ * the `fleet_snapshots` DELETE — the SQL worked and the counts lied. A swap at
+ * this level would be just as quiet.
+ */
+export const CROSS_CHECK_POLLER = "alert-cross-check";
 
 interface VideriAlertDto {
   uuid?: string;
@@ -44,7 +56,25 @@ export const EQUIVALENT_RULES: Record<string, string[]> = {
 
 export interface CrossCheckResult {
   ranAt: Date;
+  /** Wall time of the whole reconciliation, for the run row. */
+  durationMs: number;
+  /**
+   * Did the comparison actually happen?
+   *
+   * The one field that separates the two kinds of zero. A clean fleet and a
+   * failed read both come back `0 agreements · 0 they-only · 0 we-only`, and
+   * reading that as agreement would be claiming we looked when we did not. Every
+   * consumer — the run row, the log line — keys its "we could not look" wording
+   * on this rather than inferring it from the counts.
+   */
+  completed: boolean;
   videriOpenAlerts: number;
+  /**
+   * Devices the comparison covered — the union of the devices they flag and the
+   * devices we flag. NOT devices "targeted": nothing here contacts a device (see
+   * `toPollerRun` below for why the run row keeps that distinction).
+   */
+  devicesCompared: number;
   /** Videri flags it, we do not. Possible blind spot on our side. */
   theyFlagWeDoNot: Array<{ deviceId: string; deviceName: string | null; alertType: string }>;
   /** We flag it, Videri does not. We may be faster, or over-alerting. */
@@ -59,15 +89,26 @@ export interface CrossCheckResult {
 export async function crossCheckVideriAlerts(
   http: VideriHttp,
   pool: Pool,
+  now: () => number = Date.now,
 ): Promise<CrossCheckResult> {
+  const startedAtMs = now();
   const result: CrossCheckResult = {
-    ranAt: new Date(),
+    ranAt: new Date(startedAtMs),
+    durationMs: 0,
+    completed: false,
     videriOpenAlerts: 0,
+    devicesCompared: 0,
     theyFlagWeDoNot: [],
     weFlagTheyDoNot: [],
     agreements: 0,
     unknownAlertTypes: [],
     errors: [],
+  };
+  /** Stamps the duration on every exit, so a failed run is still timed. */
+  const finish = (completed: boolean): CrossCheckResult => {
+    result.durationMs = now() - startedAtMs;
+    result.completed = completed;
+    return result;
   };
 
   let theirs: VideriAlertDto[] = [];
@@ -91,7 +132,7 @@ export async function crossCheckVideriAlerts(
     }
   } catch (error) {
     result.errors.push(`could not read Videri alerts: ${(error as Error).message}`);
-    return result;
+    return finish(false);
   }
 
   const theirOpen = theirs.filter((a) => a.isResolved !== true);
@@ -104,9 +145,20 @@ export async function crossCheckVideriAlerts(
   result.unknownAlertTypes = [...unknown];
 
   // Ours, keyed by canvas id.
-  const { rows } = await pool.query<{ device_id: string; rule_id: string }>(
-    `SELECT device_id, rule_id FROM alerts WHERE resolved_at IS NULL`,
-  );
+  //
+  // Caught rather than thrown for the same reason the read above is: a lane that
+  // threw recorded nothing at all, which is indistinguishable from a lane that
+  // never ran. The comparison result on this path is the same empty one the
+  // other failure path already returns — `completed: false` is what says so.
+  let rows: Array<{ device_id: string; rule_id: string }>;
+  try {
+    ({ rows } = await pool.query<{ device_id: string; rule_id: string }>(
+      `SELECT device_id, rule_id FROM alerts WHERE resolved_at IS NULL`,
+    ));
+  } catch (error) {
+    result.errors.push(`could not read our own alerts: ${(error as Error).message}`);
+    return finish(false);
+  }
   const ourRulesByDevice = new Map<string, Set<string>>();
   for (const row of rows) {
     const set = ourRulesByDevice.get(row.device_id) ?? new Set<string>();
@@ -146,15 +198,117 @@ export async function crossCheckVideriAlerts(
     }
   }
 
-  return result;
+  result.devicesCompared = new Set([
+    ...ourRulesByDevice.keys(),
+    ...theirConditions.keys(),
+  ]).size;
+
+  return finish(true);
+}
+
+/**
+ * The run row for this lane — pure, so every field is assertable without a pool.
+ *
+ * WHY THIS EXISTS
+ * The lane used to print `renderCrossCheck` and persist nothing: no poller_runs
+ * row, no table of its own. `poller_runs` therefore held zero rows for it, and
+ * zero rows for a lane that never records is evidence WE CANNOT TELL — not
+ * evidence it never ran. The registry had to declare it `observability: "none"`
+ * and pipeline-health reported UNKNOWN: honest, and useless. This makes it
+ * knowable.
+ *
+ * HOW THE FIELDS ARE FILLED, AND WHY
+ * This is not a device poller and its run row must not pretend to be one:
+ *
+ *   devicesTargeted — 0 BY NATURE. Nothing here contacts a device: it reads two
+ *     alert lists and compares them. The schema's word for this column is "how
+ *     much of the fleet did we manage to read", and the answer is none of it.
+ *     `devicesCompared` is a different quantity and is reported as a note rather
+ *     than smuggled into this column — the counts-must-not-lie rule. The column
+ *     is a NOT NULL integer, so the honest null this project prefers is not
+ *     available; the zero's meaning is stated in the note instead.
+ *   rowsWritten — 0 BY NATURE. The lane persists nothing anywhere. Zero here is
+ *     permanent, which is also why pipeline-health's rows-written collapse check
+ *     (it needs a prior non-zero) cannot fire on this lane.
+ *   batchesOk — 1 when the reconciliation COMPLETED, 0 when it did not. This is
+ *     the field that separates "we compared and found nothing to disagree about"
+ *     from "we could not look". Deliberately not the page count of the alerts
+ *     walk: a walk that fetched two pages and then failed returns before
+ *     comparing anything, so a non-zero there would claim a look that never
+ *     happened.
+ *   batchesFailed — the number of errors that stopped the comparison. Kept at 0
+ *     on success because a recent non-zero raises an operator-facing warning in
+ *     `api/freshness.ts`.
+ *   telemetryYield — null. No meaning for a lane that reads no telemetry, and
+ *     0.0 would read as "collected nothing", which is a different claim.
+ *   errors — real errors, then NOTES. `errors` is this project's note channel on
+ *     a run row (see `alerting/engine.ts` `toPollerRun`), and poller_runs is the
+ *     only per-cycle record we keep: until now the cross-check verdict existed
+ *     nowhere but stdout, so a disagreement was unfindable the next morning.
+ */
+export function toPollerRun(result: CrossCheckResult): PollerResult {
+  const notes: string[] = [];
+  if (result.completed) {
+    notes.push(
+      `compared ${result.devicesCompared} device(s): ${result.videriOpenAlerts} open Videri ` +
+        `alert(s) · ${result.agreements} agreement(s) · ${result.theyFlagWeDoNot.length} ` +
+        `they-only · ${result.weFlagTheyDoNot.length} we-only`,
+    );
+    if (result.theyFlagWeDoNot.length > 0) {
+      notes.push(
+        `${result.theyFlagWeDoNot.length} device(s) Videri flags and we do not — ` +
+          `possible blind spot on our side`,
+      );
+    }
+    if (result.weFlagTheyDoNot.length > 0) {
+      notes.push(
+        `${result.weFlagTheyDoNot.length} device(s) we flag and Videri does not — we may ` +
+          `be faster, or over-alerting`,
+      );
+    }
+    if (result.unknownAlertTypes.length > 0) {
+      notes.push(
+        `Videri returned alert type(s) we do not model: ${result.unknownAlertTypes.join(", ")}`,
+      );
+    }
+    notes.push(
+      "no device was targeted and no row was written: this lane compares two alert " +
+        "lists, so those counts are 0 by nature, not by failure",
+    );
+  } else {
+    // The counts on this path are all zero because nothing was compared. Saying
+    // so is the difference between an unknown and a clean bill of health.
+    notes.push(
+      "the comparison did not complete, so every count on this run is UNKNOWN rather " +
+        "than zero — 0 agreements here does not mean we and Videri agree",
+    );
+  }
+
+  return {
+    poller: CROSS_CHECK_POLLER,
+    startedAt: result.ranAt,
+    durationMs: result.durationMs,
+    devicesTargeted: 0,
+    rowsWritten: 0,
+    batchesOk: result.completed ? 1 : 0,
+    batchesFailed: result.errors.length,
+    telemetryYield: null,
+    errors: [...result.errors, ...notes],
+  };
 }
 
 export function renderCrossCheck(result: CrossCheckResult): string {
-  const lines = [
-    `  cross-check: ${result.videriOpenAlerts} open Videri alert(s) · ` +
-      `${result.agreements} agreement(s) · ` +
-      `${result.theyFlagWeDoNot.length} they-only · ${result.weFlagTheyDoNot.length} we-only`,
-  ];
+  // An incomplete run used to render as "0 open Videri alert(s) · 0 agreement(s)
+  // · 0 they-only · 0 we-only" with the error underneath — a clean bill of
+  // health printed over a read that never happened. The counts are unknown on
+  // that path, so it says so instead of printing them.
+  const lines = result.completed
+    ? [
+        `  cross-check: ${result.videriOpenAlerts} open Videri alert(s) · ` +
+          `${result.agreements} agreement(s) · ` +
+          `${result.theyFlagWeDoNot.length} they-only · ${result.weFlagTheyDoNot.length} we-only`,
+      ]
+    : [`  cross-check: DID NOT COMPLETE — no comparison was made, counts unknown`];
   if (result.theyFlagWeDoNot.length > 0) {
     lines.push(
       `  ! Videri flags ${result.theyFlagWeDoNot.length} device(s) we do not — possible blind spot: ` +

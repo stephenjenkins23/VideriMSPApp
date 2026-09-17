@@ -26,7 +26,16 @@ import { pollMetrics } from "./pollers/metrics.js";
 import { pollDataUsage } from "./pollers/data-usage.js";
 import { computeFleetSnapshot } from "./snapshot.js";
 import { runAlerting, seedRules, toPollerRun } from "../alerting/engine.js";
-import { crossCheckVideriAlerts, renderCrossCheck } from "../alerting/videri-cross-check.js";
+import {
+  crossCheckVideriAlerts,
+  renderCrossCheck,
+  toPollerRun as crossCheckRun,
+} from "../alerting/videri-cross-check.js";
+import {
+  runRetentionLane,
+  runPruneRawLane,
+  PRUNE_RAW_RETAIN_DAYS,
+} from "../db/retention.js";
 import { pollDeviceSettings } from "../compliance/settings-poller.js";
 import { runCompliance, seedTemplates, toPollerRun as complianceRun } from "../compliance/engine.js";
 import { pollTelemetrySlowLane, type TelemetrySlowLaneTarget } from "./pollers/telemetry-slowlane.js";
@@ -223,17 +232,20 @@ if (!dryRun) {
         await record(toPollerRun(result));
       },
     }),
-    // NOTE: this lane records NOTHING — it logs and returns. The registry
-    // declares that (observability: "none"), so pipeline-health reports it as
-    // UNKNOWN with the reason rather than as healthy or as 0%. It was silently
-    // absent from the health roster before, which is why "has it ever run?" was
-    // unanswerable. Calling record() here is the fix that would make it
-    // measurable; that is a behaviour change to the daemon and a separate call.
+    // Records a poller_runs row per cycle, like every other lane here. It used
+    // to log and return, which left poller_runs with zero rows for it — and zero
+    // rows for a lane that never records means WE CANNOT TELL whether it ran,
+    // not that it never ran. The verdict itself is still not persisted as data
+    // (that would be a table of its own); what the run row carries is that the
+    // lane ran, whether the comparison COMPLETED, and the verdict as notes —
+    // see `toPollerRun` in videri-cross-check.ts for why its device and row
+    // counts are 0 by nature.
     laneTask("alert-cross-check", {
       runOnStart: false,
       handler: async () => {
         const result = await crossCheckVideriAlerts(http, pool);
         console.log(renderCrossCheck(result));
+        await record(crossCheckRun(result));
       },
     }),
     // SLOW LANE. ops_get_settings is one synchronous command per device with a
@@ -353,24 +365,27 @@ if (!dryRun) {
         );
       },
     }),
-    // NOTE: both prune lanes record nothing and DELETE rows, so a successful
-    // prune and a prune that never happened are identical in the database. The
-    // registry declares them unobservable and pipeline-health reports them as
-    // UNKNOWN with that reason — not healthy, and not 0%.
+    // Both prune lanes now record a poller_runs row per cycle. They DELETE rows,
+    // so a successful prune and a prune that never happened used to be identical
+    // in the database — the run row is the only thing that can tell them apart,
+    // and `batchesOk` is what separates "checked, nothing was old enough" from
+    // "we could not look". WHAT they delete is unchanged; the orchestration and
+    // the field choices live in src/db/retention.ts, out of this un-importable
+    // entrypoint so they can be unit-tested.
     laneTask("retention", {
       runOnStart: false,
       handler: async () => {
-        const deleted = await repo.pruneTimeSeries({});
-        const parts = Object.entries(deleted).filter(([, n]) => n > 0)
-          .map(([k, n]) => `${k}=${n}`);
-        console.log(`[retention] ${parts.length ? parts.join(" ") : "nothing to prune"}`);
+        await runRetentionLane({ prune: () => repo.pruneTimeSeries({}), record, log });
       },
     }),
     laneTask("prune-raw", {
       runOnStart: false,
       handler: async () => {
-        const deleted = await repo.pruneRawPayloads(14);
-        if (deleted > 0) console.log(`[prune-raw] removed ${deleted} payload(s) older than 14 days`);
+        await runPruneRawLane({
+          prune: () => repo.pruneRawPayloads(PRUNE_RAW_RETAIN_DAYS),
+          record,
+          log,
+        });
       },
     }),
   );
