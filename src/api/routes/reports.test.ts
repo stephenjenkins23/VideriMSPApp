@@ -188,6 +188,9 @@ const action = (over: Partial<DeviceActionRow> & { id: number }): DeviceActionRo
   deviceName: "Screen 1",
   requestedValue: "70%",
   observedValue: "70%",
+  // Added with migration 011; see src/api/routes/audit.ts for how a null here is
+  // rendered (unknown WITH a reason, never 0 and never "unchanged").
+  previousValue: "39%",
   params: {},
   detail: {},
   outcome: "verified",

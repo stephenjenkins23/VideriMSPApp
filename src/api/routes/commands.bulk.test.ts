@@ -327,6 +327,41 @@ test("a committed batch writes one audit row per device â€” refusals included â€
   );
 });
 
+test("a bulk row records the before-value it read, and a refused device says it read none", async () => {
+  // A bulk push is the path where "what was it before?" matters most: 98 rows
+  // whose from-half is blank are 98 rows nobody can reconstruct. An attempted
+  // device carries its preflight reading, normalised to a percent; a device that
+  // was refused was never contacted, which is a DIFFERENT fact from a device
+  // whose preflight came back unreadable.
+  const { repo, logged } = stubRepo();
+  const app = await build({ repo, videri: stubVideri([100, 179]).videri });
+
+  await post(app, {
+    brightnessPercent: 70, deviceIds: FLEET.map((d) => d.id), confirm: true,
+  });
+
+  const byDevice = new Map(logged.map((e) => [e.deviceId, e]));
+  const attempted = byDevice.get("1000001")!;
+  assert.equal(attempted.outcome, "verified");
+  assert.equal(attempted.previousValue, "39%", "raw 100, in the requested value's unit");
+  assert.equal(attempted.previousValueBasis, "preflight_read");
+  assert.equal(attempted.detail!["originalRaw"], 100, "the raw reading is still recorded too");
+
+  const refused = byDevice.get("1000004")!;
+  assert.equal(refused.outcome, "refused");
+  assert.equal(refused.previousValue ?? null, null);
+  assert.notEqual(refused.previousValue as unknown, "0%");
+  assert.equal(refused.previousValueBasis, "not_attempted");
+
+  // Every row in the batch states a basis, whichever way it went.
+  for (const row of logged) {
+    assert.ok(
+      ["preflight_read", "preflight_unreadable", "not_attempted"].includes(row.previousValueBasis),
+      `${row.deviceId}: ${row.previousValueBasis}`,
+    );
+  }
+});
+
 test("a failing audit insert costs one honest flag, not the batch", async () => {
   const { repo, logged } = stubRepo({ logging: "error" });
   const app = await build({ repo, videri: stubVideri().videri });

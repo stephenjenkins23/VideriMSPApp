@@ -491,7 +491,8 @@ CREATE INDEX IF NOT EXISTS device_screen_verdict_latest_idx
 -- unknown is itself auditable).
 --
 -- `observed_value` NULL is "could not be read", never 0 — an unconfirmed
--- read-back is the whole reason the rollback cycle exists.
+-- read-back is the whole reason the rollback cycle exists. The same holds for
+-- `previous_value`: see migrations/011-audit-previous-value.sql.
 CREATE TABLE IF NOT EXISTS device_action_log (
   id              bigserial   PRIMARY KEY,
   action          text        NOT NULL,
@@ -499,6 +500,12 @@ CREATE TABLE IF NOT EXISTS device_action_log (
   device_id       text        NOT NULL,
   requested_value text,
   observed_value  text,
+  /* What the panel was at BEFORE we touched it, normalised to the SAME unit as
+     requested_value ('39%' against '70%', never raw 100 against '70%'). NULL is
+     "we do not know", never 0 and never "unchanged"; detail.previousValueBasis
+     carries the reason. Never backfilled — a guessed previous value is invented
+     history. Added by migration 011. */
+  previous_value  text,
   params          jsonb       NOT NULL DEFAULT '{}',
   detail          jsonb       NOT NULL DEFAULT '{}',
   /* Closed vocabulary, CHECKed: `outcome` is a filter on /api/audit, and a

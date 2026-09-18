@@ -35,11 +35,15 @@ import type { Pool } from "pg";
 import {
   DEVICE_ACTION_OUTCOMES,
   Repository,
+  auditSearchPattern,
   type DeviceActionFilters,
   type DeviceActionOutcome,
 } from "../../db/repository.js";
 import { buildServer } from "../server.js";
-import { auditFilterSql, foldAuditCounts, type AuditCountGroup } from "./audit.js";
+import {
+  AUDIT_ACTION_GROUPS, AUDIT_SEARCH_FIELDS, auditFilterSql, foldAuditCounts,
+  type AuditCountGroup,
+} from "./audit.js";
 
 const TOKEN = "test-token-at-least-16-chars";
 const auth = { authorization: `Bearer ${TOKEN}` };
@@ -69,6 +73,11 @@ test("the clause is character-for-character the one the list query sends", async
     actor: "api:stephen",
     outcome: ["failed", "rolled_back"],
     action: "brightness_write",
+    // Every filter, including the two added after this endpoint shipped: a new
+    // filter added to the list and not to the counts is exactly the drift this
+    // test exists to catch, and it can only catch it if the filter is HERE.
+    actions: ["brightness_write", "bulk_brightness_write"],
+    search: auditSearchPattern("denver"),
     since: AT("2026-09-01T00:00:00.000Z"),
     until: AT("2026-09-08T00:00:00.000Z"),
     page: 1,
@@ -91,6 +100,95 @@ test("the clause is character-for-character the one the list query sends", async
 
   assert.equal(mine.clause.replace(/\s+/g, " ").trim(), listClause);
   assert.deepEqual(mine.values, captured[0]!.values);
+  // Guard against the test passing vacuously: if either side stopped emitting a
+  // predicate the equality above would still hold, so pin the count.
+  assert.equal(mine.values.length, 8, "eight filters were set; eight must be bound");
+  assert.match(listClause, /ILIKE/, "the search predicate really is in the list query");
+  assert.match(listClause, /l\.action = ANY/, "and so is the action-group predicate");
+});
+
+test("every filter key on DeviceActionFilters appears in the shared clause builder", () => {
+  // The structural version of the test above: a filter added to the type and to
+  // the repository but not to `auditFilterSql` produces counts that silently
+  // ignore it while the list honours it.
+  const set: DeviceActionFilters = {
+    deviceId: "d", actor: "a", outcome: ["failed"], action: "x",
+    actions: ["x", "y"], search: "%z%",
+    since: AT("2026-09-01T00:00:00.000Z"), until: AT("2026-09-08T00:00:00.000Z"),
+    page: 1, limit: 50,
+  };
+  const keys = Object.keys(set).filter((k) => k !== "page" && k !== "limit");
+  const { values } = auditFilterSql(set);
+  assert.equal(
+    values.length,
+    keys.length,
+    `${keys.length} filters are set but only ${values.length} are bound: ${keys.join(", ")}`,
+  );
+});
+
+test("the counts query joins devices, so a text search counts the rows the list lists", async () => {
+  const { capture } = await get("?q=denver", [group({ count: 1 })], 1);
+  const sql = (capture.sql[0] ?? "").replace(/\s+/g, " ").trim();
+  // Unconditional and on the primary key: a LEFT JOIN on `devices.id` can
+  // neither drop nor duplicate an audit row, so `matched` is unaffected when no
+  // search was asked for.
+  assert.match(sql, /FROM device_action_log l LEFT JOIN devices d ON d\.id = l\.device_id/);
+  assert.match(sql, /d\.name ILIKE \$1/);
+  assert.deepEqual(capture.values[0], ["%denver%"]);
+});
+
+test("an action group is counted as the union of its actions, and broken down per action", async () => {
+  const { body, capture } = await get(
+    "?actionGroup=brightness",
+    [
+      group({ outcome: "verified", action: "brightness_write", count: 5 }),
+      group({ outcome: "verified", action: "bulk_brightness_write", count: 3 }),
+    ],
+    8,
+  );
+  assert.match(capture.sql[0] ?? "", /l\.action = ANY\(\$1::text\[\]\)/);
+  assert.deepEqual(capture.values[0], [["brightness_write", "bulk_brightness_write"]]);
+  assert.equal(body.data!.matched, 8, "the union, in one number");
+  // Still broken down per ACTION, so the total is visibly the sum of its parts
+  // rather than a number whose composition has to be taken on trust.
+  assert.deepEqual(body.data!.byAction, [
+    { action: "brightness_write", count: 5 },
+    { action: "bulk_brightness_write", count: 3 },
+  ]);
+  assert.deepEqual(body.data!.actionScope.groups["brightness"], [
+    "brightness_write", "bulk_brightness_write",
+  ]);
+});
+
+test("the new filters are echoed, including the group's expansion and the raw query", async () => {
+  const { body } = await get("?actionGroup=brightness&q=Denver", [group({ count: 1 })], 1);
+  assert.equal(body.data!.filters["actionGroup"], "brightness");
+  assert.deepEqual(body.data!.filters["actions"], [...AUDIT_ACTION_GROUPS["brightness"]!]);
+  assert.equal(body.data!.filters["q"], "Denver", "the human's words, not the ILIKE pattern");
+  assert.equal(body.data!.searchScope.query, "Denver");
+  assert.deepEqual(body.data!.searchScope.fields, [...AUDIT_SEARCH_FIELDS]);
+});
+
+test("a search that matches nothing is counted as filtered-out, not as an empty log", async () => {
+  const { body } = await get("?q=Denver", [], 40);
+  assert.equal(body.data!.matched, 0);
+  assert.match(body.data!.emptyReason ?? "", /No logged action matches these filters/);
+  assert.match(body.data!.emptyReason ?? "", /holds 40 action\(s\)/);
+});
+
+test("action and actionGroup are refused together here too, exactly as on the list", async () => {
+  const { statusCode, body } = await get("?action=brightness_write&actionGroup=brightness");
+  assert.equal(statusCode, 400);
+  assert.match(body.message ?? "", /narrows to the overlap rather than the union/);
+});
+
+test("an unknown group and a blank search are refused, never counted as zero", async () => {
+  const bad = await get("?actionGroup=brigthness");
+  assert.equal(bad.statusCode, 400);
+  assert.match(bad.body.message ?? "", /unknown actionGroup/);
+  const blank = await get("?q=%20");
+  assert.equal(blank.statusCode, 400);
+  assert.match(blank.body.message ?? "", /blank search is not a filter/);
 });
 
 test("the window is half-open, so adjacent windows cannot double-count a row", () => {
@@ -238,7 +336,8 @@ interface CountsBody {
     countedAt: string;
     filters: Record<string, unknown>;
     outcomeScope: { counted: string[]; excludedByFilter: string[]; note: string };
-    actionScope: { note: string };
+    actionScope: { note: string; groups: Record<string, string[]> };
+    searchScope: { query: string | null; fields: string[]; note: string };
     retention: { retainDays: number; enforced: boolean };
   };
   meta?: { freshness: { state: string }; page?: unknown };
@@ -341,6 +440,11 @@ test("the filters reach the SQL and are echoed back, so the two endpoints can be
     actor: "api:stephen",
     outcome: ["failed", "rolled_back"],
     action: "brightness_write",
+    // Absent filters echo as null rather than being omitted: a missing key is
+    // ambiguous between "not sent" and "we dropped it".
+    actionGroup: null,
+    actions: null,
+    q: null,
     since: null,
     until: null,
   });

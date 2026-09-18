@@ -35,7 +35,7 @@ import {
 } from "../../videri/telemetry.js";
 import { verifyBlackScreenClaim } from "../../intelligence/screen-verify.js";
 import { auditOutcomeForBrightness, resolveActor } from "./audit.js";
-import type { DeviceActionEntry } from "../../db/repository.js";
+import type { DeviceActionEntry, PreviousValueBasis } from "../../db/repository.js";
 import {
   dedupeDeviceIds, executeBulkApply, planBulkApply,
   BULK_APPLICABLE_ACTIONS, BULK_CONCURRENCY, BULK_MAX_DEVICES,
@@ -154,6 +154,33 @@ const BulkBrightnessBody = z.object({
 });
 
 /**
+ * The from-half of a brightness audit row: what the panel was at BEFORE we
+ * wrote, normalised to a percent so it sits in the same unit as
+ * `requestedValue` — '39%' against '70%', never raw 100 against '70%', which is
+ * what `detail.originalRaw` alone used to give the audit view.
+ *
+ * `originalRaw === null` happens in exactly one place: the preflight read came
+ * back unreadable, which is the state that REFUSES the write. So the pair is
+ * (null, 'preflight_unreadable') and the audit view prints why rather than a 0 —
+ * 0 on this scale is a display-off screen, and claiming we found one dark is a
+ * fabricated finding.
+ *
+ * `detail.originalRaw` keeps carrying the raw value as well. The normalised
+ * column is for reading; the raw number is what you quote at the vendor.
+ */
+function previousBrightness(originalRaw: number | null): {
+  previousValue: string | null;
+  previousValueBasis: PreviousValueBasis;
+} {
+  return originalRaw === null
+    ? { previousValue: null, previousValueBasis: "preflight_unreadable" }
+    : {
+      previousValue: `${brightnessPercentFromRaw(originalRaw)}%`,
+      previousValueBasis: "preflight_read",
+    };
+}
+
+/**
  * Write one audit row for a device action, and NEVER let it affect the action.
  *
  * `recordDeviceAction` does not throw (see repository.ts); the failure comes
@@ -247,6 +274,9 @@ export async function registerCommandRoutes(app: FastifyInstance, ctx: ApiContex
         action: "device_command", verb: command, deviceId: request.params.id,
         outcome: "refused", startedAt: new Date(), durationMs: 0,
         params: raw ?? {},
+        /* Nothing was sent, so nothing was read. `not_attempted` is the honest
+           basis: the screen's before-value is unknown BECAUSE we declined. */
+        previousValue: null, previousValueBasis: "not_attempted",
         detail: { reason: "command_not_allowed" },
         error: `"${command}" is not on the allowlist.`,
       });
@@ -265,6 +295,7 @@ export async function registerCommandRoutes(app: FastifyInstance, ctx: ApiContex
         action: "device_command", verb: command, deviceId: request.params.id,
         outcome: "refused", startedAt: new Date(), durationMs: 0,
         params: raw ?? {},
+        previousValue: null, previousValueBasis: "not_attempted",
         detail: { reason: "confirmation_required", risk: spec.risk },
       });
       return reply.code(409).send({
@@ -292,7 +323,8 @@ export async function registerCommandRoutes(app: FastifyInstance, ctx: ApiContex
         await audit(request, {
           action: "device_command", verb: command, deviceId: request.params.id,
           outcome: "refused", startedAt: new Date(), durationMs: 0,
-          params: raw ?? {}, detail: { reason: "device_not_found" },
+          params: raw ?? {}, previousValueBasis: "not_attempted",
+          detail: { reason: "device_not_found" },
         });
       }
       return reply.code(404).send({ error: "not_found", message: "No such device." });
@@ -303,7 +335,8 @@ export async function registerCommandRoutes(app: FastifyInstance, ctx: ApiContex
         await audit(request, {
           action: "device_command", verb: command, deviceId: request.params.id,
           outcome: "refused", startedAt: new Date(), durationMs: 0,
-          params: raw ?? {}, detail: { reason: "not_addressable" },
+          params: raw ?? {}, previousValueBasis: "not_attempted",
+          detail: { reason: "not_addressable" },
         });
       }
       return reply.code(409).send({
@@ -320,7 +353,8 @@ export async function registerCommandRoutes(app: FastifyInstance, ctx: ApiContex
         await audit(request, {
           action: "device_command", verb: command, deviceId: device.id,
           outcome: "refused", startedAt: new Date(), durationMs: 0,
-          params: raw ?? {}, detail: { reason: "bad_params" },
+          params: raw ?? {}, previousValueBasis: "not_attempted",
+          detail: { reason: "bad_params" },
           error: (error as Error).message,
         });
       }
@@ -384,6 +418,11 @@ export async function registerCommandRoutes(app: FastifyInstance, ctx: ApiContex
           outcome: ok ? "applied" : "failed",
           requestedValue: typeof commandParams["arg"] === "string" ? commandParams["arg"] : null,
           observedValue: null,
+          /* This endpoint sends and reports; it never reads the device first, so
+             there is no before-value to record and the row says so instead of
+             leaving a null a reader could take for "unchanged". */
+          previousValue: null,
+          previousValueBasis: "not_read",
           params: commandParams,
           detail: { responseCode: code, risk: spec.risk, verified: false },
           startedAt: new Date(startedAt), durationMs: Date.now() - startedAt,
@@ -416,6 +455,7 @@ export async function registerCommandRoutes(app: FastifyInstance, ctx: ApiContex
           action: "device_command", verb: command, deviceId: device.id,
           outcome: "failed",
           requestedValue: typeof commandParams["arg"] === "string" ? commandParams["arg"] : null,
+          previousValue: null, previousValueBasis: "not_read",
           params: commandParams, detail: { reason: "transport_error", risk: spec.risk },
           startedAt: new Date(startedAt), durationMs: Date.now() - startedAt,
           error: (error as Error).message,
@@ -463,6 +503,8 @@ export async function registerCommandRoutes(app: FastifyInstance, ctx: ApiContex
         action: "brightness_write", verb: "set_brightness", deviceId: request.params.id,
         outcome: "refused",
         requestedValue: `${body.data.brightnessPercent}%`,
+        /* Refused before any device call, so nothing was read. Not a zero. */
+        previousValue: null, previousValueBasis: "not_attempted",
         detail: { reason: "confirmation_required", mode: body.data.mode },
         startedAt: new Date(), durationMs: 0,
       });
@@ -477,6 +519,7 @@ export async function registerCommandRoutes(app: FastifyInstance, ctx: ApiContex
       await audit(request, {
         action: "brightness_write", verb: "set_brightness", deviceId: request.params.id,
         outcome: "refused", requestedValue: `${body.data.brightnessPercent}%`,
+        previousValue: null, previousValueBasis: "not_attempted",
         detail: { reason: "device_not_found", mode: body.data.mode },
         startedAt: new Date(), durationMs: 0,
       });
@@ -487,6 +530,7 @@ export async function registerCommandRoutes(app: FastifyInstance, ctx: ApiContex
       await audit(request, {
         action: "brightness_write", verb: "set_brightness", deviceId: device.id,
         outcome: "refused", requestedValue: `${body.data.brightnessPercent}%`,
+        previousValue: null, previousValueBasis: "not_attempted",
         detail: { reason: "not_addressable", mode: body.data.mode },
         startedAt: new Date(), durationMs: 0,
       });
@@ -532,6 +576,11 @@ export async function registerCommandRoutes(app: FastifyInstance, ctx: ApiContex
         outcome: live.applied ? "applied" : "failed",
         requestedValue: `${live.requestedPercent}%`,
         observedValue: live.observedPercent === null ? null : `${live.observedPercent}%`,
+        /* The drag path deliberately has no preflight — rolling back mid-drag
+           would fight the operator — so it never learns the before-value. Stated
+           rather than left null: a slider row that showed "from 0%" would claim
+           we found the screen dark. */
+        previousValue: null, previousValueBasis: "not_read",
         params: { arg: `set_brightness:=${live.requestedRaw}` },
         detail: {
           mode: "live", responseCode: live.code,
@@ -568,6 +617,9 @@ export async function registerCommandRoutes(app: FastifyInstance, ctx: ApiContex
       requestedValue: `${result.requestedPercent}%`,
       observedValue:
         result.observedRaw === null ? null : `${brightnessPercentFromRaw(result.observedRaw)}%`,
+      // The preflight reading, in the requested value's own unit: this is the
+      // row that finally answers "from what, to what".
+      ...previousBrightness(result.originalRaw),
       params: { arg: `set_brightness:=${result.requestedRaw}` },
       detail: {
         mode: "verify", state: result.state,
@@ -1116,6 +1168,13 @@ export async function registerCommandRoutes(app: FastifyInstance, ctx: ApiContex
             event.result && event.result.observedRaw !== null
               ? `${brightnessPercentFromRaw(event.result.observedRaw)}%`
               : null,
+          /* A refused device was never contacted, so it has no before-value to
+             record — distinct from a device whose preflight came back unreadable,
+             which is the reason its own write was refused. Two different facts,
+             two different bases, neither of them a 0. */
+          ...(event.refusedBecause !== null
+            ? { previousValue: null, previousValueBasis: "not_attempted" as const }
+            : previousBrightness(event.result?.originalRaw ?? null)),
           params:
             event.refusedBecause === null
               ? { arg: `set_brightness:=${event.result?.requestedRaw ?? ""}` }

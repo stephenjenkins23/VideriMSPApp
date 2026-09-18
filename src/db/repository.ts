@@ -83,6 +83,32 @@ export const DEVICE_ACTION_OUTCOMES: readonly DeviceActionOutcome[] = [
 export const AUDIT_RETAIN_DAYS = 730;
 export const AUDIT_MIN_RETAIN_DAYS = 365;
 
+/**
+ * HOW we know (or do not know) the value the device was at before the action.
+ *
+ * `previous_value` is nullable, and a null there is useless without this: a
+ * reader has to tell "we read the panel and it said 39%" from "we tried to read
+ * it and the device would not say" from "this action never reads prior state" —
+ * and all three from "this row was written before the column existed". So the
+ * basis is REQUIRED on every entry (the compiler is the enforcement) and is
+ * folded into `detail` by `recordDeviceAction`, which is what makes a previous
+ * value without a stated basis impossible to originate in the app.
+ *
+ *   preflight_read        — we read the panel first; `previousValue` is that
+ *                           reading, normalised to the requested value's unit.
+ *   preflight_unreadable  — we tried to read it and could not. The whole reason
+ *                           the rollback guard exists; NOT a zero.
+ *   not_read              — this path does not read prior state before acting
+ *                           (the generic command endpoint sends and reports),
+ *                           so no previous value was ever available to record.
+ *   not_attempted         — we refused before touching the device, so there was
+ *                           nothing to read.
+ */
+export const PREVIOUS_VALUE_BASES = [
+  "preflight_read", "preflight_unreadable", "not_read", "not_attempted",
+] as const;
+export type PreviousValueBasis = (typeof PREVIOUS_VALUE_BASES)[number];
+
 export interface DeviceActionEntry {
   /** Our operation vocabulary: 'brightness_write' | 'device_command' | … */
   action: string;
@@ -92,6 +118,14 @@ export interface DeviceActionEntry {
   /** Requested and read-back values as text. NULL = not applicable or UNREADABLE. */
   requestedValue?: string | null;
   observedValue?: string | null;
+  /**
+   * What the device was at BEFORE this action, in the SAME unit as
+   * `requestedValue` — '39%' against '70%', never raw 100 against '70%'. NULL is
+   * "unknown", never 0 and never "unchanged"; `previousValueBasis` says which
+   * kind of unknown and is required alongside it.
+   */
+  previousValue?: string | null;
+  previousValueBasis: PreviousValueBasis;
   params?: Record<string, unknown>;
   detail?: Record<string, unknown>;
   outcome: DeviceActionOutcome;
@@ -113,6 +147,13 @@ export interface DeviceActionRow {
   deviceName: string | null;
   requestedValue: string | null;
   observedValue: string | null;
+  /**
+   * The column, exactly as stored: normalised to `requestedValue`'s unit, or
+   * null for "unknown". Read it through `describePreviousValue` (api/routes/
+   * audit.ts) rather than rendering it raw — a bare null here is the thing that
+   * gets mistaken for 0 or for "no change", and the reason lives in `detail`.
+   */
+  previousValue: string | null;
   params: Record<string, unknown>;
   detail: Record<string, unknown>;
   outcome: DeviceActionOutcome;
@@ -174,12 +215,46 @@ export interface SuppressionRow {
   revokedReason: string | null;
 }
 
+/**
+ * Turn a human's search box into an ILIKE pattern. Pure.
+ *
+ * Lives HERE, next to the filters, because the list query and
+ * `/api/audit/counts` must bind the identical string: if one of them wrapped
+ * the wildcards and the other did not, the counts printed beside a result set
+ * would describe a different set, which is the single failure the counts
+ * endpoint was built to remove.
+ *
+ * The user's own `%`, `_` and `\` are ESCAPED, not passed through. A caller
+ * searching for `100%` means the three characters, not "anything starting with
+ * 100"; an audit search that silently widens is how you conclude a device was
+ * touched when the row you matched belongs to another one.
+ */
+export function auditSearchPattern(query: string): string {
+  const escaped = query.trim().replace(/[\\%_]/g, (ch) => `\\${ch}`);
+  return `%${escaped}%`;
+}
+
 export interface DeviceActionFilters {
   deviceId?: string | undefined;
   actor?: string | undefined;
   /** Any of these outcomes. Empty/absent means every outcome. */
   outcome?: DeviceActionOutcome[] | undefined;
   action?: string | undefined;
+  /**
+   * Any of these actions — the set a named action GROUP expands to, so "every
+   * brightness change on this device" is one call rather than two plus a
+   * client-side merge (`brightness_write` from the single-device slider,
+   * `bulk_brightness_write` from a batch push). Expanded by the route against a
+   * closed map; the repository just matches the list it is handed.
+   */
+  actions?: string[] | undefined;
+  /**
+   * Free-text match over WHO acted and WHICH SCREEN it was — device id, device
+   * name, group name, location, actor. Already wrapped in wildcards and escaped
+   * by `auditSearchPattern`; the repository binds it as-is so the list and the
+   * counts cannot differ on what the pattern means.
+   */
+  search?: string | undefined;
   /** Half-open window [since, until) on `started_at`. */
   since?: Date | undefined;
   until?: Date | undefined;
@@ -195,6 +270,7 @@ interface DeviceActionSqlRow {
   device_name: string | null;
   requested_value: string | null;
   observed_value: string | null;
+  previous_value: string | null;
   params: Record<string, unknown> | null;
   detail: Record<string, unknown> | null;
   outcome: string;
@@ -2228,9 +2304,10 @@ export class Repository {
     try {
       const { rows } = await this.pool.query<{ id: string }>(
         `INSERT INTO device_action_log
-           (action, verb, device_id, requested_value, observed_value, params, detail,
+           (action, verb, device_id, requested_value, observed_value, previous_value,
+            params, detail,
             outcome, actor, actor_ip, started_at, finished_at, duration_ms, error)
-         VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7::jsonb,$8,$9,$10,$11,$12,$13,$14)
+         VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8::jsonb,$9,$10,$11,$12,$13,$14,$15)
          RETURNING id`,
         [
           entry.action,
@@ -2238,8 +2315,13 @@ export class Repository {
           entry.deviceId,
           entry.requestedValue ?? null,
           entry.observedValue ?? null,
+          entry.previousValue ?? null,
           JSON.stringify(entry.params ?? {}),
-          JSON.stringify(entry.detail ?? {}),
+          // The basis is written LAST into `detail` so a caller who happens to
+          // put a `previousValueBasis` in its own detail blob cannot override
+          // the typed field the column was written from. The pair (value, basis)
+          // is always stored together — that is the point of taking both.
+          JSON.stringify({ ...(entry.detail ?? {}), previousValueBasis: entry.previousValueBasis }),
           entry.outcome,
           entry.actor,
           entry.actorIp ?? null,
@@ -2285,6 +2367,19 @@ export class Repository {
     if (filters.actor) where.push(`l.actor = ${bind(filters.actor)}`);
     if (filters.outcome) where.push(`l.outcome = ANY(${bind(filters.outcome)}::text[])`);
     if (filters.action) where.push(`l.action = ${bind(filters.action)}`);
+    if (filters.actions) where.push(`l.action = ANY(${bind(filters.actions)}::text[])`);
+    // Free text over WHO and WHICH SCREEN only. One bind reused across the
+    // columns so the pattern cannot mean two things in one query, and the device
+    // columns come from the same LEFT JOIN the page already uses — a row whose
+    // device is gone still matches on its id.
+    if (filters.search) {
+      const pattern = bind(filters.search);
+      where.push(
+        `(l.device_id ILIKE ${pattern} OR d.name ILIKE ${pattern} ` +
+          `OR d.group_name ILIKE ${pattern} OR d.location ILIKE ${pattern} ` +
+          `OR l.actor ILIKE ${pattern})`,
+      );
+    }
     // Half-open [since, until): an audit window that includes both endpoints
     // double-counts a row when two windows are read back to back.
     if (filters.since) where.push(`l.started_at >= ${bind(filters.since)}`);
@@ -2292,8 +2387,14 @@ export class Repository {
     const clause = where.length > 0 ? `WHERE ${where.join(" AND ")}` : "";
 
     const totals = await this.pool.query<{ n: string; oldest: Date | null; newest: Date | null }>(
+      // The join is here as well as on the page query, and unconditionally:
+      // `search` reaches into `devices`, and a LEFT JOIN on that table's primary
+      // key cannot add or drop a row, so the total counts exactly the rows the
+      // page pages through whether or not a search was asked for.
       `SELECT count(*)::text AS n, MIN(l.started_at) AS oldest, MAX(l.started_at) AS newest
-         FROM device_action_log l ${clause}`,
+         FROM device_action_log l
+         LEFT JOIN devices d ON d.id = l.device_id
+         ${clause}`,
       // A copy: the same array then gains LIMIT/OFFSET for the page query, and a
       // shared reference is the sort of aliasing that only bites under a retry.
       [...values],
@@ -2303,7 +2404,8 @@ export class Repository {
     const offset = (filters.page - 1) * filters.limit;
     const { rows } = await this.pool.query<DeviceActionSqlRow>(
       `SELECT l.id::text AS id, l.action, l.verb, l.device_id, d.name AS device_name,
-              l.requested_value, l.observed_value, l.params, l.detail, l.outcome,
+              l.requested_value, l.observed_value, l.previous_value,
+              l.params, l.detail, l.outcome,
               l.actor, l.actor_ip, l.started_at, l.finished_at, l.duration_ms, l.error
          FROM device_action_log l
          LEFT JOIN devices d ON d.id = l.device_id
@@ -2322,6 +2424,7 @@ export class Repository {
         deviceName: r.device_name,
         requestedValue: r.requested_value,
         observedValue: r.observed_value,
+        previousValue: r.previous_value,
         params: r.params ?? {},
         detail: r.detail ?? {},
         outcome: r.outcome as DeviceActionOutcome,

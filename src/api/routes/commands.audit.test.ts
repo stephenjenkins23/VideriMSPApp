@@ -236,6 +236,185 @@ test("a device already at the requested value is logged as no_change, not as a w
   assert.deepEqual(stub.args, ["get_brightness"], "nothing was written");
 });
 
+// ─── 2b. the from-half of from→to, and the reason when there isn't one ───────
+
+test("a verified write records what the panel was at BEFORE it, in the same unit as the request", async () => {
+  // Preflight 100 raw = 39%, requested 70% = 179 raw. Before this column the
+  // pair was '100' (raw) against '70%' (percent) and the audit view showed
+  // "100 → 70%".
+  const { repo, logged } = stubRepo();
+  const app = await build({ videri: stubVideri({ reads: [100, 179] }).videri, repo });
+
+  await brightness(app, { brightnessPercent: 70, confirm: true });
+  const row = logged[0]!;
+  assert.equal(row.previousValue, "39%");
+  assert.equal(row.previousValueBasis, "preflight_read");
+  assert.equal(row.requestedValue, "70%");
+  assert.equal(row.observedValue, "70%");
+  // One unit across all three, so from→to is readable without a conversion.
+  for (const value of [row.previousValue, row.requestedValue, row.observedValue]) {
+    assert.match(value!, /^\d+%$/, value ?? "null");
+  }
+  // And the raw reading is still there for the vendor argument.
+  assert.equal(row.detail!["originalRaw"], 100);
+});
+
+test("a rolled-back write records the value it was restored TO as the previous value", async () => {
+  const { repo, logged } = stubRepo();
+  const app = await build({ videri: stubVideri({ reads: [100, 100, 100] }).videri, repo });
+
+  await brightness(app, { brightnessPercent: 70, confirm: true });
+  const row = logged[0]!;
+  assert.equal(row.outcome, "rolled_back");
+  assert.equal(row.previousValue, "39%");
+  assert.equal(row.previousValueBasis, "preflight_read");
+  // The row now says the whole story: it was at 39%, we asked for 70%, it
+  // reported 39%, and we put it back to 39%.
+  assert.equal(row.observedValue, "39%");
+});
+
+test("an unreadable preflight records NO previous value, and says why — never 0%", async () => {
+  const { repo, logged } = stubRepo();
+  const app = await build({ videri: stubVideri({ reads: [null] }).videri, repo });
+
+  await brightness(app, { brightnessPercent: 70, confirm: true });
+  const row = logged[0]!;
+  assert.equal(row.outcome, "refused");
+  assert.equal(row.previousValue ?? null, null);
+  assert.notEqual(row.previousValue as unknown, "0%");
+  assert.notEqual(row.previousValue as unknown, 0);
+  // The basis is what turns that null into an answer rather than a gap: this is
+  // "the device would not tell us", which is WHY the write was refused.
+  assert.equal(row.previousValueBasis, "preflight_unreadable");
+});
+
+test("a no_change row still records the previous value — it is the requested one", async () => {
+  const { repo, logged } = stubRepo();
+  const app = await build({ videri: stubVideri({ reads: [179] }).videri, repo });
+
+  await brightness(app, { brightnessPercent: 70, confirm: true });
+  assert.equal(logged[0]!.outcome, "no_change");
+  assert.equal(logged[0]!.previousValue, "70%");
+  assert.equal(logged[0]!.previousValueBasis, "preflight_read");
+});
+
+test("the LIVE drag path records that it never read the panel first, not a blank", async () => {
+  // The drag path has no preflight on purpose — rolling back mid-drag would
+  // fight the operator — so it genuinely does not know the before-value. That is
+  // `not_read`, which reads differently from "we tried and could not".
+  const { repo, logged } = stubRepo();
+  const app = await build({ videri: stubVideri({ reads: [179] }).videri, repo });
+
+  const { statusCode } = await brightness(app, {
+    brightnessPercent: 70, confirm: true, mode: "live",
+  });
+  assert.equal(statusCode, 200);
+  const row = logged[0]!;
+  assert.equal(row.detail!["mode"], "live");
+  assert.equal(row.previousValue ?? null, null);
+  assert.equal(row.previousValueBasis, "not_read");
+  assert.notEqual(row.previousValueBasis, "preflight_unreadable");
+});
+
+test("a refusal that never reached the device records not_attempted, a third distinct fact", async () => {
+  const { repo, logged } = stubRepo();
+  const stub = stubVideri({ reads: [100] });
+  const app = await build({ videri: stub.videri, repo });
+
+  await brightness(app, { brightnessPercent: 70 });
+  assert.equal(stub.args.length, 0, "no device call at all");
+  assert.equal(logged[0]!.previousValue ?? null, null);
+  assert.equal(logged[0]!.previousValueBasis, "not_attempted");
+});
+
+test("the generic command endpoint records not_read — it never reads prior state", async () => {
+  const { repo, logged } = stubRepo();
+  const app = await build({
+    videri: { async request() { return { response_code: "SUCCESS", others: {} }; } } as unknown as VideriHttp,
+    repo,
+  });
+
+  const res = await app.inject({
+    method: "POST", url: "/api/devices/1000152/command", headers: auth,
+    payload: { command: "reboot_device", confirm: true },
+  });
+  assert.equal(res.statusCode, 200);
+  assert.equal(logged[0]!.previousValue ?? null, null);
+  assert.equal(logged[0]!.previousValueBasis, "not_read");
+});
+
+test("EVERY audited write path states a basis — the pair is never half-written", async () => {
+  // A previous value with no basis is a null nobody can interpret, and a basis
+  // is required on the entry type precisely so a new write path cannot ship
+  // without one. This walks the paths that log and checks all of them.
+  const paths: Array<() => Promise<DeviceActionEntry[]>> = [
+    async () => {
+      const { repo, logged } = stubRepo();
+      const app = await build({ videri: stubVideri({ reads: [100, 179] }).videri, repo });
+      await brightness(app, { brightnessPercent: 70, confirm: true });
+      return logged;
+    },
+    async () => {
+      const { repo, logged } = stubRepo();
+      const app = await build({ videri: stubVideri({ reads: [100, 179] }).videri, repo });
+      await brightness(app, { brightnessPercent: 70, confirm: true, mode: "live" });
+      return logged;
+    },
+    async () => {
+      const { repo, logged } = stubRepo();
+      const app = await build({ videri: stubVideri({ reads: [null] }).videri, repo });
+      await brightness(app, { brightnessPercent: 70, confirm: true });
+      return logged;
+    },
+    async () => {
+      const { repo, logged } = stubRepo({ addressable: false });
+      const app = await build({ videri: stubVideri({ reads: [] }).videri, repo });
+      await brightness(app, { brightnessPercent: 70, confirm: true });
+      return logged;
+    },
+    async () => {
+      const { repo, logged } = stubRepo();
+      const app = await build({ videri: stubVideri({ reads: [] }).videri, repo });
+      await app.inject({
+        method: "POST", url: "/api/devices/1000152/command", headers: auth,
+        payload: { command: "su_shell_cmd", confirm: true, params: { cmd: "id" } },
+      });
+      return logged;
+    },
+    async () => {
+      const { repo, logged } = stubRepo();
+      const app = await build({
+        videri: { async request() { throw new Error("socket hang up"); } } as unknown as VideriHttp,
+        repo,
+      });
+      await app.inject({
+        method: "POST", url: "/api/devices/1000152/command", headers: auth,
+        payload: { command: "reboot_device", confirm: true },
+      });
+      return logged;
+    },
+  ];
+
+  let rows = 0;
+  for (const run of paths) {
+    const logged = await run();
+    assert.ok(logged.length > 0, "this path is supposed to log");
+    for (const row of logged) {
+      rows += 1;
+      assert.ok(
+        ["preflight_read", "preflight_unreadable", "not_read", "not_attempted"]
+          .includes(row.previousValueBasis),
+        `${row.action}/${row.detail?.["reason"] ?? row.outcome} has no basis`,
+      );
+      // And a value only ever accompanies the basis that can justify one.
+      if (row.previousValue !== null && row.previousValue !== undefined) {
+        assert.equal(row.previousValueBasis, "preflight_read", row.action);
+      }
+    }
+  }
+  assert.equal(rows, paths.length, "one row per path, and every one of them checked");
+});
+
 // ─── 3. refusals that never reach a device are still logged ──────────────────
 
 test("a brightness write without confirm is logged as refused", async () => {

@@ -26,7 +26,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { Pool } from "pg";
-import { AUDIT_MIN_RETAIN_DAYS, AUDIT_RETAIN_DAYS, Repository } from "./repository.js";
+import {
+  AUDIT_MIN_RETAIN_DAYS, AUDIT_RETAIN_DAYS, Repository, auditSearchPattern,
+} from "./repository.js";
 
 interface Captured { sql: string; values: unknown[] }
 
@@ -61,6 +63,7 @@ test("an action is inserted with every audit column bound in order", async () =>
   const result = await new Repository(pool).recordDeviceAction({
     action: "brightness_write", verb: "set_brightness", deviceId: "1000152",
     requestedValue: "70%", observedValue: null,
+    previousValue: "39%", previousValueBasis: "preflight_read",
     params: { arg: "set_brightness:=179" }, detail: { mode: "verify" },
     outcome: "rolled_back", actor: "api:stephen", actorIp: "10.0.0.4",
     startedAt, finishedAt, durationMs: 4000, error: "did not verify",
@@ -70,23 +73,74 @@ test("an action is inserted with every audit column bound in order", async () =>
   assert.match(sql, /INSERT INTO device_action_log/);
   assert.match(sql, /RETURNING id/);
   assert.deepEqual(captured[0]!.values, [
-    "brightness_write", "set_brightness", "1000152", "70%", null,
-    '{"arg":"set_brightness:=179"}', '{"mode":"verify"}',
+    "brightness_write", "set_brightness", "1000152", "70%", null, "39%",
+    '{"arg":"set_brightness:=179"}',
+    // The basis is folded into `detail` by the repository, so the pair
+    // (previous_value, how we know it) is always stored together.
+    '{"mode":"verify","previousValueBasis":"preflight_read"}',
     "rolled_back", "api:stephen", "10.0.0.4", startedAt, finishedAt, 4000, "did not verify",
   ]);
   assert.deepEqual(result, { id: 42, error: null });
+});
+
+test("previous_value is bound in the requested value's unit, next to it and not inside detail", async () => {
+  // The bug this column exists to close: the from→to pair used to live only in
+  // `detail.originalRaw`, on the device's raw 0-255 scale, beside a
+  // `requested_value` expressed as a percent — so the audit view showed
+  // "100 → 70%". A first-class column in ONE unit is the fix, and the insert
+  // must name it explicitly rather than relying on column order.
+  const { pool, captured } = stubPool({ rows: [{ id: "5" }] });
+  await new Repository(pool).recordDeviceAction({
+    action: "brightness_write", deviceId: "d1", outcome: "verified",
+    requestedValue: "70%", observedValue: "70%",
+    previousValue: "39%", previousValueBasis: "preflight_read",
+    actor: "api:token", startedAt: new Date(),
+  });
+  const sql = flat(captured[0]!.sql);
+  assert.match(sql, /\(action, verb, device_id, requested_value, observed_value, previous_value,/);
+  const values = captured[0]!.values;
+  assert.equal(values[3], "70%", "requested");
+  assert.equal(values[4], "70%", "observed");
+  assert.equal(values[5], "39%", "previous — the same unit as the other two");
+});
+
+test("a caller cannot override the typed basis from inside its own detail blob", async () => {
+  // The pair (value, basis) is the whole contract: a stray `previousValueBasis`
+  // in a detail blob claiming we read the panel when the typed field says we
+  // never attempted it would make the audit view print a reason that is false.
+  const { pool, captured } = stubPool({ rows: [{ id: "6" }] });
+  await new Repository(pool).recordDeviceAction({
+    action: "device_command", deviceId: "d1", outcome: "refused",
+    previousValueBasis: "not_attempted",
+    detail: { previousValueBasis: "preflight_read", reason: "device_not_found" },
+    actor: "api:token", startedAt: new Date(),
+  });
+  const detail = JSON.parse(captured[0]!.values[7] as string) as Record<string, unknown>;
+  assert.equal(detail["previousValueBasis"], "not_attempted");
+  assert.equal(detail["reason"], "device_not_found", "the rest of the caller's detail survives");
 });
 
 test("an unreadable value is stored as NULL, never as a zero", async () => {
   const { pool, captured } = stubPool({ rows: [{ id: "1" }] });
   await new Repository(pool).recordDeviceAction({
     action: "brightness_write", deviceId: "d1", outcome: "refused",
-    requestedValue: "70%", actor: "api:token", startedAt: new Date(),
+    requestedValue: "70%", previousValueBasis: "preflight_unreadable",
+    actor: "api:token", startedAt: new Date(),
   });
   const values = captured[0]!.values;
   // observed_value is the 5th column; a 0 here would read as a blanked panel.
   assert.equal(values[4], null);
   assert.notEqual(values[4], 0);
+  // And the same for previous_value, the 6th. An unreadable preflight is the
+  // state that REFUSES the write, so this is the common case, not an edge.
+  assert.equal(values[5], null);
+  assert.notEqual(values[5], 0);
+  assert.notEqual(values[5], "0%");
+  assert.equal(
+    JSON.parse(values[7] as string).previousValueBasis,
+    "preflight_unreadable",
+    "a null previous value is useless without the reason stored beside it",
+  );
 });
 
 test("recordDeviceAction NEVER throws — it returns the failure for the caller to log", async () => {
@@ -95,7 +149,7 @@ test("recordDeviceAction NEVER throws — it returns the failure for the caller 
   const { pool } = stubPool({ fail: 'relation "device_action_log" does not exist' });
   const result = await new Repository(pool).recordDeviceAction({
     action: "brightness_write", deviceId: "d1", outcome: "verified",
-    actor: "api:token", startedAt: new Date(),
+    previousValueBasis: "preflight_read", actor: "api:token", startedAt: new Date(),
   });
   assert.equal(result.id, null);
   assert.match(result.error!, /device_action_log/);
@@ -157,6 +211,105 @@ test("filters combine with AND and bind in the order they are appended", async (
   // The page query reuses the same predicates and appends LIMIT/OFFSET after them.
   assert.match(flat(page.sql), /LIMIT \$6 OFFSET \$7/);
   assert.deepEqual(page.values.slice(5), [10, 10]);
+});
+
+test("an action GROUP matches every action in it, in one query", async () => {
+  // "Every brightness change on this device" spans two action values —
+  // `brightness_write` (the slider) and `bulk_brightness_write` (a batch push) —
+  // and two calls plus a client-side merge is how one of them goes missing from
+  // a dispute.
+  const { totals } = await list({
+    page: 1, limit: 50,
+    deviceId: "1000152",
+    actions: ["brightness_write", "bulk_brightness_write"],
+  });
+  const sql = flat(totals.sql);
+  assert.match(sql, /l\.device_id = \$1 AND l\.action = ANY\(\$2::text\[\]\)/);
+  assert.deepEqual(totals.values, [
+    "1000152", ["brightness_write", "bulk_brightness_write"],
+  ]);
+  // A union, not an intersection: `l.action = ANY(...)` is an OR over the set,
+  // and any other operator here would return nothing at all.
+  assert.doesNotMatch(sql, /l\.action = ALL/);
+});
+
+test("free text matches WHO and WHICH SCREEN, over one bind, and nothing else", async () => {
+  const { totals, page } = await list({
+    page: 1, limit: 50, search: auditSearchPattern("denver lobby"),
+  });
+  const sql = flat(totals.sql);
+  // Exactly the five identity columns. A single bind reused across all of them,
+  // so the pattern cannot come to mean two different things in one query.
+  assert.match(
+    sql,
+    /\(l\.device_id ILIKE \$1 OR d\.name ILIKE \$1 OR d\.group_name ILIKE \$1 OR d\.location ILIKE \$1 OR l\.actor ILIKE \$1\)/,
+  );
+  assert.deepEqual(totals.values, ["%denver lobby%"]);
+  // NOT searched, deliberately: our own error prose (a search for "rollback"
+  // would match rows that merely mention it while missing the rows whose
+  // outcome IS rolled_back) and the raw payload blobs (where "100" would hit
+  // detail.originalRaw and read as a device match).
+  for (const column of [/l\.error ILIKE/, /l\.detail/, /l\.params/, /l\.action ILIKE/, /l\.verb ILIKE/]) {
+    assert.doesNotMatch(sql, column, String(column));
+  }
+  // ILIKE, not LIKE: an operator types what they remember, not what we stored.
+  assert.doesNotMatch(sql, /[^I]LIKE \$/);
+  assert.match(flat(page.sql), /d\.name ILIKE \$1/);
+});
+
+test("the TOTALS query joins devices too, or a search would count a different set", async () => {
+  // `search` reaches into `devices`. The page query has always had the join; the
+  // aggregate did not, and a filter referencing an unjoined alias is an error at
+  // best and a silently different match at worst. The join is on the primary key
+  // and is a LEFT JOIN, so it can neither drop nor duplicate an audit row —
+  // which is why it is unconditional rather than added only when `q` is present.
+  for (const filters of [{}, { search: auditSearchPattern("x") }]) {
+    const { totals } = await list({ page: 1, limit: 50, ...filters });
+    assert.match(flat(totals.sql), /FROM device_action_log l LEFT JOIN devices d ON d\.id = l\.device_id/);
+  }
+});
+
+test("a search pattern escapes the caller's own wildcards", () => {
+  // "100%" means three characters. An audit search that silently widened to
+  // "anything starting with 100" would attribute another screen's row to this
+  // question.
+  assert.equal(auditSearchPattern("100%"), "%100\\%%");
+  assert.equal(auditSearchPattern("a_b"), "%a\\_b%");
+  assert.equal(auditSearchPattern("back\\slash"), "%back\\\\slash%");
+  assert.equal(auditSearchPattern("  denver  "), "%denver%", "trimmed, so a stray space is not a miss");
+  assert.equal(auditSearchPattern("Denver"), "%Denver%", "case is left to ILIKE, not folded here");
+});
+
+test("previous_value is selected and mapped, so from→to survives the round trip", async () => {
+  const { pool, captured } = stubPool({
+    rows: [{
+      id: "1", action: "brightness_write", verb: "set_brightness", device_id: "d1",
+      device_name: "Center spark 5", requested_value: "70%", observed_value: "70%",
+      previous_value: "39%", params: {}, detail: { previousValueBasis: "preflight_read" },
+      outcome: "verified", actor: "api:stephen", actor_ip: null,
+      started_at: new Date("2026-09-02T10:00:00Z"), finished_at: new Date("2026-09-02T10:00:04Z"),
+      duration_ms: 4000, error: null,
+    }],
+  });
+  const result = await new Repository(pool).listDeviceActions({ page: 1, limit: 50 });
+  assert.match(flat(captured[1]!.sql), /l\.requested_value, l\.observed_value, l\.previous_value/);
+  assert.equal(result.items[0]!.previousValue, "39%");
+});
+
+test("a row with no previous_value maps to null, not to 0 and not to a dash", async () => {
+  const { pool } = stubPool({
+    rows: [{
+      id: "2", action: "device_command", verb: "reboot", device_id: "d1",
+      device_name: null, requested_value: null, observed_value: null,
+      previous_value: null, params: {}, detail: { previousValueBasis: "not_read" },
+      outcome: "applied", actor: "api:token", actor_ip: null,
+      started_at: new Date(), finished_at: new Date(), duration_ms: 10, error: null,
+    }],
+  });
+  const row = (await new Repository(pool).listDeviceActions({ page: 1, limit: 50 })).items[0]!;
+  assert.equal(row.previousValue, null);
+  assert.notEqual(row.previousValue as unknown, 0);
+  assert.notEqual(row.previousValue as unknown, "—");
 });
 
 test("the page is ordered newest-first with an id tiebreak, never by id alone", async () => {
