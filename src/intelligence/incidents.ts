@@ -207,12 +207,15 @@ export interface CollectorResume {
 }
 
 /**
- * Why a window's ≥3-device signature is not being called a site condition.
+ * What our own collector's blindness does to this window's open times.
  *
- * Attached to any window that contains first-pass transitions, including one
- * that KEPT its co-firing claim on the strength of its other devices — an
- * operator deciding whether to dispatch needs to see that part of the burst is
- * our own blindness even when the rest is real.
+ * Attached to ANY window that contains first-pass transitions: one that lost
+ * its co-firing claim, one that KEPT it on the strength of its other devices
+ * (an operator deciding whether to dispatch needs to see that part of the burst
+ * is our own blindness even when the rest is real), and one that never reached
+ * `MIN_CO_FIRING_DEVICES` and so never made a claim at all — the open times of
+ * a one-device window still date our noticing, which is worth saying, and is
+ * not a withdrawal (BUG-12).
  */
 export interface OccurrenceProvenance {
   /** The resume whose first evaluation pass these opens landed in. */
@@ -1022,7 +1025,11 @@ function assembleIncident(
               tally.noticedTransitions,
               [...tally.noticed].filter((id) => !tally.failedTogether.has(id)).length,
               window.deviceCount,
-              window.coFiring,
+              // Read off the two booleans the payload already publishes rather
+              // than re-deciding it here: the sentence and the badge a reader
+              // sees beside it then cannot disagree (BUG-12 was that sentence
+              // disagreeing with `noticedTogether: false`).
+              window.coFiring ? "kept" : window.noticedTogether ? "withdrawn" : "never-made",
             );
       return window;
     });
@@ -1105,11 +1112,18 @@ function assembleIncident(
 /**
  * Say, in words an operator can act on, what the resume does to this window.
  *
- * Two different sentences, because there are two different situations: a window
- * that LOST the claim (everything in it is our noticing) and a window that KEPT
- * it (part of the burst is ours, the rest still failed together). Reporting the
- * second as suppressed would hide a real site event; reporting it with no note
- * at all would let an operator read our blind spot as estate evidence.
+ * THREE sentences, because there are three different situations, and the third
+ * one is BUG-12: a window that LOST the claim (everything in it is our
+ * noticing), a window that KEPT it (part of the burst is ours, the rest still
+ * failed together), and a window that never had one to lose because fewer than
+ * `MIN_CO_FIRING_DEVICES` devices fired in it at all. Reporting the second as
+ * suppressed would hide a real site event; reporting any of them with no note
+ * would let an operator read our blind spot as estate evidence — and reporting
+ * the THIRD as a withdrawal, which a binary branch on `keptClaim` did for 139
+ * of this corpus's 617 windows, retracts a claim nobody made. A one-device
+ * window was being told its site correlation had been retracted, which teaches
+ * the reader that the provenance text is unreliable and costs more than the
+ * silence it replaced.
  */
 function describeWindowProvenance(
   resume: CollectorResume,
@@ -1117,7 +1131,7 @@ function describeWindowProvenance(
   transitions: number,
   noticedOnlyDevices: number,
   deviceCount: number,
-  keptClaim: boolean,
+  claim: "kept" | "withdrawn" | "never-made",
 ): OccurrenceProvenance {
   const blind =
     resume.blindSeconds === null
@@ -1132,18 +1146,28 @@ function describeWindowProvenance(
     firstPassSeconds,
     transitions,
     devices: noticedOnlyDevices,
-    note: keptClaim
-      ? `${transitions} of this window's transitions opened in the first ${firstPassSeconds}s ` +
-        `after collection resumed at ${resume.resumedAt}, having been blind ${blind}, so those ` +
-        `open times date OUR NOTICING. The window still co-fires on the ` +
-        `${deviceCount - noticedOnlyDevices} device(s) that fired outside that pass.`
-      : `Noticed together, NOT failed together. All ${deviceCount} device(s) here opened in ` +
-        `the first ${firstPassSeconds}s after collection resumed at ${resume.resumedAt}, ` +
-        `having been blind ${blind} — so we found them already down, at unknown and probably ` +
-        `different times, rather than watching them fail together. The alerts are real and ` +
-        `still listed; the co-firing claim is withdrawn because nothing here can date a ` +
-        `failure. Dispatching to a site on this evidence would be dispatching on our own ` +
-        `outage.`,
+    note:
+      claim === "kept"
+        ? `${transitions} of this window's transitions opened in the first ${firstPassSeconds}s ` +
+          `after collection resumed at ${resume.resumedAt}, having been blind ${blind}, so those ` +
+          `open times date OUR NOTICING. The window still co-fires on the ` +
+          `${deviceCount - noticedOnlyDevices} device(s) that fired outside that pass.`
+        : claim === "withdrawn"
+          ? `Noticed together, NOT failed together. All ${deviceCount} device(s) here opened in ` +
+            `the first ${firstPassSeconds}s after collection resumed at ${resume.resumedAt}, ` +
+            `having been blind ${blind} — so we found them already down, at unknown and probably ` +
+            `different times, rather than watching them fail together. The alerts are real and ` +
+            `still listed; the co-firing claim is withdrawn because nothing here can date a ` +
+            `failure. Dispatching to a site on this evidence would be dispatching on our own ` +
+            `outage.`
+          : `First pass after a resume, and no co-firing claim was made here either way: only ` +
+            `${deviceCount} device(s) fired in this window, under the ` +
+            `${MIN_CO_FIRING_DEVICES} the site signature needs. What the resume changes is the ` +
+            `TIMING — ${transitions} of this window's transitions opened in the first ` +
+            `${firstPassSeconds}s after collection resumed at ${resume.resumedAt}, having been ` +
+            `blind ${blind}, so those open times date OUR NOTICING and not a failure. The ` +
+            `alerts are real and still listed; read the open times as "found already down", ` +
+            `not "went down then".`,
   };
 }
 

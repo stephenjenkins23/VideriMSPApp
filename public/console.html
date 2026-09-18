@@ -7701,6 +7701,13 @@ function incRosterHtml(i) {
  * is styled `.tag.net` -- INFORMATION, not a fault. Nothing is wrong with
  * these devices *together*; every alert in the window is still individually
  * real, still listed here, still on the roster and still in the drilldown.
+ *
+ * BUG-12: the prose under a window is the ENDPOINT'S prose, in all three
+ * states. This function briefly composed the sub-threshold sentence itself
+ * because the endpoint served one withdrawal sentence to windows that had
+ * nothing to withdraw; the endpoint has three branches now, so there is one
+ * author again. If a sentence here is wrong, fix `describeWindowProvenance` --
+ * do not re-open a second copy of it in the browser.
  */
 function incWindowsHtml(i) {
   const o = i.occurrences || {};
@@ -7713,17 +7720,19 @@ function incWindowsHtml(i) {
      the trap that broke 11 of 22 pinned URL tests at once. alertBands() keeps
      its vocabulary inline for exactly this reason. */
   const num = (x) => (typeof x === "number" && isFinite(x) ? x : null);
-  /* An honest null, never 0: `blindSeconds: null` means we cannot know how long
-     we were blind (the resume is the START of the observation history), and a
-     "0h" there would read as "there was no outage" -- the opposite of the truth. */
-  const blindOf = (p) => p.blindSeconds == null
-    ? `blind for an unknown length of time (${p.blindReason
-        || "the payload carried no reason, which is itself worth reporting"})`
-    : `blind for ${Math.round(p.blindSeconds / 360) / 10}h`;
+  /* The ONE place a provenance note is turned into text, for all three of the
+     endpoint's branches: echo it, never re-compose it. An absent note is an
+     honest unknown rather than "undefined" or a sentence of our own -- the
+     endpoint attaches provenance precisely when there is something to say, so a
+     block with no words in it is a payload defect worth showing. */
+  const noteOf = (p) => typeof p.note === "string" && p.note.trim() !== ""
+    ? `<span class="fds" style="padding-left:2px">${esc(p.note)}</span>`
+    : `<span class="fds"><span class="unres">this window carries a provenance block but the
+         payload stated no note, so what our collector's blindness does to these open times
+         could not be read</span></span>`;
 
   const rows = shown.map((w) => {
     const p = w.provenance || null;
-    const fp = p && num(p.firstPassSeconds);
     /* A window that KEPT its claim can still be partly our own noticing, so it
        gets the co-firing tag AND the note. `failedTogetherDeviceCount` is the
        devices the test was actually made on. */
@@ -7743,36 +7752,23 @@ function incWindowsHtml(i) {
               `${(o.minCoFiringDevices || 3)}-device signature, so there was no co-firing claim ` +
               `to withdraw.`)}">first pass after a resume</span>`
           : "";
-    /* WHY, in words, under the row. Four cases and not one of them is silence. */
-    const why = w.noticedTogether
-      ? (p
-        ? `<div class="fdr" style="padding-top:0"><span class="fds"
-             style="padding-left:2px">${esc(p.note)}</span></div>`
-        : `<div class="fdr" style="padding-top:0"><span class="fds"><span class="unres">the
+    /* WHY, in words, under the row -- and the words are the ENDPOINT'S.
+       BUG-12: this branch used to compose the sub-threshold sentence itself
+       from `resumedAt`/`transitions`/`firstPassSeconds`/`blindSeconds`, because
+       the endpoint's single withdrawal sentence said "the co-firing claim is
+       withdrawn" to a one-device window that never made one. The endpoint now
+       has a third branch for exactly that case, so the local substitute is
+       gone: a second place composing this prose is how the two drift, and the
+       drift is invisible until an operator reads two different explanations of
+       the same window. Two cases here, and neither of them is silence. */
+    const why = p
+      ? `<div class="fdr" style="padding-top:0">${noteOf(p)}</div>`
+      : w.noticedTogether
+        ? `<div class="fdr" style="padding-top:0"><span class="fds"><span class="unres">the
              co-firing claim on this window was withdrawn and the payload carried no provenance
              to explain it. That is a bug in /api/incidents, not a quiet window &#8212; the
-             withdrawal is exactly the thing that has to be explained</span></span></div>`)
-      : w.coFiring && p
-        ? `<div class="fdr" style="padding-top:0"><span class="fds"
-             style="padding-left:2px">${esc(p.note)}</span></div>`
-        : p
-          /* Sub-threshold. The endpoint's own `note` is written for the
-             WITHDRAWAL case and says "the co-firing claim is withdrawn", which
-             is not true of a window that never reached the floor, so it is
-             stated from the structured fields instead and the payload's
-             sentence is kept on the title where nothing is hidden. */
-          ? `<div class="fdr" style="padding-top:0"><span class="fds" style="padding-left:2px"
-               title="${esc(p.note || "")}">${num(p.transitions) === null
-                 ? `<span class="unres">the payload did not say how many transition(s) here
-                      opened in that first pass</span>`
-                 : `<b>${p.transitions}</b> of this window's transition(s)`} opened in the
-               first ${fp === null ? "pass" : fp + "s"} after collection resumed at
-               ${esc(String(p.resumedAt || "an instant the payload did not give"))}, having been
-               ${esc(blindOf(p))}. This window never carried the
-               ${(o.minCoFiringDevices || 3)}-device signature, so there was no co-firing claim
-               to withdraw &#8212; but those open times still date our noticing, not the
-               failure.</span></div>`
-          : "";
+             withdrawal is exactly the thing that has to be explained</span></span></div>`
+        : "";
     return `<div class="fdr">
       <span class="fdn">${esc(String(w.windowStart).replace("T", " ").slice(0, 16))}</span>
       <span class="fds">${w.coFiring

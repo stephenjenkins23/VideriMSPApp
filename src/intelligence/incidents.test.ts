@@ -787,3 +787,106 @@ test("BUG-10: the three occurrence buckets partition the windows and the transit
   assert.equal(o.noticedTogether, 1);
   assert.equal(o.isolated, 1);
 });
+
+// ── BUG-12: three provenance sentences, because there are three situations ───
+
+/**
+ * The third case, measured: of this corpus's **617** occurrence windows (all
+ * 267 incidents, 2026-09-18), 91 co-fire, 40 are genuine withdrawals and
+ * **139** never reached `MIN_CO_FIRING_DEVICES` yet carry provenance. Those 139
+ * were being handed the withdrawal sentence — a one-device window told its site
+ * correlation had been retracted. The withdrawal sentence is the deliverable of
+ * BUG-10, so a false one is not cosmetic: it teaches an operator that the
+ * provenance text cannot be trusted.
+ */
+const subThresholdWindow = (devices: string[]) => {
+  const rows = devices.map((d) =>
+    firing(d, new Date(Date.parse(RESUME_23H.resumedAt) + 1_000).toISOString(), 30, {
+      groupId: "grp-sub",
+      groupName: "Sub Threshold",
+      ruleId: "offline-4h",
+    }),
+  );
+  return buildIncidentQueue(rows, { collectorResumes: [RESUME_23H] })
+    .incidents[0]!.occurrences;
+};
+
+test("BUG-12: a sub-threshold window is told the truth, not that a claim was withdrawn", () => {
+  const o = subThresholdWindow(["d1"]);
+  const window = o.windows[0]!;
+
+  // The preconditions of the bug: one device, provenance attached, and neither
+  // of the two states the old binary branch knew about.
+  assert.equal(window.deviceCount, 1);
+  assert.ok(window.deviceCount < MIN_CO_FIRING_DEVICES);
+  assert.equal(window.coFiring, false);
+  assert.equal(window.noticedTogether, false);
+  assert.notEqual(window.provenance, null, "a first-pass open is worth reporting at any count");
+
+  const note = window.provenance!.note;
+  // Nothing was withdrawn and nothing was retracted, so neither word appears.
+  assert.ok(!/withdraw/i.test(note), `nothing was withdrawn here: ${note}`);
+  assert.ok(!/retract/i.test(note), `nothing was retracted here: ${note}`);
+  assert.ok(!/Noticed together, NOT failed together/.test(note),
+    "the withdrawal sentence must not reach a window that never made the claim");
+  // And it says the two true things.
+  assert.match(note, /no co-firing claim was made here either way/,
+    "the reader must be told there was no claim, rather than left to infer it");
+  assert.match(note, /date OUR NOTICING and not a failure/,
+    "the open time still dates our noticing — that is why provenance is attached at all");
+  assert.match(note, /only 1 device\(s\) fired in this window, under the 3/,
+    "the count and the floor are both stated, so the reader can check the branch");
+  assert.match(note, /resumed at 2026-08-26T18:06:52\.734Z/, "the resume instant is checkable");
+  assert.match(note, /blind for 23\.6h/, "so is how long we were blind before it");
+
+  // The buckets are unmoved: this is a wording fix and nothing else.
+  assert.equal(o.coFiring, 0);
+  assert.equal(o.noticedTogether, 0);
+  assert.equal(o.isolated, 1);
+  assert.equal(o.coFiring + o.noticedTogether + o.isolated, o.total);
+});
+
+test("BUG-12: the two-device window is sub-threshold too — the floor, not 'more than one'", () => {
+  // 40 of the 139 are two-device windows. Two devices is still not the site
+  // signature, so it gets the same sentence, not the withdrawal.
+  const note = subThresholdWindow(["d1", "d2"]).windows[0]!.provenance!.note;
+  assert.match(note, /only 2 device\(s\) fired in this window, under the 3/);
+  assert.ok(!/withdraw/i.test(note));
+});
+
+test("BUG-12: the three branches are three distinct sentences", () => {
+  const resumedAt = Date.parse(RESUME_23H.resumedAt);
+  const withResumes = (rows: AlertTransition[]) =>
+    buildIncidentQueue(rows, { collectorResumes: [RESUME_23H] })
+      .incidents[0]!.occurrences.windows[0]!;
+
+  // KEPT: three devices found already down, three that failed while we watched.
+  const kept = withResumes([
+    ...["n1", "n2", "n3"].map((d) =>
+      firing(d, new Date(resumedAt + 1_000).toISOString(), 30, { groupId: "grp-kept" }),
+    ),
+    ...["f1", "f2", "f3"].map((d) =>
+      firing(d, new Date(resumedAt + 12 * 60_000).toISOString(), 30, { groupId: "grp-kept" }),
+    ),
+  ]);
+  // WITHDRAWN: the Montreal burst — six devices, every open in the first pass.
+  const withdrawn = withResumes(montrealBurst());
+  // NEVER MADE: one device.
+  const never = withResumes([
+    firing("d1", new Date(resumedAt + 1_000).toISOString(), 30, { groupId: "grp-never" }),
+  ]);
+
+  assert.equal(kept.coFiring, true);
+  assert.equal(withdrawn.noticedTogether, true);
+  assert.equal(never.coFiring, false);
+  assert.equal(never.noticedTogether, false);
+
+  const notes = [kept, withdrawn, never].map((w) => w.provenance!.note);
+  assert.equal(new Set(notes).size, 3, "three situations must not share a sentence");
+  assert.match(notes[0]!, /still co-fires on the 3 device/);
+  assert.match(notes[1]!, /the co-firing claim is withdrawn/);
+  assert.match(notes[2]!, /no co-firing claim was made here either way/);
+  // The one cross-check that catches a mis-wired branch: only the genuine
+  // withdrawal may say a claim was withdrawn.
+  assert.deepEqual(notes.map((n) => /withdraw/i.test(n)), [false, true, false]);
+});

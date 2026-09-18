@@ -217,6 +217,22 @@ const withdrawnWindow = (over: Row = {}): Row => ({
   ...over,
 });
 
+/**
+ * The endpoint's THIRD sentence (BUG-12), verbatim from
+ * `describeWindowProvenance` on this fixture's own fields. A one-device window
+ * never made a co-firing claim, so it is never told one was withdrawn — and the
+ * console's job is to print this and nothing else.
+ */
+const SUB_THRESHOLD_NOTE =
+  "First pass after a resume, and no co-firing claim was made here either way: only 1 " +
+  "device(s) fired in this window, under the 3 the site signature needs. What the resume " +
+  "changes is the TIMING — 1 of this window's transitions opened in the first 450s after " +
+  "collection resumed at 2026-08-25T18:14:29.428Z, having been blind for an unknown length " +
+  "of time (this is the earliest collector observation we still hold, and both poller_runs " +
+  "and fleet_snapshots are retention-pruned, so how long the estate was unobserved before it " +
+  'cannot be known), so those open times date OUR NOTICING and not a failure. The alerts are ' +
+  'real and still listed; read the open times as "found already down", not "went down then".';
+
 const isolatedWindow = (over: Row = {}): Row => ({
   windowStart: "2026-08-25T18:00:00.000Z", windowEnd: "2026-08-25T18:30:00.000Z",
   deviceCount: 1, deviceIds: ["1000180"], transitionIds: ["g"],
@@ -229,7 +245,7 @@ const isolatedWindow = (over: Row = {}): Row => ({
       "poller_runs and fleet_snapshots are retention-pruned, so how long the estate was " +
       "unobserved before it cannot be known",
     lanes: [], firstPassSeconds: 450, transitions: 1, devices: 1,
-    note: "Noticed together, NOT failed together. All 1 device(s) here opened in the first 450s…",
+    note: SUB_THRESHOLD_NOTE,
   },
   ...over,
 });
@@ -406,12 +422,124 @@ test("a window that is STILL co-firing keeps the co-firing tag AND gains the not
 test("a sub-threshold window is NOT described as a withdrawal, because nothing was withdrawn", async () => {
   const h = await harness();
   const text = readable(h.api.incWindowsHtml(montreal()));
-  assert.match(text, /never carried the 3-device signature, so there was no co-firing claim to withdraw/,
+  // BUG-12: the endpoint's own third sentence, printed as served. The console
+  // used to compose this line itself, because the endpoint served the
+  // WITHDRAWAL sentence to a window that never made the claim.
+  assert.match(text, /no co-firing claim was made here either way/,
     "a one-device window never had a claim; calling its provenance a withdrawal would be a new lie");
+  assert.ok(!/1 device\(s\)[^.]*claim is withdrawn/.test(text),
+    "the withdrawal sentence must not appear against the one-device window");
   // Honest null on an unbounded blind window: a reason, never "0h".
   assert.match(text, /blind for an unknown length of time \(this is the earliest collector observation/,
     "blindSeconds: null must render as unknown WITH the reason");
   assert.ok(!/blind for 0h/.test(text), '"0h blind" would read as "there was no outage"');
+  // Still badged, so the reader knows which of the three states this window is.
+  assert.match(h.api.incWindowsHtml(montreal()), /data-fpbadge="1"/,
+    "a sub-threshold window with provenance keeps its own badge");
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 1b. The console ECHOES the provenance note. It does not re-compose it.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * BUG-12's second half, and the reason it is a test rather than a code review:
+ * for one commit the console composed the sub-threshold sentence itself from
+ * `resumedAt`/`transitions`/`firstPassSeconds`/`blindSeconds`, because the
+ * endpoint's sentence was false. Two authors of the same prose drift, and the
+ * drift is invisible until an operator reads two different explanations of one
+ * window.
+ *
+ * Pinned by SUBSTITUTION: the note is replaced with a sentinel, and the render
+ * must contain the sentinel and NOT contain anything recomposed from the
+ * structured fields that sat beside it. A test that only asserted the sentinel
+ * appears would pass with a re-composition printed underneath it.
+ */
+const SENTINEL = "SENTINEL: the endpoint said this and only this.";
+
+/** The fields a re-composition would reach for, and their rendered spellings. */
+const RECOMPOSED = [
+  /SENTINEL-RESUME-INSTANT/, /first 450s/, /blind for/, /unknown length of time/,
+  /opened in the first/, /co-firing claim/, /date our noticing/i, /transition\(s\) here/,
+];
+
+const sentinelProvenance = (over: Row = {}): Row => ({
+  resumedAt: "SENTINEL-RESUME-INSTANT", source: "observation-gap",
+  blindSeconds: 84808.269, blindReason: null, lanes: [],
+  firstPassSeconds: 450, transitions: 4, devices: 4,
+  note: SENTINEL,
+  ...over,
+});
+
+const oneWindow = (w: Row, occ: Row = {}): Row => montreal({
+  occurrences: { ...montreal().occurrences, total: 1, coFiring: 0, noticedTogether: 0, isolated: 1,
+    transitionsCoFiring: 0, transitionsNoticedTogether: 0, transitionsIsolated: 7,
+    windows: [w], ...occ },
+});
+
+test("all three provenance states echo the server's note and compose nothing of their own", async () => {
+  const h = await harness();
+  const cases: Array<[string, Row]> = [
+    ["sub-threshold", oneWindow(isolatedWindow({ provenance: sentinelProvenance() }))],
+    ["withdrawn", oneWindow(
+      withdrawnWindow({ provenance: sentinelProvenance() }),
+      { noticedTogether: 1, isolated: 0, transitionsNoticedTogether: 7, transitionsIsolated: 0 },
+    )],
+    ["kept co-firing", oneWindow(
+      withdrawnWindow({ coFiring: true, noticedTogether: false, failedTogetherDeviceCount: 4,
+        provenance: sentinelProvenance() }),
+      { coFiring: 1, isolated: 0, transitionsCoFiring: 7, transitionsIsolated: 0 },
+    )],
+  ];
+  for (const [label, incident] of cases) {
+    const text = readable(h.api.incWindowsHtml(incident));
+    assert.ok(text.includes(SENTINEL),
+      `the ${label} window must print the endpoint's note verbatim, got: ${text}`);
+    for (const pattern of RECOMPOSED) {
+      assert.ok(!pattern.test(text),
+        `the ${label} window re-composed prose matching ${pattern} instead of echoing the ` +
+        `endpoint. Fix describeWindowProvenance; do not open a second copy of it here.`);
+    }
+  }
+});
+
+test("a provenance block with no note says so, rather than printing a sentence of ours", async () => {
+  const h = await harness();
+  for (const note of [undefined, "", "   "]) {
+    const html = h.api.incWindowsHtml(
+      oneWindow(isolatedWindow({ provenance: sentinelProvenance({ note }) })));
+    const text = readable(html);
+    assert.match(text, /carries a provenance block but the payload stated no note/,
+      `note: ${JSON.stringify(note)} must read as a payload defect, not as silence`);
+    assert.match(html, /class="unres"/, "an unsayable note is styled as unresolved");
+    assert.ok(!/undefined/.test(text), "a missing note must never reach the reader as 'undefined'");
+    for (const pattern of RECOMPOSED) {
+      assert.ok(!pattern.test(text),
+        `an absent note must not be BACKFILLED from the structured fields (${pattern})`);
+    }
+  }
+});
+
+test("console.html itself no longer composes resume prose in the window rows", async () => {
+  // The structural half of the same check: the substitute was deleted, not
+  // merely bypassed. A dead second author is still a second author the next
+  // editor can re-enable.
+  const decl = declarationOf(await consoleScript(), "incWindowsHtml");
+  assert.match(decl, /noteOf/, "the lifted declaration must be the real one, not an empty match");
+  assert.ok(!/blindOf/.test(decl),
+    "blindOf() existed only to re-compose the blind duration in the browser");
+  assert.ok(!/having been/.test(decl),
+    "the window rows must not carry a sentence about the resume of their own");
+  // The sharp end: `note` is the ONLY field of the provenance block this
+  // function may read. Reaching for `resumedAt` or `blindSeconds` again is a
+  // sentence being rebuilt, whatever it ends up saying. (The three badge
+  // tooltips are the console's own short labels for the three states and say
+  // nothing about this resume, so they are not a second author of the note.)
+  const provFields = /\bp\.(resumedAt|blindSeconds|blindReason|firstPassSeconds|transitions|devices|source|lanes)\b/;
+  assert.ok(!provFields.test(decl),
+    `incWindowsHtml reads a provenance field other than .note (${provFields.exec(decl)?.[0]}) — ` +
+    `that is the local substitute growing back`);
+  assert.match(decl, /p\.note/, "and it must actually read the note, or it prints nothing at all");
 });
 
 test("a withdrawn window with NO provenance says the payload is missing it, and is not silent", async () => {
