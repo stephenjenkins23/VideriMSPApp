@@ -20,8 +20,17 @@ psql "$DATABASE_URL" -f src/db/schema.sql
 for m in src/db/migrations/0*.sql; do psql "$DATABASE_URL" -f "$m"; done
 ```
 
-Migrations run 002 → 008 (001 is the base `schema.sql`). They are additive; 007
-adds `retired_at` (soft device retirement) and 008 adds `device_screen_verdict`.
+Migrations run **002 → 011** (001 is the base `schema.sql`). All are additive and
+safe to re-run. The glob above already applies whatever is present — the numbers
+are listed so a partial apply is visible: 007 `retired_at` (soft device
+retirement), 008 `device_screen_verdict`, 009 `device_action_log` (the audit
+trail), 010 the alert work surface (claim / note / suppress), 011
+`device_action_log.previous_value`.
+
+**Stop short of 009 and the app boots but `/api/audit` 500s**, because the route
+selects columns the table does not have. If you add a migration, update this
+range — this paragraph said "002 → 008" for three migrations longer than it was
+true.
 
 ## 2. Configuration
 
