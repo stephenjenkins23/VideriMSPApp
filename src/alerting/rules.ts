@@ -239,9 +239,28 @@ export const DEFAULT_RULES: AlertRule[] = [
   },
   {
     kind: "state",
+    // THE ID IS A MISNOMER, AND IT IS KEPT ON PURPOSE. This rule consults no
+    // schedule: it is `is_screen_on = false`, sustained. Nothing in the alerting
+    // path calls `withinOnWindow` (intelligence/screen-state.ts) — the
+    // recommendation engine and churn do, alerting does not.
+    //
+    // It is not renamed here because a rename is a data migration, not an edit:
+    // 463 stored rows carry this id and the incident model keys on
+    // (site, rule_id), so a bare rename splits every open incident in two. That
+    // call is the operator's to make.
+    //
+    // And the check the id promises is not one wiring job away — it is not
+    // answerable on this platform. Content schedule ≠ power schedule: `publisher`
+    // says what plays, `is_screen_on` is panel power, and whether a panel SHOULD
+    // be powered lives in a power schedule with no verified read (docs/14 §D5,
+    // docs/22 Ask 11). So the limit is stated in the evidence every one of those
+    // 463 rows carries — see SCREEN_OFF_LIMIT in evaluate.ts. The displayed name
+    // stays "Screen powered off", which is exactly what is measured.
     id: "screen-off-during-schedule",
     name: "Screen powered off",
     enabled: true,
+    // Unchanged at `medium`. Off-and-should-be-on is real work; off-by-design is
+    // not; we cannot tell which, so this is neither raised nor lowered on a guess.
     severity: "medium",
     field: "is_screen_on",
     equals: false,
@@ -257,6 +276,11 @@ export const DEFAULT_RULES: AlertRule[] = [
     id: "firmware-behind",
     name: "Firmware behind latest",
     enabled: true,
+    // `info` was already the honest rank and stays there. The rule detects a
+    // version-string difference, and on this fleet it cannot always show that an
+    // upgrade exists for the model in question (one `latest` value fleet-wide
+    // across six device classes — docs/14 §B15). Evidence carries that split
+    // per device; see evaluateFirmware in evaluate.ts.
     severity: "info",
     onlyVersions: [],
     clearForSeconds: 0,

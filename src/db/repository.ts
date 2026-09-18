@@ -210,6 +210,8 @@ export interface EvaluationDevice {
   id: string;
   name: string | null;
   location: string | null;
+  /** Needed by the firmware rule: a target is corroborated per device class. */
+  deviceClass: string | null;
   firmwareCurrent: string | null;
   firmwareLatest: string | null;
   components: Record<string, { current: string | null; latest: string | null }>;
@@ -242,6 +244,7 @@ interface EvaluationJoinRow {
   id: string;
   name: string | null;
   location: string | null;
+  device_class: string | null;
   firmware_current: string | null;
   firmware_latest: string | null;
   last_online_time: Date | null;
@@ -1144,7 +1147,7 @@ export class Repository {
     maxSamplesPerDevice = 240,
   ): Promise<Map<string, { device: EvaluationDevice; samples: EvaluationSample[] }>> {
     const { rows } = await this.pool.query<EvaluationJoinRow>(
-      `SELECT d.id, d.name, d.location, d.firmware_current, d.firmware_latest,
+      `SELECT d.id, d.name, d.location, d.device_class, d.firmware_current, d.firmware_latest,
               d.last_online_time,
               s.observed_at, s.source, s.presence, s.is_screen_on, s.is_black_screen,
               s.showing_logo, s.downloading, s.ping_quality, s.playback_quality,
@@ -1172,6 +1175,7 @@ export class Repository {
             id: row.id,
             name: row.name,
             location: row.location,
+            deviceClass: row.device_class,
             firmwareCurrent: row.firmware_current,
             firmwareLatest: row.firmware_latest,
             components: row.components ?? {},

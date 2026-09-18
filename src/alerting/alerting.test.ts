@@ -8,7 +8,14 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { evaluateRule, formatDuration, type SampleRow, type DeviceRow } from "./evaluate.js";
+import {
+  buildFirmwareTargetIndex,
+  evaluateRule,
+  firmwareTargetStanding,
+  formatDuration,
+  type SampleRow,
+  type DeviceRow,
+} from "./evaluate.js";
 import { DEFAULT_RULES, validateRule, requiredWindowSeconds, type AlertRule } from "./rules.js";
 import { runAlerting, loadRules } from "./engine.js";
 import { previewRule } from "./preview.js";
@@ -261,6 +268,193 @@ test("firmware rule cannot be judged with no component data", () => {
   const v = evaluateRule(rule, { device: device({ components: {} }), samples: [], now: NOW });
   assert.equal(v.firing, false);
   assert.match(v.skipped ?? "", /no component versions/);
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Firmware: what "behind" is allowed to CLAIM
+//
+// `current !== latest` proves the strings differ. It does not prove an upgrade
+// exists for the model in front of you: on this fleet three of the four
+// components carry ONE `latest` value shared by all six device classes, from
+// Canvas to TCL panel to AllSee shelf label (docs/14 §B15). So the claim is
+// corroborated against what devices of the same class actually RUN — and where
+// nothing corroborates it, the alert still fires and says less.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const firmwareRule = DEFAULT_RULES.find((r) => r.id === "firmware-behind")!;
+
+/** The live shape in miniature: one tenant-wide `latest`, six classes. */
+const FLEET: DeviceRow[] = [
+  // Canvases: 2 already RUNNING the target, 1 behind.
+  device({ id: "c1", deviceClass: "canvas", components: { player: { current: "7.0.14", latest: "7.0.14" } } }),
+  device({ id: "c2", deviceClass: "canvas", components: { player: { current: "7.0.14", latest: "7.0.14" } } }),
+  device({ id: "c3", deviceClass: "canvas", components: { player: { current: "6.1.2", latest: "7.0.14" } } }),
+  // TCLs: none has ever been seen running the target.
+  device({ id: "t1", deviceClass: "tcl", components: { player: { current: "7.0.5", latest: "7.0.14" } } }),
+  device({ id: "t2", deviceClass: "tcl", components: { player: { current: "6.3.25", latest: "7.0.14" } } }),
+];
+
+test("a canvas keeps the strong claim: peers of its class run that build", () => {
+  const v = evaluateRule(firmwareRule, {
+    device: FLEET[2]!,
+    samples: [],
+    now: NOW,
+    firmwareTargets: buildFirmwareTargetIndex(FLEET),
+  });
+  assert.equal(v.firing, true, v.skipped);
+  assert.match(v.evidence, /An upgrade exists for this model/);
+  // The corroboration must be COUNTED in the text, not asserted.
+  assert.match(v.evidence, /2 of the 3 "canvas" device\(s\)/);
+  assert.equal(/CANNOT say an upgrade exists/.test(v.evidence), false);
+});
+
+test("a non-canvas whose class never runs that build gets the weaker claim", () => {
+  const v = evaluateRule(firmwareRule, {
+    device: FLEET[3]!,
+    samples: [],
+    now: NOW,
+    firmwareTargets: buildFirmwareTargetIndex(FLEET),
+  });
+  // It STILL FIRES — the strings do differ, and that is a real finding.
+  assert.equal(v.firing, true, v.skipped);
+  assert.equal(v.severity, "info");
+  assert.match(v.evidence, /player 7\.0\.5 → 7\.0\.14/);
+  assert.match(v.evidence, /We CANNOT say an upgrade exists for this model/);
+  assert.match(v.evidence, /none of the 2 "tcl" device\(s\)/);
+  // And it must say WHY the single `latest` is not a per-model target.
+  assert.match(v.evidence, /single tenant-wide value, not a per-model target/);
+  assert.equal(/An upgrade exists for this model/.test(v.evidence), false);
+});
+
+test("the claim split changes the wording and NOTHING about what fires", () => {
+  // The one thing this feature must never do is quietly shrink the queue.
+  const index = buildFirmwareTargetIndex(FLEET);
+  for (const d of FLEET) {
+    const withIndex = evaluateRule(firmwareRule, { device: d, samples: [], now: NOW, firmwareTargets: index });
+    const without = evaluateRule(firmwareRule, { device: d, samples: [], now: NOW });
+    assert.equal(withIndex.firing, without.firing, `${d.id} changed firing state`);
+    assert.equal(withIndex.severity, without.severity, `${d.id} changed severity`);
+  }
+});
+
+test("no fleet comparison means we claim LESS, never more", () => {
+  // Honest nulls: an absent index is not corroboration. A canvas evaluated
+  // without the fleet in hand gets the weak claim, not the strong one.
+  const v = evaluateRule(firmwareRule, { device: FLEET[2]!, samples: [], now: NOW });
+  assert.equal(v.firing, true, v.skipped);
+  assert.match(v.evidence, /We CANNOT say an upgrade exists for this model/);
+  assert.match(v.evidence, /no fleet-wide version comparison was available/);
+});
+
+test("a device with no class reported cannot have a target attributed to its model", () => {
+  const stray = device({ id: "x1", deviceClass: null, components: { player: { current: "6.1.2", latest: "7.0.14" } } });
+  const v = evaluateRule(firmwareRule, {
+    device: stray,
+    samples: [],
+    now: NOW,
+    firmwareTargets: buildFirmwareTargetIndex([...FLEET, stray]),
+  });
+  assert.equal(v.firing, true, v.skipped);
+  assert.match(v.evidence, /reports no device class/);
+});
+
+test("corroboration is per COMPONENT, so one device can carry both claims", () => {
+  // Real case on this fleet: a TCL is behind on two packages, and its class is
+  // attested on one of them but not the other.
+  const fleet: DeviceRow[] = [
+    device({ id: "t1", deviceClass: "tcl", components: {
+      player: { current: "7.0.5", latest: "7.0.14" },
+      superuser: { current: "6.5.0", latest: "6.5.0" },
+    } }),
+    device({ id: "t2", deviceClass: "tcl", components: {
+      player: { current: "7.0.5", latest: "7.0.14" },
+      superuser: { current: "6.4.0", latest: "6.5.0" },
+    } }),
+  ];
+  const v = evaluateRule(firmwareRule, {
+    device: fleet[1]!,
+    samples: [],
+    now: NOW,
+    firmwareTargets: buildFirmwareTargetIndex(fleet),
+  });
+  assert.equal(v.firing, true, v.skipped);
+  assert.match(v.evidence, /An upgrade exists for: superuser →/);
+  assert.match(v.evidence, /But NOT for: player →/);
+});
+
+test("the target index counts what devices RUN, per class and component", () => {
+  const index = buildFirmwareTargetIndex(FLEET);
+  const canvas = firmwareTargetStanding(index, "canvas", "player", "7.0.14");
+  assert.equal(canvas.corroborated, true);
+  assert.match(canvas.why, /2 of the 3 "canvas" device\(s\)/);
+
+  const tcl = firmwareTargetStanding(index, "tcl", "player", "7.0.14");
+  assert.equal(tcl.corroborated, false);
+  assert.match(tcl.why, /none of the 2 "tcl" device\(s\)/);
+
+  // A class we hold nothing for is unreadable, not corroborated.
+  const absent = firmwareTargetStanding(index, "allsee-shelf", "player", "7.0.14");
+  assert.equal(absent.corroborated, false);
+  assert.match(absent.why, /no device of class "allsee-shelf"/);
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// `screen-off-during-schedule`: the id promises a check the rule never makes,
+// and the platform cannot answer it either (docs/14 §D5, docs/22 Ask 11). The
+// rule must say so where an operator reads it — and must go on firing.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const screenOffRule = DEFAULT_RULES.find((r) => r.id === "screen-off-during-schedule")!;
+
+test("the screen-off alert states that it cannot tell by-design from broken", () => {
+  const samples = series(Array.from({ length: 40 }, () => false), "isScreenOn");
+  const v = evaluateRule(screenOffRule, { device: device(), samples, now: NOW });
+  assert.equal(v.firing, true, v.skipped);
+  // The measurement is still first and still concrete.
+  assert.match(v.evidence, /Screen powered off continuously for \d+ minutes across \d+ readings/);
+  // The limit, and the reason for it.
+  assert.match(v.evidence, /CANNOT distinguish dark-by-design from dark-and-broken/);
+  assert.match(v.evidence, /consults NO schedule/);
+  assert.match(v.evidence, /no verified read of one/);
+  assert.match(v.evidence, /not a substitute/);
+  // It must not imply a schedule WAS considered.
+  assert.equal(/during (its |the )?schedule/i.test(v.evidence), false);
+});
+
+test("the limit appears early enough to survive a truncated list", () => {
+  // The compact alert list renders the first 90 characters of evidence. A caveat
+  // appended at the end is a caveat the operator never sees.
+  const samples = series(Array.from({ length: 40 }, () => false), "isScreenOn");
+  const v = evaluateRule(screenOffRule, { device: device(), samples, now: NOW });
+  assert.match(v.evidence.slice(0, 90), /CANNOT/);
+});
+
+test("the schedule rule is still a plain screen-power check, unrenamed and unsuppressed", () => {
+  // 463 stored rows carry this id and the incident model keys on (site, rule_id),
+  // so renaming it is a migration the operator owns — not something this text
+  // change may do quietly. Equally, nothing here may turn it off.
+  assert.equal(screenOffRule.kind, "state");
+  assert.equal(screenOffRule.enabled, true);
+  assert.equal(screenOffRule.severity, "medium");
+  assert.equal(screenOffRule.alertClass, undefined);
+  if (screenOffRule.kind !== "state") throw new Error("unreachable");
+  assert.equal(screenOffRule.field, "is_screen_on");
+  assert.equal(screenOffRule.equals, false);
+  assert.equal(screenOffRule.sustainedForSeconds, 30 * 60);
+});
+
+test("no default rule id has been renamed", () => {
+  // Every id here is stored on live alert rows; the incident model keys on
+  // (site, rule_id). A rename splits open incidents in two, so this pins the set.
+  assert.deepEqual(
+    DEFAULT_RULES.map((r) => r.id).sort(),
+    [
+      "black-screen", "cpu-high", "firmware-behind", "ntp-drift", "offline-30d",
+      "offline-30m", "offline-4h", "offline-6mo", "ram-high",
+      "screen-off-during-schedule", "showing-logo", "storage-full", "temp-high",
+      "wifi-weak",
+    ],
+  );
 });
 
 // ─────────────────────────────────────────────────────────────────────────────

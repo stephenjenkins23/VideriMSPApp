@@ -12,7 +12,7 @@
  */
 
 import type { Repository } from "../db/repository.js";
-import { evaluateRule } from "./evaluate.js";
+import { buildFirmwareTargetIndex, evaluateRule } from "./evaluate.js";
 import { validateRule, type AlertRule } from "./rules.js";
 import { requiredWindowSeconds } from "./rules.js";
 import type { DeviceRow, SampleRow } from "./evaluate.js";
@@ -52,6 +52,11 @@ export async function previewRule(repo: Repository, rule: AlertRule): Promise<Ru
 
   const input = await repo.loadEvaluationInput(requiredWindowSeconds([rule]), 240);
   const now = new Date();
+  // The same fleet-wide firmware evidence the engine uses, so a preview quotes the
+  // claim the alert would actually carry rather than a weaker stand-in.
+  const firmwareTargets = buildFirmwareTargetIndex(
+    [...input.values()].map((entry) => entry.device as DeviceRow),
+  );
   let fire = 0, unreadable = 0, belowThreshold = 0;
   const reasons = new Map<string, number>();
   const examples: Array<{ device: string; evidence: string }> = [];
@@ -61,6 +66,7 @@ export async function previewRule(repo: Repository, rule: AlertRule): Promise<Ru
       device: entry.device as DeviceRow,
       samples: entry.samples as SampleRow[],
       now,
+      firmwareTargets,
     });
     if (verdict.firing) {
       fire += 1;

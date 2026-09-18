@@ -47,6 +47,13 @@ export interface DeviceRow {
   id: string;
   name: string | null;
   location: string | null;
+  /**
+   * The platform's `device_class` — canvas, spark-bridge, tcl, allsee,
+   * allsee-shelf, or the literal "unknown" it sends when it does not know.
+   * Absent/null means we were never told, which the firmware rule states rather
+   * than guesses around.
+   */
+  deviceClass?: string | null;
   firmwareCurrent: string | null;
   firmwareLatest: string | null;
   /** component → {current, latest}. Up to 16 packages per device. */
@@ -203,6 +210,204 @@ function measureRun<T>(
 const gapTolerance = (sustainedForSeconds: number) =>
   Math.max(600, sustainedForSeconds * 0.5);
 
+// ─────────────────────────────────────────────────────────────────────────────
+// What the fleet itself says about a firmware target
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Evidence, counted from the devices we hold, about one
+ * (device class, component, target build) triple.
+ *
+ * This exists because `current !== latest` proves only that two strings differ.
+ * Verified live 2026-09-16: `icanvasplayer_version`, `adsync_version` and
+ * `superuserservice_version` each carry exactly ONE `latest` value across all six
+ * device classes in this fleet, so for those components `latest` is a single
+ * tenant-wide value rather than a per-model target (docs/14 §B15). A single value
+ * shared by a Videri Canvas, a TCL panel and an AllSee shelf label cannot be read
+ * as "the build for this model" on the strength of the platform saying so.
+ *
+ * So the rule cites the fleet instead: if other devices OF THE SAME CLASS report
+ * RUNNING that exact build, the build demonstrably runs on this model and
+ * "an upgrade exists" is a claim we can stand behind. If none do, the honest
+ * statement is that the strings differ and nothing more.
+ *
+ * Every number here is counted, never assumed.
+ */
+export interface FirmwareTargetEvidence {
+  /** Devices of this class reporting this component's `current` AS the target. */
+  peersAtTarget: number;
+  /** Devices of this class that report this component at all. */
+  classCohort: number;
+  /** Distinct `latest` values this component carries across the whole fleet. */
+  distinctTargetsFleetWide: number;
+  /** Device classes carrying this component at all, fleet-wide. */
+  classesFleetWide: number;
+}
+
+/** `class \0 component \0 target` → evidence. Built by buildFirmwareTargetIndex. */
+export type FirmwareTargetIndex = ReadonlyMap<string, FirmwareTargetEvidence>;
+
+/** NUL, because it cannot occur inside a class, component or version string. */
+const targetKey = (deviceClass: string, component: string, target: string) =>
+  `${deviceClass}\u0000${component}\u0000${target}`;
+
+/** Blank and whitespace-only class labels are absent, not a class called "". */
+const normaliseClass = (deviceClass: string | null | undefined): string | null =>
+  deviceClass && deviceClass.trim() !== "" ? deviceClass.trim() : null;
+
+const trimmed = (value: string | null | undefined): string | null =>
+  value && value.trim() !== "" ? value.trim() : null;
+
+/**
+ * Count, across the fleet, which firmware targets are actually attested per class.
+ *
+ * Pure: takes every device we are about to evaluate and returns counts. The engine
+ * builds this once per cycle from the devices it has already loaded, so it costs
+ * no extra query and no device command.
+ */
+export function buildFirmwareTargetIndex(
+  devices: Iterable<DeviceRow>,
+): FirmwareTargetIndex {
+  const peers = new Map<string, number>();
+  const cohorts = new Map<string, number>();
+  const targetsByComponent = new Map<string, Set<string>>();
+  const classesByComponent = new Map<string, Set<string>>();
+
+  for (const device of devices) {
+    const deviceClass = normaliseClass(device.deviceClass);
+    for (const [component, versions] of Object.entries(device.components ?? {})) {
+      const latest = trimmed(versions?.latest);
+      const current = trimmed(versions?.current);
+
+      if (latest) {
+        let targets = targetsByComponent.get(component);
+        if (!targets) targetsByComponent.set(component, (targets = new Set()));
+        targets.add(latest);
+      }
+      if (deviceClass) {
+        let classes = classesByComponent.get(component);
+        if (!classes) classesByComponent.set(component, (classes = new Set()));
+        classes.add(deviceClass);
+
+        const cohortKey = `${deviceClass}\u0000${component}`;
+        cohorts.set(cohortKey, (cohorts.get(cohortKey) ?? 0) + 1);
+
+        // Keyed on what the device is RUNNING, not on what it was told to run.
+        // That is the whole point: `current` is the one version string on this
+        // row that we know describes real installed software.
+        if (current) {
+          const key = targetKey(deviceClass, component, current);
+          peers.set(key, (peers.get(key) ?? 0) + 1);
+        }
+      }
+    }
+  }
+
+  const index = new Map<string, FirmwareTargetEvidence>();
+  for (const [cohortKey, classCohort] of cohorts) {
+    const [deviceClass, component] = cohortKey.split("\u0000") as [string, string];
+    for (const target of targetsByComponent.get(component) ?? []) {
+      index.set(targetKey(deviceClass, component, target), {
+        peersAtTarget: peers.get(targetKey(deviceClass, component, target)) ?? 0,
+        classCohort,
+        distinctTargetsFleetWide: targetsByComponent.get(component)?.size ?? 0,
+        classesFleetWide: classesByComponent.get(component)?.size ?? 0,
+      });
+    }
+  }
+  return index;
+}
+
+/** Whether the fleet corroborates a target for this device's model, and why. */
+export interface FirmwareTargetStanding {
+  corroborated: boolean;
+  /**
+   * The counted reason, phrased as a clause about the component and target passed
+   * in — the evidence sentence renders it as `component → why`, so it names the
+   * target build but says "this component" rather than repeating the package name.
+   */
+  why: string;
+}
+
+/**
+ * Decide what we are entitled to claim about one target for one device — pure.
+ *
+ * Absence is never corroboration. No index, no class, no cohort all land on
+ * `corroborated: false` with the reason attached, exactly as an unreadable metric
+ * lands on silence rather than on zero.
+ */
+export function firmwareTargetStanding(
+  index: FirmwareTargetIndex | null | undefined,
+  deviceClass: string | null | undefined,
+  component: string,
+  target: string,
+): FirmwareTargetStanding {
+  if (!index) {
+    return {
+      corroborated: false,
+      why:
+        `no fleet-wide version comparison was available in this evaluation, so nothing ` +
+        `corroborates ${target} as a build for this model`,
+    };
+  }
+
+  const cls = normaliseClass(deviceClass);
+  if (!cls) {
+    return {
+      corroborated: false,
+      why:
+        `the platform reports no device class for this device, so ${target} cannot be ` +
+        `attributed to a model at all`,
+    };
+  }
+
+  const evidence = index.get(targetKey(cls, component, target));
+  if (!evidence || evidence.classCohort === 0) {
+    return {
+      corroborated: false,
+      why:
+        `no device of class "${cls}" in this fleet reports ${component} at all, so there is ` +
+        `nothing to compare ${target} against for this model`,
+    };
+  }
+
+  if (evidence.peersAtTarget > 0) {
+    return {
+      corroborated: true,
+      why:
+        `${evidence.peersAtTarget} of the ${evidence.classCohort} "${cls}" device(s) in this ` +
+        `fleet reporting this component already run ${target}`,
+    };
+  }
+
+  // A cohort of one is this device. Saying "none of the 1 device runs it" would be
+  // technically true and useless; the real finding is that there is no peer.
+  if (evidence.classCohort === 1) {
+    return {
+      corroborated: false,
+      why:
+        `this is the only "${cls}" device in this fleet reporting this component, so nothing ` +
+        `corroborates ${target} as a build for this model`,
+    };
+  }
+
+  // The tenant-wide-value case, stated only when the data shows it: one `latest`
+  // for this component across more than one class means the platform is not
+  // differentiating by model here.
+  const tenantWide =
+    evidence.distinctTargetsFleetWide === 1 && evidence.classesFleetWide > 1
+      ? `, and it carries exactly one \`latest\` value across all ` +
+        `${evidence.classesFleetWide} device classes in this fleet — a single tenant-wide ` +
+        `value, not a per-model target`
+      : "";
+  return {
+    corroborated: false,
+    why:
+      `none of the ${evidence.classCohort} "${cls}" device(s) in this fleet reporting this ` +
+      `component runs ${target}${tenantWide}`,
+  };
+}
+
 /**
  * The newest persisted screen-check for a device, as the engine reads it.
  *
@@ -324,6 +529,13 @@ export interface EvaluateContext {
    * normal case and means "unverified" — never "fine" and never "refuted".
    */
   screenVerdict?: ScreenVerdictRecord | null;
+  /**
+   * Fleet-wide firmware-target counts, built once per cycle by
+   * `buildFirmwareTargetIndex`. Absent means the firmware rule still fires and
+   * still names the components, but says plainly that nothing corroborates the
+   * target for this model — never that an upgrade exists.
+   */
+  firmwareTargets?: FirmwareTargetIndex | null;
 }
 
 export function evaluateRule(rule: AlertRule, ctx: EvaluateContext): Verdict {
@@ -488,8 +700,44 @@ function evaluateState(
     return applyScreenVerdict(ctx, base, run, held);
   }
 
+  // A sustained "screen is off" is the fleet's largest single alert cohort, and
+  // the one whose finding is most often over-read. Keyed on the FIELD, like the
+  // black-screen branch above, because rule ids are operator-editable — and
+  // because THIS rule's id (`screen-off-during-schedule`) promises a schedule
+  // check that no alert rule anywhere in this codebase performs. The id is kept
+  // as-is deliberately: 463 stored rows carry it and the incident model keys on
+  // (site, rule_id), so renaming it is a data migration, not an edit. The limit
+  // therefore has to be stated in the text an operator actually reads.
+  if (rule.field === "is_screen_on" && rule.equals === false) {
+    return { ...base, firing: true, evidence: `${description} ${held}. ${SCREEN_OFF_LIMIT}` };
+  }
+
   return { ...base, firing: true, evidence: `${description} ${held}.` };
 }
+
+/**
+ * The caveat carried by every "screen powered off" alert.
+ *
+ * Deliberately placed immediately after the measurement, not at the end: the
+ * compact alert list truncates evidence, so a limit appended last is a limit the
+ * operator never sees.
+ *
+ * It says the same thing docs/22 Ask 11 asks Videri for, because it is the same
+ * gap: `is_screen_on` is panel power, `publisher` is content, and whether a panel
+ * is SUPPOSED to be powered on right now lives in a power schedule for which this
+ * platform exposes no verified read (docs/14 §D5). Gating this rule on the content
+ * schedule instead would read as a fix while encoding the wrong dimension — on this
+ * tenant it would change nothing at all, since all 891 scheduled items carry
+ * `frequency: null` and 883 of them end more than ten years out.
+ */
+export const SCREEN_OFF_LIMIT =
+  "CANNOT distinguish dark-by-design from dark-and-broken. This rule reads panel power " +
+  "(is_screen_on) and consults NO schedule — despite its rule id, no schedule is checked " +
+  "here. Whether this panel is supposed to be powered on right now is governed by a power " +
+  "schedule, and this platform exposes no verified read of one (docs/14 §D5, docs/22 " +
+  "Ask 11); the content schedule says what would play if the panel were on, not whether it " +
+  "should be on, so it is not a substitute. Established: the panel is off. Not established: " +
+  "whether it should be on.";
 
 /**
  * Reconcile a sustained black-screen claim with the panel's own answer.
@@ -666,6 +914,17 @@ function evaluateOffline(
  * than a single firmware version, and it is one of the genuinely good surfaces
  * this API offers — so the rule names the components that are behind rather than
  * collapsing everything to one number.
+ *
+ * WHAT THIS RULE MAY AND MAY NOT CLAIM. `current !== latest` establishes that two
+ * strings differ. It does NOT establish that an upgrade exists for the device in
+ * front of you: on this fleet three of the four components carry a single `latest`
+ * value shared by every device class, from Videri Canvas to TCL panel to AllSee
+ * shelf label (docs/14 §B15). So each behind-component is checked against what the
+ * fleet actually runs — see `firmwareTargetStanding`. Corroborated targets keep the
+ * strong wording; uncorroborated ones get the weaker, true one. Nothing is
+ * suppressed and the severity does not move: `info` was already the honest rank for
+ * a version-string difference, and being less sure than we were is not a reason to
+ * raise it.
  */
 function evaluateFirmware(
   rule: Extract<AlertRule, { kind: "firmware-behind" }>,
@@ -698,10 +957,51 @@ function evaluateFirmware(
     .join("; ");
   const more = inScope.length > 4 ? ` (+${inScope.length - 4} more)` : "";
 
+  // Same firing set as before this split existed — the standings change only what
+  // the alert SAYS. An honest claim and a suppressed alert are not the same thing.
+  const standings = inScope.map((b) => ({
+    ...b,
+    standing: firmwareTargetStanding(
+      ctx.firmwareTargets,
+      ctx.device.deviceClass,
+      b.component,
+      b.latest,
+    ),
+  }));
+  const corroborated = standings.filter((s) => s.standing.corroborated);
+  const uncorroborated = standings.filter((s) => !s.standing.corroborated);
+
+  const cite = (items: typeof standings) =>
+    items
+      .slice(0, 3)
+      .map((s) => `${s.component} → ${s.standing.why}`)
+      .join("; ") + (items.length > 3 ? `; +${items.length - 3} more` : "");
+
+  const claims: string[] = [];
+  if (corroborated.length > 0) {
+    claims.push(
+      (uncorroborated.length === 0
+        ? "An upgrade exists for this model — every target above is corroborated by the fleet: "
+        : "An upgrade exists for: ") + `${cite(corroborated)}.`,
+    );
+  }
+  if (uncorroborated.length > 0) {
+    claims.push(
+      (corroborated.length === 0
+        ? "We CANNOT say an upgrade exists for this model: "
+        : "But NOT for: ") +
+        `${cite(uncorroborated)}. For those the version strings differ, and that is all ` +
+        `this establishes — do not schedule an upgrade on it without confirming the build ` +
+        `for this model.`,
+    );
+  }
+
   return {
     ...base,
     firing: true,
-    evidence: `${inScope.length} of ${Object.keys(components).length} components behind: ${detail}${more}.`,
+    evidence:
+      `${inScope.length} of ${Object.keys(components).length} components behind: ` +
+      `${detail}${more}. ${claims.join(" ")}`,
   };
 }
 

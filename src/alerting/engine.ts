@@ -23,6 +23,7 @@ import {
   type AlertRule,
 } from "./rules.js";
 import {
+  buildFirmwareTargetIndex,
   evaluateDevice,
   type Verdict,
   type SampleRow,
@@ -226,6 +227,13 @@ export async function runAlerting(
   const rulesById = new Map(active.map((r) => [r.id, r]));
   const dormantRules = dormantRuleIds(active);
 
+  // One pass over the devices already in hand, so the firmware rule can cite what
+  // this fleet actually runs instead of trusting `latest` to be per-model. No
+  // extra query, no device command; see buildFirmwareTargetIndex.
+  const firmwareTargets = buildFirmwareTargetIndex(
+    [...input.values()].map((entry) => entry.device as DeviceRow),
+  );
+
   for (const [deviceId, entry] of input) {
     const device: DeviceRow = entry.device;
     const samples: SampleRow[] = entry.samples;
@@ -234,6 +242,7 @@ export async function runAlerting(
       samples,
       now,
       screenVerdict: screenVerdicts.get(deviceId) ?? null,
+      firmwareTargets,
     });
 
     const firingIds = new Set(verdicts.filter((v) => v.firing).map((v) => v.ruleId));
