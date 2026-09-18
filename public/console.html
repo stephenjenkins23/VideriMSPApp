@@ -1398,7 +1398,15 @@ const S = { summary: null, alerts: [], devices: [], compliance: [], pipeline: nu
                payload and re-deriving it here is how a client gets a grouping
                rule wrong. */
             inc: null, incPage: null, incErr: null, incLoading: false, incAt: 0,
-            incF: { page: 1, state: "all", severity: "all", rule: null, deviceId: null, sinceDays: null },
+            /* `correlate` is an opt-in COST, not a filter: correlate=true makes
+               /api/incidents run the same per-device assembly /api/correlation
+               runs (~84 ms) on every poll of this queue, so it defaults off and
+               is driven by a button rather than by a link. It is deliberately
+               kept out of the address bar, for the reason the collector card's
+               state is: a shareable link that silently re-paid that cost on
+               every load is a link nobody can see the price of. */
+            incF: { page: 1, state: "all", severity: "all", rule: null, deviceId: null,
+              sinceDays: null, correlate: false },
             incOpen: null, incDrill: {},
             /* US-8.6.3 -- the baseline `summary.byCause` needs. The ids of the
                auto-safe set plus THE INSTANT WE READ THEM, held from the first
@@ -7509,6 +7517,12 @@ function incQuery() {
   if (f.rule) p.push("rule=" + encodeURIComponent(f.rule));
   if (f.deviceId) p.push("deviceId=" + encodeURIComponent(f.deviceId));
   if (f.sinceDays) p.push("sinceDays=" + encodeURIComponent(f.sinceDays));
+  /* The endpoint's own vocabulary is the enum ["true","false","1","0"], and it
+     400s anything else -- including, on /api/alerts, a parameter it does not
+     declare at all. Only the affirmative is sent: `correlate=false` is the
+     default and sending it would put a parameter on the wire whose absence
+     already says the same thing. */
+  if (f.correlate) p.push("correlate=true");
   return p.join("&");
 }
 
@@ -7594,9 +7608,26 @@ function incRecurrence(o, axis) {
   const together = axis === "site" ? "site-wide" : axis === "group" ? "group-wide" : "multi-device";
   const floor = (o && o.minCoFiringDevices) || 3;
   const mins = (o && o.windowMinutes) || 30;
+  /* The withdrawn bucket, on the COLLAPSED row. Without it a row like
+     Montreal Office / offline-4h reads "recurred 2 times, 0 of them
+     group-wide" and the operator has no idea that one of those two windows
+     held six devices -- the claim was withdrawn, not absent. A payload with no
+     `noticedTogether` at all is UNKNOWN and says so: silence there is the very
+     failure this clause exists to end. */
+  const nt = o && typeof o.noticedTogether === "number" ? o.noticedTogether : null;
+  const withdrawn = nt === null
+    ? ` &#183; <span class="unres">this row carried no noticed-together count, so whether any
+        co-firing claim here was withdrawn is unknown &#8212; which is not the same as none</span>`
+    : nt === 0
+      ? ""
+      : ` &#183; <b>${nt}</b> <span title="${esc(`${nt} further window(s) carried ${floor} or more ` +
+          `devices and had the co-firing claim WITHDRAWN: every open in them landed in the first ` +
+          `pass after our own collector regained sight, so they were noticed together rather than ` +
+          `shown to have failed together. The alerts stand; the correlation does not.`)
+          }">noticed together, not failed together</span>`;
   return `recurred <b>${total}</b> time${total === 1 ? "" : "s"}, <b>${co}</b> of them
     <span title="${esc(`A window is ${mins} fixed minutes in which this incident opened at least once; ` +
-      `${floor} or more distinct devices firing inside one is the signature of a cause above the device.`)}">${together}</span>`;
+      `${floor} or more distinct devices firing inside one is the signature of a cause above the device.`)}">${together}</span>${withdrawn}`;
 }
 
 /**
@@ -7649,25 +7680,140 @@ function incRosterHtml(i) {
 }
 
 /**
- * The occurrence windows -- the partition itself.
+ * The occurrence windows -- the partition itself, and why a window is NOT a
+ * site event.
  *
  * `transitionIds` across the windows partitions the incident, so the sum is
  * checked here against `transitionCount` and PRINTED. It is the same invariant
  * the endpoint publishes fleet-wide in `reconciliation`, asserted again per row
- * because this is the row a technician will act on.
+ * because this is the row a technician will act on. BUG-10 added two more
+ * client-assertable triples and this function asserts both for the same reason.
+ *
+ * The BUG-10 rendering, which is the whole point of this pass: when the
+ * collector comes back from an outage the alerting lane opens an alert for
+ * every already-down device in the same second -- the instant WE NOTICED, not
+ * the instant anything failed. The endpoint now withdraws the co-firing claim
+ * on those windows (131 windows became 91, with 40 withdrawn). Because
+ * `coFiring` is simply `false` on a withdrawn window, the old code dropped the
+ * tag and said NOTHING: the operator was shown a multi-device window with no
+ * account of why it is not a site event, which threw away the most useful
+ * thing the fix learned. All three states are now named, and the withdrawn one
+ * is styled `.tag.net` -- INFORMATION, not a fault. Nothing is wrong with
+ * these devices *together*; every alert in the window is still individually
+ * real, still listed here, still on the roster and still in the drilldown.
  */
 function incWindowsHtml(i) {
   const o = i.occurrences || {};
   const all = o.windows || [];
   const shown = all.slice(0, INC_WINDOWS_SHOWN);
   const partition = all.reduce((n, w) => n + ((w.transitionIds || []).length), 0);
-  const rows = shown.map((w) => `<div class="fdr">
+  /* Everything this function needs is declared INSIDE it. The console test
+     harnesses lift declarations by name against a FIXED list, so a new
+     top-level helper referenced from here is `undefined` in those harnesses --
+     the trap that broke 11 of 22 pinned URL tests at once. alertBands() keeps
+     its vocabulary inline for exactly this reason. */
+  const num = (x) => (typeof x === "number" && isFinite(x) ? x : null);
+  /* An honest null, never 0: `blindSeconds: null` means we cannot know how long
+     we were blind (the resume is the START of the observation history), and a
+     "0h" there would read as "there was no outage" -- the opposite of the truth. */
+  const blindOf = (p) => p.blindSeconds == null
+    ? `blind for an unknown length of time (${p.blindReason
+        || "the payload carried no reason, which is itself worth reporting"})`
+    : `blind for ${Math.round(p.blindSeconds / 360) / 10}h`;
+
+  const rows = shown.map((w) => {
+    const p = w.provenance || null;
+    const fp = p && num(p.firstPassSeconds);
+    /* A window that KEPT its claim can still be partly our own noticing, so it
+       gets the co-firing tag AND the note. `failedTogetherDeviceCount` is the
+       devices the test was actually made on. */
+    const tag = w.coFiring
+      ? `<span class="tag warn" title="${esc(`${(o.minCoFiringDevices || 3)} or more devices ` +
+          `whose opens can date a FAILURE fired inside this window, which is the signature of a ` +
+          `cause above the device.`)}">co-firing</span>`
+      : w.noticedTogether
+        ? `<span class="tag net" data-ntbadge="1" title="${esc(`${w.deviceCount} device(s) fired ` +
+            `inside this window, but every one of them opened in the first pass after our own ` +
+            `collector regained sight. They were noticed together, not shown to have failed ` +
+            `together, so the co-firing claim is withdrawn. The alerts themselves stand.`)
+            }">noticed together, not failed together</span>`
+        : p
+          ? `<span class="tag und" data-fpbadge="1" title="${esc(`This window holds transition(s) ` +
+              `opened by the first pass after a collector resume. It never carried the ` +
+              `${(o.minCoFiringDevices || 3)}-device signature, so there was no co-firing claim ` +
+              `to withdraw.`)}">first pass after a resume</span>`
+          : "";
+    /* WHY, in words, under the row. Four cases and not one of them is silence. */
+    const why = w.noticedTogether
+      ? (p
+        ? `<div class="fdr" style="padding-top:0"><span class="fds"
+             style="padding-left:2px">${esc(p.note)}</span></div>`
+        : `<div class="fdr" style="padding-top:0"><span class="fds"><span class="unres">the
+             co-firing claim on this window was withdrawn and the payload carried no provenance
+             to explain it. That is a bug in /api/incidents, not a quiet window &#8212; the
+             withdrawal is exactly the thing that has to be explained</span></span></div>`)
+      : w.coFiring && p
+        ? `<div class="fdr" style="padding-top:0"><span class="fds"
+             style="padding-left:2px">${esc(p.note)}</span></div>`
+        : p
+          /* Sub-threshold. The endpoint's own `note` is written for the
+             WITHDRAWAL case and says "the co-firing claim is withdrawn", which
+             is not true of a window that never reached the floor, so it is
+             stated from the structured fields instead and the payload's
+             sentence is kept on the title where nothing is hidden. */
+          ? `<div class="fdr" style="padding-top:0"><span class="fds" style="padding-left:2px"
+               title="${esc(p.note || "")}">${num(p.transitions) === null
+                 ? `<span class="unres">the payload did not say how many transition(s) here
+                      opened in that first pass</span>`
+                 : `<b>${p.transitions}</b> of this window's transition(s)`} opened in the
+               first ${fp === null ? "pass" : fp + "s"} after collection resumed at
+               ${esc(String(p.resumedAt || "an instant the payload did not give"))}, having been
+               ${esc(blindOf(p))}. This window never carried the
+               ${(o.minCoFiringDevices || 3)}-device signature, so there was no co-firing claim
+               to withdraw &#8212; but those open times still date our noticing, not the
+               failure.</span></div>`
+          : "";
+    return `<div class="fdr">
       <span class="fdn">${esc(String(w.windowStart).replace("T", " ").slice(0, 16))}</span>
       <span class="fds">${w.coFiring
         ? `<b>${w.deviceCount}</b> devices together`
         : `${w.deviceCount} device(s)`} &#183;
-        ${(w.transitionIds || []).length} transition(s)
-        ${w.coFiring ? `<span class="tag warn">co-firing</span>` : ""}</span></div>`).join("");
+        ${(w.transitionIds || []).length} transition(s)${w.coFiring && p
+          && num(w.failedTogetherDeviceCount) !== null
+          ? ` &#183; <b>${w.failedTogetherDeviceCount}</b> of them fired outside that first pass`
+          : ""}
+        ${tag}</span></div>${why}`;
+  }).join("");
+
+  /* The two triples the endpoint designed to be client-assertable, asserted
+     here the same way renderIncidents() asserts `reconciliation.balanced`: a
+     bucket that moved a window without taking it out of the bucket it came
+     from is visible on the row instead of arriving as a quietly wrong count.
+     A missing field is UNKNOWN, never 0 -- an unchecked triple printing
+     "it adds up" is the same lie as an unchecked provenance printing "clean". */
+  const wTot = num(o.total), wCo = num(o.coFiring);
+  const wNt = num(o.noticedTogether), wIso = num(o.isolated);
+  const windowTriple = wTot === null || wCo === null || wNt === null || wIso === null
+    ? `<span class="unres">this row did not carry all three window buckets as numbers, so
+         co-firing + noticed-together + isolated could not be checked against the window
+         total &#8212; which is not the same as it adding up</span>`
+    : wCo + wNt + wIso === wTot
+      ? `<b>${wCo}</b> co-firing + <b>${wNt}</b> noticed together + <b>${wIso}</b> isolated =
+         <b>${wTot}</b> window(s), which is every window on this row.`
+      : `<b>The window buckets do not add up.</b> ${wCo} co-firing + ${wNt} noticed together +
+         ${wIso} isolated is ${wCo + wNt + wIso}, and this row claims ${wTot} window(s). One of
+         those is wrong; trust the transitions below and treat this row's counts as suspect.`;
+  const tCo = num(o.transitionsCoFiring), tNt = num(o.transitionsNoticedTogether);
+  const tIso = num(o.transitionsIsolated), tTot = num(i.transitionCount);
+  const txTriple = tCo === null || tNt === null || tIso === null || tTot === null
+    ? `<span class="unres">this row did not carry the transition split as numbers, so it could
+         not be checked against the incident's transition count</span>`
+    : tCo + tNt + tIso === tTot
+      ? `<b>${tCo}</b> + <b>${tNt}</b> + <b>${tIso}</b> transition(s) in those three buckets =
+         <b>${tTot}</b>, this incident's whole transition count.`
+      : `<b>The transition split does not add up.</b> ${tCo} + ${tNt} + ${tIso} is
+         ${tCo + tNt + tIso}, and this incident claims ${tTot} transition(s).`;
+
   return `<div class="fdr" style="padding-bottom:9px">
       <span class="fds">${esc(o.basis || "The payload stated no basis for these windows.")}</span></div>
     ${rows}
@@ -7682,7 +7828,8 @@ function incWindowsHtml(i) {
          nothing on this row is outside a window.`
       : `<b>These windows hold ${partition} transition ids but the incident claims
          ${i.transitionCount}.</b> The windows are supposed to partition the incident exactly, so
-         trust the transitions below and treat this row's counts as suspect.`}</span></div>`;
+         trust the transitions below and treat this row's counts as suspect.`}</span></div>
+    <div class="fdr"><span class="fds">${windowTriple} ${txTriple}</span></div>`;
 }
 
 /**
@@ -7803,10 +7950,27 @@ function incidentRow(i) {
         transition(s) acknowledged &#183; severities
         ${Object.entries(i.severityCounts || {}).filter(([, n]) => n > 0)
           .map(([k, n]) => `${n} ${esc(k)}`).join(", ") || "none recorded"}</span></div>
-      ${(i.correlationFindings || []).length
-        ? `<div class="fdr"><span class="fds">Live correlation findings touching this roster:
-             ${i.correlationFindings.map((f) => esc(f.summary)).join("; ")}</span></div>`
-        : ""}
+      ${(() => {
+        /* Same three states, on the row. An empty `correlationFindings` is
+           ambiguous on its own -- not asked, asked and nothing overlapped, or
+           asked and the assembly failed -- and the row is where somebody
+           decides whether to dispatch, so it says which. */
+        const cf = i.correlationFindings || [];
+        const cav = ((S.inc && S.inc.correlation) || {}).available;
+        if (cf.length) {
+          return `<div class="fdr"><span class="fds">Live correlation findings touching this
+            roster: ${cf.map((f) => esc(f.summary)).join("; ")}</span></div>`;
+        }
+        return `<div class="fdr"><span class="fds">${!S.incF.correlate
+          ? `<span class="unres">live correlation was not cross-linked onto this row &#8212; it
+               is off by default because it costs the full per-device assembly. That is not a
+               finding that nothing overlaps this roster</span>`
+          : cav === true
+            ? `No live correlation finding overlaps this roster. The cross-link WAS computed, so
+               this is "nothing matched", not "nothing asked".`
+            : `<span class="unres">the cross-link was requested for this row and could not be
+                 computed, so whether anything overlaps this roster is unknown</span>`}</span></div>`;
+      })()}
       <div class="fdr"><button class="btn sm" data-inc-rule="${esc(i.ruleId)}">Only rule
           ${esc(i.ruleId)}</button>
         <span class="fds">The rule is part of the incident key, so filtering the transitions by
@@ -7822,11 +7986,120 @@ function incidentRow(i) {
 }
 
 /**
+ * The withdrawn co-firing claims, as a queue-level figure (BUG-10).
+ *
+ * It rides BESIDE `coFiringEvents` and is never folded into it: 40 of the 131
+ * windows that carried the >=3-device signature had the claim withdrawn, they
+ * are NOT in `coFiringEvents`, and they ARE still in `transitions`. The alerts
+ * are real; only the correlation is withdrawn, and a reader has to be told
+ * which of those two things happened.
+ *
+ * Absent totals are UNKNOWN, never 0 -- "no claim was withdrawn" is a finding
+ * about the estate and "the payload did not carry the figure" is a statement
+ * about the payload, and printing the second as the first is the fabricated
+ * zero this project exists to refuse.
+ *
+ * Top-level rather than inline because renderIncidents() is delimited by a
+ * 300-line window in console-overview.test.ts and is the longest declaration
+ * the console has. Any harness that runs renderIncidents() must list this name
+ * in its declarations too -- console-incidents.test.ts and
+ * console-incidents-provenance.test.ts both do.
+ */
+function incWithdrawnHtml(t, floor) {
+  if (t.noticedTogetherEvents == null || t.noticedTogetherTransitions == null) {
+    return `<div class="prov"><span class="unres">this payload carried no noticed-together
+      totals, so how many co-firing claims were withdrawn on collector provenance is unknown
+      &#8212; which is not the same as none being withdrawn</span></div>`;
+  }
+  if (t.noticedTogetherEvents === 0) {
+    return `<div class="prov">No co-firing claim on this page was withdrawn on collector
+      provenance: no ${floor}-device window opened inside the first pass after one of our own
+      resumes.</div>`;
+  }
+  return `<div class="prov">A further <b>${t.noticedTogetherEvents}</b> occurrence(s) covering
+    <b>${t.noticedTogetherTransitions}</b> transition(s) carried that same ${floor}-device shape
+    and had the co-firing claim <b>withdrawn</b>: every open in them landed in the first pass
+    after our collector regained sight, so those devices were <b>noticed together, not shown to
+    have failed together</b>. They are NOT in the
+    ${t.coFiringEvents == null ? "co-firing" : t.coFiringEvents} co-firing figure above and they
+    ARE still in the ${t.transitions == null ? "" : t.transitions + " "}transitions read
+    &#8212; the alerts are real, only the correlation is withdrawn.</div>`;
+}
+
+/**
+ * Whether the co-firing claims were checked against our OWN outage history --
+ * and `false` must never read as clean.
+ *
+ * `checked: false` is "we did not look". Every multi-device window on the page
+ * is then presented on its device count alone, which is exactly how BUG-10
+ * shipped: a burst of alerts opened by the first evaluation pass after the
+ * collector came back was reported as a correlated site event. So the unchecked
+ * case gets the amber `.note` banner and the words "NOT provenance-checked",
+ * and states that the co-firing counts are an upper bound. A quiet neutral line
+ * here would be worse than the bug it is reporting on.
+ *
+ * Anything that is not literally `true` falls to that branch. A missing block,
+ * a null, or a truthy non-boolean (`"false"`) are all "we cannot say this was
+ * checked", and reading any of them as checked is the same fabrication.
+ */
+function incProvenanceHtml(pv, floor) {
+  if (pv === null || pv.checked !== true) {
+    return `<div class="note" style="margin-top:12px"><b>Co-firing claims on this page were NOT
+      provenance-checked.</b> ${pv
+        ? esc(pv.reason || "The payload gave no reason, which is itself worth reporting.")
+        : "The payload carried no provenance block at all, so the check cannot even be said to " +
+          "have been attempted."}
+      This is <b>not</b> a clean bill of health and <b>not</b> a finding of "no artifacts":
+      without our own collector outage history every ${floor}-device window below is reported on
+      its device count alone, so any co-firing figure here may include bursts that only record
+      the instant we noticed. Treat the co-firing counts as an upper bound.</div>`;
+  }
+  const src = pv.resumesBySource || null;
+  return `<div class="na" style="font-size:12px;margin-top:12px">
+    <b>Co-firing claims on this page were provenance-checked</b> against our own collector outage
+    history.
+    <div class="prov">${esc(pv.note || "The payload stated no provenance note.")}</div>
+    <div class="prov">${pv.suppressedEvents == null || pv.suppressedTransitions == null
+      ? `<span class="unres">the payload did not say how many windows the check withdrew</span>`
+      : `<b>${pv.suppressedEvents}</b> window(s) covering <b>${pv.suppressedTransitions}</b>
+         transition(s) lost the co-firing claim.`}
+      ${pv.resumes == null
+        ? `<span class="unres">the payload did not say how many resumes were considered</span>`
+        : `Checked against <b>${pv.resumes}</b> collector resume(s)${src
+            ? ` (${Object.entries(src).filter(([, n]) => n > 0)
+                .map(([k, n]) => `${n} ${esc(k)}`).join(", ") || "none by source"})`
+            : ""}, taking the first ${pv.firstPassSeconds == null
+              ? "pass" : pv.firstPassSeconds + "s"} after each as the pass that only records our
+              noticing.`}</div>
+    <div class="prov">${esc(pv.coverageNote || "")}</div></div>`;
+}
+
+/**
  * Paint the incident queue.
  *
  * Order is deliberate: the reconciliation gate, then what the collapse IS, then
  * the rows. A reader who has lost a transition must be stopped before they read
  * a single incident row.
+ *
+ * THE BUDGET, and it is not a style note: console-overview.test.ts delimits
+ * this declaration by parseability inside a 300-LINE window, and this function
+ * is the longest one the console has. Every explanation that can live up here
+ * lives up here rather than in the body, because a body that crosses 300 lines
+ * does not fail this function -- it fails every lifted harness in the suite at
+ * once with "could not delimit". Measured after the BUG-10 pass: 294.
+ *
+ * The two BUG-10 blocks are lifted into incWithdrawnHtml() and
+ * incProvenanceHtml() for the same budget reason, and documented there.
+ *
+ * `correlation.available` has THREE renderings and they must not collapse into
+ * two. "Not requested" is a cost this console chose not to pay; "computed and
+ * nothing matched" is a finding about the estate; "requested and it failed" is
+ * neither. The correlate toggle itself is a `.fp` pressed-state button rather
+ * than a filter select, because it does not narrow the queue -- it buys a
+ * cross-link at a stated price (~84 ms of per-device assembly on every read),
+ * and it is deliberately kept OUT of the address bar for the reason the
+ * collector card's state is: a shareable link that silently re-paid that on
+ * every load is a link nobody can see the price of.
  */
 function renderIncidents() {
   const host = $("#inclist");
@@ -7860,6 +8133,16 @@ function renderIncidents() {
        <select id="incsev">${opts(INC_SEVS, S.incF.severity)}</select>` +
       `<label for="incwin">Window</label>
        <select id="incwin">${opts(INC_WINDOWS, S.incF.sinceDays || "")}</select>` +
+      `<button class="fp${S.incF.correlate ? " on" : ""}" id="inccorr" aria-pressed="${
+         S.incF.correlate ? "true" : "false"}" title="${esc(S.incF.correlate
+           ? "On. /api/incidents is running the same correlate() call /api/correlation runs and " +
+             "stamping the overlapping findings onto each incident's roster, so the two surfaces " +
+             "cannot describe one site differently. Press to stop paying for it."
+           : "Off by default. Turning it on makes /api/incidents run the full per-device " +
+             "assembly /api/correlation pays (~84 ms) on every read of this queue, and stamp the " +
+             "findings whose devices overlap an incident's roster onto that row.")
+         }">${S.incF.correlate ? "&#10003; cross-linking live correlation"
+           : "&#8853; cross-link live correlation (~84 ms)"}</button>` +
       (S.incF.rule
         ? `<button class="fp" id="incruleclr">&#10005; rule ${esc(S.incF.rule)}</button>` : "") +
       (S.incF.deviceId
@@ -7871,6 +8154,10 @@ function renderIncidents() {
     const wn = $("#incwin");
     if (wn) wn.addEventListener("change", () =>
       loadIncidents({ sinceDays: wn.value ? Number(wn.value) : null, page: 1 }));
+    const cr = $("#inccorr");
+    // No `page: 1`: the cross-link changes what is STAMPED on the incidents, not
+    // which ones match, so it must not move the reader off the page they are on.
+    if (cr) cr.addEventListener("click", () => loadIncidents({ correlate: !S.incF.correlate }));
     const rc = $("#incruleclr");
     if (rc) rc.addEventListener("click", () => loadIncidents({ rule: null, page: 1 }));
     const dc = $("#incdevclr");
@@ -7944,6 +8231,9 @@ function renderIncidents() {
   const t = v.totals || {};
   const c = v.corpus || {};
   const g = v.grouping || {};
+  // The co-firing floor, read off a ROW rather than hard-coded: it is quoted in
+  // several sentences, and a second spelling of it is a second thing to get wrong.
+  const floor = (rows[0] && rows[0].occurrences && rows[0].occurrences.minCoFiringDevices) || 3;
 
   /* THE ONE COUNT TAKEN FROM THE ROWS, and it is taken from the very array the
      list below is built from. Everything else on this screen is the endpoint's
@@ -7984,9 +8274,8 @@ function renderIncidents() {
      <div class="na" style="font-size:12px;margin-top:10px">
        ${t.coFiringEvents == null
         ? `<span class="unres">no co-firing figure in this payload</span>`
-        : `<b>${t.coFiringEvents}</b> of those occurrences carried ${
-            (rows[0] && rows[0].occurrences && rows[0].occurrences.minCoFiringDevices) || 3
-          } or more devices firing together, covering <b>${t.coFiringTransitions}</b> transition(s)
+        : `<b>${t.coFiringEvents}</b> of those occurrences carried ${floor} or more devices
+          firing together, covering <b>${t.coFiringTransitions}</b> transition(s)
           &#8212; ${t.coFiringSharePercent == null ? "an unstated share" : t.coFiringSharePercent + "%"}
           of everything read, and ${t.coFiringShareOfAttributedPercent == null
             ? "an unstated share"
@@ -7997,7 +8286,9 @@ function renderIncidents() {
         ? ` <b>${t.unattributedTransitions}</b> transition(s) are on devices in no group at all and
             are reported as single-device incidents rather than folded into a neighbour.`
         : ""}
+       ${incWithdrawnHtml(t, floor)}
      </div>
+     ${incProvenanceHtml(v.provenance || null, floor)}
      <div class="note ${g.siteAxisAvailable ? "na" : ""}" style="margin-top:12px">
        <b>Grouped by ${esc(g.axisLabel || "an axis the payload did not name")}.</b>
        ${esc(g.reason || "")}</div>
@@ -8058,11 +8349,25 @@ function renderIncidents() {
         ${rec.transitionsInIncidents} in an incident, ${rec.transitionsInOccurrenceWindows} in an
         occurrence window, ${rec.distinctTransitionIds} distinct transition id(s) &#8212; all four
         equal, so the partition holds.</div>
-      <div class="prov">Live correlation cross-link: ${corr.available
-        ? `${corr.findings} finding(s) were computed and stamped onto the incidents whose rosters
-           they touch.${corr.reason ? " " + esc(corr.reason) : ""}`
-        : `<span class="unres">${esc(corr.reason
-            || "not available, and the payload gave no reason")}</span>`}</div>
+      <div class="prov">Live correlation cross-link: ${!S.incF.correlate
+        // The endpoint's own reason already opens with "Not requested", so it is
+        // printed rather than prefixed -- saying it twice was what the browser showed.
+        ? `<span class="unres">${esc(corr.reason
+            || "not requested, and the payload gave no reason.")} This is a cost we did not pay,
+            <b>not</b> a finding that nothing is correlated &#8212; use the cross-link button
+            above the list.</span>`
+        : corr.available === true
+          ? (corr.findings
+            ? `computed from the same assembly /api/correlation uses &#8212;
+               <b>${corr.findings}</b> finding(s) were stamped onto the incidents whose rosters
+               they touch.${corr.reason ? " " + esc(corr.reason) : ""}`
+            : `computed from the same assembly /api/correlation uses, and it returned <b>no
+               findings at all</b>. That is a statement about the fleet right now, not a cost we
+               skipped.${corr.reason ? " " + esc(corr.reason) : ""}`)
+          : `<b>requested, and it could not be computed.</b> ${esc(corr.reason
+              || "The payload gave no reason, which is itself worth reporting.")} So an incident
+              with no findings below means the cross-link FAILED, not that nothing
+              overlaps.`}</div>
       <div class="prov">Read from /api/incidents
         ${ago(new Date(S.incAt || Date.now()).toISOString())} &#8212; a direct read, not the poll
         snapshot the rest of this console carries, so the freshness pill in the header does not

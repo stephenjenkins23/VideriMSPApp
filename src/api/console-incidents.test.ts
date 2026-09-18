@@ -96,7 +96,13 @@ const INCIDENT_DECLS = [
   "INC_STATES", "INC_SEVS", "INC_WINDOWS",
   "incQuery", "loadIncidents", "incAxis", "incRecurrence", "incFlap",
   "incRosterHtml", "incWindowsHtml", "loadIncidentTransitions", "incDrillHtml",
-  "incidentRow", "renderIncidents",
+  "incidentRow",
+  // The two BUG-10 queue-level renderers. renderIncidents() calls both, so a
+  // harness that lifts renderIncidents and not these gets a ReferenceError at
+  // render time — the same fixed-declaration-list trap that once broke 11 of
+  // the 22 pinned URL tests at once.
+  "incWithdrawnHtml", "incProvenanceHtml",
+  "renderIncidents",
 ] as const;
 
 type IncidentApi = {
