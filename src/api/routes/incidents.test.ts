@@ -103,7 +103,16 @@ interface Captured { sql: string; values: unknown[] }
  * property under test, and a stub with a canned total would pass whether the
  * route pushed its filters to one statement, the other, or neither.
  */
-function stubPool(rows: Row[]): { pool: Pool; captured: Captured[] } {
+function stubPool(
+  rows: Row[],
+  /**
+   * The collector's observation timeline, as the route's own query returns it:
+   * one row per blind window (`prev` → `at`) plus one `prev: null` row carrying
+   * the earliest observation we hold. Empty by default, which is how every test
+   * written before BUG-10 keeps exercising the unchecked path.
+   */
+  timeline: Array<{ prev: Date | null; at: Date }> = [],
+): { pool: Pool; captured: Captured[] } {
   const captured: Captured[] = [];
   const matching = (values: unknown[]): Row[] => {
     let out = rows;
@@ -121,6 +130,9 @@ function stubPool(rows: Row[]): { pool: Pool; captured: Captured[] } {
     async query(sql: string, values: unknown[] = []) {
       captured.push({ sql, values });
       if (sql.includes("MAX(observed_at)")) return { rows: [{ newest: NEWEST }], rowCount: 1 };
+      // Checked BEFORE the bare poller_runs probe: the resume query reads that
+      // table too, inside a CTE.
+      if (sql.includes("lag(at) OVER")) return { rows: timeline, rowCount: timeline.length };
       if (sql.includes("FROM poller_runs")) return { rows: [], rowCount: 0 };
       if (sql.includes("COUNT(*) FILTER (")) {
         const all = matching(values);
@@ -159,10 +171,11 @@ async function get(
   url: string,
   rows: Row[] = [],
   headers: Record<string, string> = {},
+  over: { timeline?: Array<{ prev: Date | null; at: Date }>; repo?: Repository } = {},
 ): Promise<Answer> {
-  const { pool, captured } = stubPool(rows);
+  const { pool, captured } = stubPool(rows, over.timeline ?? []);
   const app = await buildServer({
-    pool, repo: stubRepo(), auth: { token: TOKEN, allowAnonymous: false },
+    pool, repo: over.repo ?? stubRepo(), auth: { token: TOKEN, allowAnonymous: false },
   });
   const res = await app.inject({ method: "GET", url, headers: { ...auth, ...headers } });
   await app.close();
@@ -452,4 +465,158 @@ test("an empty corpus is an empty queue with honest nulls, not a zeroed dashboar
   assert.equal(totals["transitions"], 0);
   assert.equal(totals["collapsePercent"], null);
   assert.equal(totals["coFiringSharePercent"], null);
+});
+
+// ── BUG-10: our own outage must not be published as the estate's ────────────
+
+/** The 23.6 h blind window from the real corpus, as the timeline query returns it. */
+const BLIND_23H = [
+  { prev: new Date("2026-08-25T18:33:24.465Z"), at: new Date("2026-08-26T18:06:52.734Z") },
+  // The `prev: null` row: the earliest observation either table still holds.
+  { prev: null, at: new Date("2026-08-25T18:14:29.428Z") },
+];
+
+/** The `Montreal Office` burst: six screens, six criticals, inside 2.3 ms. */
+const montreal = (): Row[] =>
+  ["m1", "m2", "m3", "m4", "m5", "m6"].map((deviceId, i) =>
+    row({
+      device_id: deviceId,
+      device_name: `dev ${deviceId}`,
+      group_id: "grp-montreal",
+      group_name: "Montreal Office",
+      rule_id: "offline-4h",
+      severity: "critical",
+      title: "Offline for 4h",
+      opened_at: new Date(Date.parse("2026-08-26T18:06:57.579Z") + i * 0.4),
+      last_fired_at: new Date(Date.parse("2026-08-26T18:06:57.579Z") + i * 0.4),
+      resolved_at: null,
+    }),
+  );
+
+/**
+ * A repository whose run history is empty but READABLE.
+ *
+ * That separates the two failure modes this route has to keep apart: a
+ * collector with no correlated outages (provenance checked, nothing found) and
+ * a collector whose history could not be read at all (provenance not checked).
+ * `stubRepo()` is the second — an object with no methods, so the health read
+ * throws.
+ */
+const readableRepo = (gaps: Record<string, Array<{ startedAt: Date; endedAt: Date; seconds: number }>> = {}): Repository =>
+  ({
+    async pollerRunHistory() {
+      return [];
+    },
+    async laneObservations() {
+      return Object.entries(gaps).map(([lane, laneGaps]) => ({
+        lane,
+        source: "poller_runs",
+        count: 2,
+        firstAt: laneGaps[0]?.startedAt ?? null,
+        lastAt: laneGaps[laneGaps.length - 1]?.endedAt ?? null,
+        medianGapSeconds: laneGaps[0]?.seconds ?? null,
+        gaps: laneGaps,
+        gapsTruncated: false,
+      }));
+    },
+  }) as unknown as Repository;
+
+test("BUG-10: a resume burst is served as noticed-together, not as a site event", async () => {
+  const rows = montreal();
+  const res = await get("/api/incidents", rows, {}, { timeline: BLIND_23H, repo: readableRepo() });
+  assert.equal(res.status, 200);
+  const data = res.data();
+
+  const totals = data["totals"] as Record<string, number>;
+  assert.equal(totals["coFiringEvents"], 0, "six devices, but nothing that dates a failure");
+  assert.equal(totals["noticedTogetherEvents"], 1);
+  assert.equal(totals["noticedTogetherTransitions"], 6);
+
+  const provenance = data["provenance"] as Record<string, unknown>;
+  assert.equal(provenance["checked"], true);
+  assert.equal(provenance["reason"], null);
+  assert.equal(provenance["suppressedEvents"], 1);
+  assert.equal(provenance["firstPassSeconds"], 450);
+  assert.equal(
+    (provenance["resumesBySource"] as Record<string, number>)["observation-gap"],
+    1,
+    "correlateOutages cannot see a single-observable-lane outage; the timeline can",
+  );
+  assert.equal(provenance["coversFrom"], "2026-08-25T18:14:29.428Z");
+
+  // The alerts are untouched: same rows, same roster, same drilldown, and the
+  // reconciliation invariant the console blanks itself over still holds.
+  const incident = (data["incidents"] as Array<Record<string, unknown>>)[0]!;
+  assert.equal(incident["transitionCount"], 6);
+  assert.equal((incident["roster"] as unknown[]).length, 6);
+  const window = (incident["occurrences"] as { windows: Array<Record<string, unknown>> }).windows[0]!;
+  assert.equal(window["coFiring"], false);
+  assert.equal(window["noticedTogether"], true);
+  assert.equal((window["transitionIds"] as unknown[]).length, 6);
+  assert.match(
+    (window["provenance"] as { note: string }).note,
+    /Noticed together, NOT failed together/,
+  );
+  assert.equal((data["reconciliation"] as Record<string, unknown>)["balanced"], true);
+});
+
+test("BUG-10: correlateOutages is wired — a two-lane outage resume suppresses the burst", async () => {
+  // Two lanes silent together across the same window, stopping inside the
+  // 120 s cluster tolerance: that is `correlateOutages`'s definition of one
+  // process outage, and its `endedAt` is the resume.
+  const stopped = new Date("2026-08-26T16:00:00.000Z");
+  const resumed = new Date("2026-08-26T18:06:52.734Z");
+  const seconds = (resumed.getTime() - stopped.getTime()) / 1000;
+  const res = await get("/api/incidents", montreal(), {}, {
+    // No timeline rows at all, so the ONLY resume can come from correlation.
+    timeline: [],
+    repo: readableRepo({
+      status: [{ startedAt: stopped, endedAt: resumed, seconds }],
+      snapshot: [{ startedAt: stopped, endedAt: resumed, seconds }],
+    }),
+  });
+  const data = res.data();
+  const provenance = data["provenance"] as Record<string, unknown>;
+  assert.equal(
+    (provenance["resumesBySource"] as Record<string, number>)["correlated-outage"],
+    1,
+  );
+  assert.equal((data["totals"] as Record<string, number>)["coFiringEvents"], 0);
+  assert.equal((data["totals"] as Record<string, number>)["noticedTogetherEvents"], 1);
+});
+
+test("BUG-10: an unreadable resume history is FALSE with a reason, never a clean bill", async () => {
+  // `stubRepo()` has no methods, so the health read throws — the same shape as
+  // a database that will not answer.
+  const data = (await get("/api/incidents", montreal())).data();
+  const provenance = data["provenance"] as Record<string, unknown>;
+  assert.equal(provenance["checked"], false);
+  assert.notEqual(provenance["reason"], null);
+  assert.match(provenance["reason"] as string, /could not be read/);
+  assert.equal(provenance["suppressedEvents"], 0);
+  // Behaviour is unchanged when we did not look — and the payload says we did
+  // not, rather than presenting the burst as a verified site condition.
+  assert.equal((data["totals"] as Record<string, number>)["coFiringEvents"], 1);
+});
+
+test("BUG-10: provenance counts describe the FILTERED set, like every other total", async () => {
+  const rows = [
+    ...montreal(),
+    // A genuine co-firing site event on another rule, well clear of the resume.
+    ...coFiring("2026-08-30T09:00:00.000Z", ["d1", "d2", "d3"]),
+  ];
+  const all = (await get("/api/incidents", rows, {}, { timeline: BLIND_23H, repo: readableRepo() })).data();
+  assert.equal((all["totals"] as Record<string, number>)["coFiringEvents"], 1, "the real one");
+  assert.equal((all["totals"] as Record<string, number>)["noticedTogetherEvents"], 1);
+  assert.equal((all["provenance"] as Record<string, number>)["suppressedEvents"], 1);
+
+  // Filtered to the burst's rule alone, the suppression count still describes
+  // exactly the rows on the page — the queue is rebuilt, not re-read.
+  const only = (await get("/api/incidents?rule=offline-4h", rows, {}, {
+    timeline: BLIND_23H, repo: readableRepo(),
+  })).data();
+  assert.equal((only["totals"] as Record<string, number>)["coFiringEvents"], 0);
+  assert.equal((only["totals"] as Record<string, number>)["noticedTogetherEvents"], 1);
+  assert.equal((only["provenance"] as Record<string, number>)["suppressedEvents"], 1);
+  assert.equal((only["totals"] as Record<string, number>)["transitions"], 6);
 });

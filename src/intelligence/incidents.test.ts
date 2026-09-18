@@ -34,9 +34,13 @@ import {
   classifyFlap,
   incidentIdFor,
   scopeFor,
+  resumeForOpen,
   MIN_CO_FIRING_DEVICES,
   OCCURRENCE_WINDOW_MS,
+  RESUME_CLOCK_SKEW_SECONDS,
+  RESUME_FIRST_PASS_SECONDS,
   type AlertTransition,
+  type CollectorResume,
   type ResolvedSite,
 } from "./incidents.js";
 
@@ -530,4 +534,256 @@ test("queue order is stable and puts open work first", () => {
   const second = buildIncidentQueue([...rows].reverse()).incidents.map((i) => i.id);
   assert.deepEqual(first, second, "order must not depend on input order");
   assert.equal(buildIncidentQueue(rows).incidents[0]!.scope.id, "g2");
+});
+
+// ── BUG-10: a collector RESUME must not manufacture a site event ────────────
+
+/**
+ * The real resume history around the burst, from the local `vfi` DB
+ * (2026-09-18), not invented:
+ *
+ *   `poller_runs` ∪ `fleet_snapshots` go quiet at 2026-08-25T18:33:24Z and come
+ *   back at 2026-08-26T18:06:52.734Z — 84,808 s, 23.6 h. `correlateOutages`
+ *   CANNOT see that window (`snapshot` was the only lane with any observation
+ *   history in that era, so the outage has one member lane against the two it
+ *   requires), which is why the route feeds the observation timeline as well.
+ */
+const RESUME_23H: CollectorResume = {
+  resumedAt: "2026-08-26T18:06:52.734Z",
+  blindSeconds: 84_808,
+  blindReason: null,
+  lanes: [],
+  source: "observation-gap",
+};
+
+/**
+ * The `Montreal Office` burst, exactly as the DB holds it: six screens, six
+ * `offline-4h` criticals, every `opened_at` inside 2.3 MILLISECONDS of
+ * 2026-08-26T18:06:57.579Z — 4.8 s after collection resumed from 23.6 h of
+ * blindness. Six devices "offline together" is a dispatch to Montreal; the
+ * truth is that our first pass back found six devices already down, separately,
+ * at unknown times.
+ */
+const montrealBurst = (): AlertTransition[] =>
+  ["1000101", "1000102", "1000103", "1000104", "1000105", "1000106"].map((deviceId, i) =>
+    firing(deviceId, new Date(Date.parse("2026-08-26T18:06:57.579Z") + i * 0.4).toISOString(), 240, {
+      groupId: "grp-montreal",
+      groupName: "Montreal Office",
+      ruleId: "offline-4h",
+      severity: "critical",
+      title: "Offline for 4h",
+    }),
+  );
+
+test("BUG-10: the Montreal Office 14:06:57 resume burst is NOT a co-firing site event", () => {
+  const rows = montrealBurst();
+  const queue = buildIncidentQueue(rows, { collectorResumes: [RESUME_23H] });
+  const incident = queue.incidents[0]!;
+  const window = incident.occurrences.windows[0]!;
+
+  // The signature is still reported honestly — six devices DID fire in this
+  // window — but not one of them can date a failure, so the correlation is not
+  // claimed.
+  assert.equal(window.deviceCount, 6);
+  assert.equal(window.failedTogetherDeviceCount, 0);
+  assert.equal(window.coFiring, false, "the co-firing claim must be withdrawn");
+  assert.equal(window.noticedTogether, true);
+  assert.equal(incident.occurrences.coFiring, 0);
+  assert.equal(incident.occurrences.noticedTogether, 1);
+  assert.equal(incident.occurrences.transitionsCoFiring, 0);
+  assert.equal(incident.occurrences.transitionsNoticedTogether, 6);
+  assert.equal(queue.totals.coFiringEvents, 0);
+  assert.equal(queue.totals.noticedTogetherEvents, 1);
+  assert.equal(queue.totals.noticedTogetherTransitions, 6);
+
+  // And it says WHY, with the instant and the duration an operator can check.
+  const provenance = window.provenance!;
+  assert.equal(provenance.resumedAt, RESUME_23H.resumedAt);
+  assert.equal(provenance.blindSeconds, 84_808);
+  assert.equal(provenance.transitions, 6);
+  assert.equal(provenance.devices, 6);
+  assert.match(provenance.note, /Noticed together, NOT failed together/);
+  assert.match(provenance.note, /23\.6h/);
+
+  // NOTHING IS LOST. Every alert is still in its window, on the roster and in
+  // the drilldown — only the co-firing claim went away.
+  assert.equal(window.transitionIds.length, 6);
+  assert.deepEqual([...window.transitionIds].sort(), rows.map((r) => r.id).sort());
+  assert.equal(incident.transitionCount, 6);
+  assert.equal(incident.roster.length, 6);
+  assert.equal(incident.drilldown.deviceIds.length, 6);
+  assert.equal(queue.reconciliation.balanced, true);
+  assert.equal(queue.totals.transitions, 6);
+});
+
+test("BUG-10: with no resume history the claim stands, and the queue SAYS it is unchecked", () => {
+  const queue = buildIncidentQueue(montrealBurst());
+  // Unchanged behaviour when we did not look — plus the honest admission that
+  // we did not. A silent "checked and clean" here is how the bug shipped.
+  assert.equal(queue.incidents[0]!.occurrences.coFiring, 1);
+  assert.equal(queue.provenance.checked, false);
+  assert.equal(queue.provenance.resumes, 0);
+  assert.notEqual(queue.provenance.reason, null);
+  assert.match(queue.provenance.reason!, /not been provenance-checked|not supplied/);
+  assert.equal(queue.incidents[0]!.occurrences.windows[0]!.provenance, null);
+});
+
+test("BUG-10: a genuine site event in the same bucket as a resume is STILL reported", () => {
+  // Ten minutes after the resume — inside the same fixed 30-minute bucket the
+  // resume falls in, and outside the first pass. Provenance, not timing: a
+  // suppression keyed on the WINDOW would lose this real event.
+  const at = new Date(Date.parse(RESUME_23H.resumedAt) + 10 * 60_000).toISOString();
+  const rows = ["d1", "d2", "d3"].map((d) => firing(d, at, 30, { groupId: "grp-real" }));
+  const queue = buildIncidentQueue(rows, { collectorResumes: [RESUME_23H] });
+  const window = queue.incidents[0]!.occurrences.windows[0]!;
+
+  assert.equal(window.windowStart, "2026-08-26T18:00:00.000Z", "same bucket as the resume");
+  assert.equal(window.coFiring, true, "a real site event near a resume must survive");
+  assert.equal(window.noticedTogether, false);
+  assert.equal(window.failedTogetherDeviceCount, 3);
+  assert.equal(window.provenance, null, "no transition here is the first pass's work");
+  assert.equal(queue.totals.coFiringEvents, 1);
+  assert.equal(queue.totals.noticedTogetherEvents, 0);
+});
+
+test("BUG-10: a mixed window keeps the claim on the devices that can date a failure", () => {
+  const resumedAt = Date.parse(RESUME_23H.resumedAt);
+  const rows = [
+    // Found already down by the first pass back.
+    ...["n1", "n2", "n3"].map((d) =>
+      firing(d, new Date(resumedAt + 1_000).toISOString(), 30, { groupId: "grp-mix" }),
+    ),
+    // Failed twelve minutes later, while we were watching.
+    ...["f1", "f2", "f3"].map((d) =>
+      firing(d, new Date(resumedAt + 12 * 60_000).toISOString(), 30, { groupId: "grp-mix" }),
+    ),
+  ];
+  const window = buildIncidentQueue(rows, { collectorResumes: [RESUME_23H] })
+    .incidents[0]!.occurrences.windows[0]!;
+
+  assert.equal(window.deviceCount, 6);
+  assert.equal(window.failedTogetherDeviceCount, 3, "only the later three can date a failure");
+  assert.equal(window.coFiring, true, "three datable devices still clear the floor");
+  assert.equal(window.noticedTogether, false);
+  assert.equal(window.noticedTogetherTransitions, 3);
+  // The note has to distinguish the halves, or an operator reads our blind spot
+  // as estate evidence.
+  assert.match(window.provenance!.note, /still co-fires on the 3 device/);
+});
+
+test("BUG-10: a device with one first-pass open and a later open still counts as failed", () => {
+  const resumedAt = Date.parse(RESUME_23H.resumedAt);
+  const rows = [
+    ...["d1", "d2", "d3"].map((d) =>
+      firing(d, new Date(resumedAt + 1_000).toISOString(), 5, { groupId: "grp-both" }),
+    ),
+    ...["d1", "d2", "d3"].map((d) =>
+      firing(d, new Date(resumedAt + 15 * 60_000).toISOString(), 5, { groupId: "grp-both" }),
+    ),
+  ];
+  const window = buildIncidentQueue(rows, { collectorResumes: [RESUME_23H] })
+    .incidents[0]!.occurrences.windows[0]!;
+  assert.equal(window.deviceCount, 3);
+  assert.equal(window.failedTogetherDeviceCount, 3);
+  assert.equal(window.coFiring, true);
+  assert.equal(window.provenance!.devices, 0, "no device is first-pass ONLY");
+  assert.equal(window.provenance!.transitions, 3);
+});
+
+test("BUG-10: a SHORT outage is not blindness — the Leedy example survives its resume", () => {
+  /**
+   * The Leedy incident's first co-firing occurrence opens 0.1 s after a real
+   * correlated outage of `snapshot` and `status` that had lasted 1,064 s —
+   * under three alerting intervals, and not including the lanes that produce
+   * `screen-off-during-schedule` at all. An earlier cut of this fix treated it
+   * as a resume and took the epic's headline example from 14 co-firing
+   * occurrences to 13.
+   *
+   * The real pair is 2026-08-27T21:46:04.881Z / 21:46:05.057Z; the resume is
+   * placed 0.1 s before `leedyCorpus`'s FIRST window here so the fixture keeps
+   * the measured offset — a resume 12 minutes away would pin nothing.
+   */
+  const shortOutage: CollectorResume = {
+    resumedAt: "2026-08-27T21:29:59.900Z",
+    blindSeconds: 1_064.289,
+    blindReason: null,
+    lanes: ["snapshot", "status"],
+    source: "correlated-outage",
+  };
+  const resumes = [
+    shortOutage,
+    RESUME_23H,
+    {
+      resumedAt: "2026-08-25T18:14:29.428Z",
+      blindSeconds: null,
+      blindReason: "earliest observation we hold; retention-pruned tables",
+      lanes: [],
+      source: "observation-start" as const,
+    },
+  ];
+  const queue = buildIncidentQueue(leedyCorpus(), { collectorResumes: resumes });
+  const incident = queue.incidents[0]!;
+
+  assert.equal(incident.deviceCount, 5);
+  assert.equal(incident.transitionCount, 72);
+  assert.equal(incident.occurrences.total, 21);
+  assert.equal(incident.occurrences.coFiring, 14, "THE epic's number — 14, not 13");
+  assert.equal(incident.occurrences.noticedTogether, 0);
+  assert.equal(incident.occurrences.transitionsCoFiring, 64);
+  assert.equal(queue.provenance.checked, true);
+  assert.equal(queue.provenance.suppressedEvents, 0);
+});
+
+test("BUG-10: the first-pass boundary is one lane interval, and the skew is symmetric", () => {
+  const resumedAt = Date.parse(RESUME_23H.resumedAt);
+  const inside = resumeForOpen(resumedAt + RESUME_FIRST_PASS_SECONDS * 1000, [RESUME_23H]);
+  const outside = resumeForOpen(resumedAt + RESUME_FIRST_PASS_SECONDS * 1000 + 1, [RESUME_23H]);
+  assert.equal(inside?.resumedAt, RESUME_23H.resumedAt, "the boundary is inclusive");
+  assert.equal(outside, null, "one millisecond past one lane interval is datable");
+
+  // Before the instant we hold: the alerting lane can write its rows ahead of
+  // whichever lane stamps the resume (measured at 244 ms on this corpus).
+  assert.notEqual(resumeForOpen(resumedAt - RESUME_CLOCK_SKEW_SECONDS * 1000, [RESUME_23H]), null);
+  assert.equal(resumeForOpen(resumedAt - RESUME_CLOCK_SKEW_SECONDS * 1000 - 1, [RESUME_23H]), null);
+
+  // A short outage is never admitted, however close the open sits to it.
+  const brief = { ...RESUME_23H, blindSeconds: RESUME_FIRST_PASS_SECONDS * 3 - 1 };
+  assert.equal(resumeForOpen(resumedAt, [brief]), null);
+  assert.notEqual(resumeForOpen(resumedAt, [{ ...brief, blindSeconds: RESUME_FIRST_PASS_SECONDS * 3 }]), null);
+  // Unknown blind length is the UNBOUNDED case, so it is admitted.
+  assert.notEqual(
+    resumeForOpen(resumedAt, [{ ...RESUME_23H, blindSeconds: null, blindReason: "no earlier observation" }]),
+    null,
+  );
+});
+
+test("BUG-10: the three occurrence buckets partition the windows and the transitions", () => {
+  const resumedAt = Date.parse(RESUME_23H.resumedAt);
+  const rows = [
+    ...montrealBurst(),
+    // A real recurrence of the same incident, a day later.
+    ...["1000101", "1000102", "1000103"].map((d) =>
+      firing(d, "2026-08-28T09:00:00.000Z", 30, {
+        groupId: "grp-montreal",
+        groupName: "Montreal Office",
+        ruleId: "offline-4h",
+      }),
+    ),
+    // And one lone device, in its own window.
+    firing("1000101", new Date(resumedAt + 6 * 3_600_000).toISOString(), 30, {
+      groupId: "grp-montreal",
+      groupName: "Montreal Office",
+      ruleId: "offline-4h",
+    }),
+  ];
+  const o = buildIncidentQueue(rows, { collectorResumes: [RESUME_23H] }).incidents[0]!.occurrences;
+  assert.equal(o.coFiring + o.noticedTogether + o.isolated, o.total);
+  assert.equal(
+    o.transitionsCoFiring + o.transitionsNoticedTogether + o.transitionsIsolated,
+    rows.length,
+    "every transition is in exactly one bucket",
+  );
+  assert.equal(o.coFiring, 1);
+  assert.equal(o.noticedTogether, 1);
+  assert.equal(o.isolated, 1);
 });

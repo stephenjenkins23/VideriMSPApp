@@ -71,6 +71,37 @@
  * route additionally cross-links live correlation findings onto the incidents
  * whose rosters they touch, so the two surfaces can never describe the same site
  * differently.
+ *
+ * ⚠️ CO-FIRING IS A CLAIM ABOUT THE ESTATE, SO IT NEEDS PROVENANCE (BUG-10).
+ * When our collector comes back from an outage, the alerting lane reads presence
+ * for the whole fleet in one pass and opens an alert for every device that is
+ * ALREADY down. Every one of those rows gets an `opened_at` inside the same
+ * second — the instant WE NOTICED, not the instant anything failed — and the
+ * co-firing rule then reads that burst as one correlated site condition.
+ * Measured on this corpus: 19 `offline-4h` criticals opened within two seconds
+ * of the 2026-08-26 14:06:57 resume from a 23.6 h outage, of which `Montreal
+ * Office` (6 devices) and `Wes' Office` (3) cleared the threshold and were
+ * presented as site events. An operator reading "Montreal Office — 6 devices
+ * offline together" dispatches someone to Montreal; the truth is "our collector
+ * came back and found 6 devices already down, separately, at unknown times".
+ *
+ * The alerts are NOT false — those devices were genuinely offline — so nothing is
+ * dropped or hidden. Only the CO-FIRING claim is withdrawn: a window's co-firing
+ * test is made on the devices whose opens can date a FAILURE, i.e. those that did
+ * not land in the first evaluation pass after a collector resume
+ * (`collectorResumes`, from `alerting/pipeline-health.correlateOutages` and the
+ * observation timeline). A window that loses the claim is reported as
+ * `noticedTogether` with the resume that explains it, and its transitions stay
+ * in the window, on the roster and in the drilldown.
+ *
+ * This is deliberately a PROVENANCE test and not a timing one. Widening the
+ * 3-device / 30-minute threshold would not help — 101 of 130 correlated outage
+ * windows have only two member lanes, and the threshold is what the Leedy
+ * example needs — and suppressing every window that merely OVERLAPS a resume
+ * would trade this false positive for a false negative: a site that genuinely
+ * goes dark ten minutes after a resume opens its alerts ten minutes after the
+ * resume, outside the first pass, and is still reported. The question asked is
+ * "could this open time date a failure", never "is this open time near a resume".
  */
 
 import type { Severity } from "../domain/types.js";
@@ -95,6 +126,109 @@ import type { Severity } from "../domain/types.js";
  */
 export const OCCURRENCE_WINDOW_MS = 30 * 60 * 1000;
 export const MIN_CO_FIRING_DEVICES = 3;
+
+/**
+ * How long after a collector resume an alert can still be the FIRST PASS's work.
+ *
+ * One `alerting` lane interval — 420 s of `metrics` plus the 30 s offset the
+ * registry declares — because that lane is what opens, refreshes and resolves
+ * every alert: whatever it finds on its first run back gets that run's clock,
+ * and a second run cannot have happened yet. Held here as a default so the pure
+ * module needs no registry import; the route passes the registry's own number so
+ * it follows `POLL_METRICS_INTERVAL_MS` instead of drifting from it.
+ *
+ * Deliberately NOT wider. A site that genuinely fails after the first pass back
+ * opens its alerts after the first pass back, and must still be reported.
+ */
+export const RESUME_FIRST_PASS_SECONDS = 450;
+
+/**
+ * Tolerance for opens that land just BEFORE the resume instant we hold.
+ *
+ * A resume is stamped by whichever lane we can observe first, and the lane that
+ * writes the alert is not always that lane: at the 14:06:57 resume the alerting
+ * lane wrote its rows 244 ms before `fleet_snapshots` recorded the cycle. 120 s
+ * is `PIPELINE_HEALTH_DEFAULTS.outageClusterSeconds`, the measured spread within
+ * which the lanes of one daemon stop and restart, so it is the same tolerance
+ * the outage correlation itself is built on. It cannot admit a genuine event
+ * either: the seconds before a resume are, by definition, seconds we were blind.
+ */
+export const RESUME_CLOCK_SKEW_SECONDS = 120;
+
+/**
+ * How blind is blind enough to withdraw a correlation claim.
+ *
+ * A resume only destroys the evidence if the alert-opening lane unambiguously
+ * MISSED passes across it; three of its intervals is the same bar
+ * `PIPELINE_HEALTH_DEFAULTS.outageSilenceMultiplier` sets before it will call a
+ * lane silent at all, and using a different one here would mean two definitions
+ * of silence in one product.
+ *
+ * MEASURED, and the Leedy example is why. Its first co-firing occurrence
+ * (2026-08-27 21:46:05, five `Leedy_Home_Spark*` screens on
+ * `screen-off-during-schedule`) lands 0.1 s after a correlated outage of
+ * `snapshot` and `status` that had lasted 1,064 s — under three alerting
+ * intervals, and not including the `alerting` or `metrics` lanes that produce
+ * this rule at all. Treating that as blindness withdrew a REAL site condition
+ * and took the epic's headline example from 14 co-firing occurrences to 13. A
+ * short hole in other lanes does not stop an open time dating a failure.
+ */
+export const RESUME_MIN_BLIND_PASSES = 3;
+
+/**
+ * One moment we regained sight of the estate.
+ *
+ * Supplied by the caller (`api/routes/incidents.ts`) so this module stays pure.
+ * `source` matters more than it looks: a correlated outage is positive evidence
+ * of a bounded blind window, while the start of the observation history is the
+ * absence of evidence — unbounded blindness — and `blindSeconds` is then null
+ * WITH a reason rather than a fabricated 0.
+ */
+export interface CollectorResume {
+  /** When collection resumed — `PipelineOutage.endedAt`, or the timeline start. */
+  resumedAt: string;
+  /**
+   * How long we were blind before it. Null when that cannot be known, and
+   * `blindReason` then says why — never 0, which would read as "no outage".
+   */
+  blindSeconds: number | null;
+  blindReason: string | null;
+  /** Lanes that stopped and came back together. Empty when not lane-attributed. */
+  lanes: string[];
+  /**
+   * `correlated-outage` — ≥2 lanes silent together then back (`correlateOutages`).
+   * `observation-gap`   — the whole observation timeline went quiet; the only
+   *                       evidence available in an era where a single lane was
+   *                       observable, which correlation cannot see.
+   * `observation-start` — the earliest observation we hold. Nothing before it is
+   *                       known at all.
+   */
+  source: "correlated-outage" | "observation-gap" | "observation-start";
+}
+
+/**
+ * Why a window's ≥3-device signature is not being called a site condition.
+ *
+ * Attached to any window that contains first-pass transitions, including one
+ * that KEPT its co-firing claim on the strength of its other devices — an
+ * operator deciding whether to dispatch needs to see that part of the burst is
+ * our own blindness even when the rest is real.
+ */
+export interface OccurrenceProvenance {
+  /** The resume whose first evaluation pass these opens landed in. */
+  resumedAt: string;
+  source: CollectorResume["source"];
+  blindSeconds: number | null;
+  blindReason: string | null;
+  lanes: string[];
+  firstPassSeconds: number;
+  /** Transitions in this window opened by that first pass. */
+  transitions: number;
+  /** Devices whose ONLY opens in this window came from that first pass. */
+  devices: number;
+  /** Plain words: what was noticed, and what cannot be concluded from it. */
+  note: string;
+}
 
 /**
  * Flap classification (the `Center Spark 5` behaviour).
@@ -222,8 +356,30 @@ export interface IncidentOccurrence {
   deviceIds: string[];
   /** Every `alerts.id` in this window. The windows PARTITION the incident. */
   transitionIds: string[];
-  /** ≥ MIN_CO_FIRING_DEVICES distinct devices ⇒ the site fired, not a device. */
+  /**
+   * ≥ MIN_CO_FIRING_DEVICES devices whose opens can date a FAILURE ⇒ the site
+   * fired, not a device. Equal to `deviceCount >= MIN_CO_FIRING_DEVICES` unless
+   * provenance withdrew the claim — see `failedTogetherDeviceCount`.
+   */
   coFiring: boolean;
+  /**
+   * Devices in this window with at least one open OUTSIDE the first pass after a
+   * collector resume — the devices the co-firing test is actually made on.
+   * Equals `deviceCount` when no resume touched this window, and when provenance
+   * was not checked at all.
+   */
+  failedTogetherDeviceCount: number;
+  /** Transitions here opened by the first pass after a resume. 0 when none. */
+  noticedTogetherTransitions: number;
+  /**
+   * True when ≥ MIN_CO_FIRING_DEVICES devices fired but the co-firing claim was
+   * WITHDRAWN: they were noticed together, not shown to have failed together.
+   * The transitions are untouched — they are still listed here, on the roster
+   * and in the drilldown.
+   */
+  noticedTogether: boolean;
+  /** The resume that explains the burst, or null when none touched this window. */
+  provenance: OccurrenceProvenance | null;
 }
 
 export interface IncidentOccurrences {
@@ -239,10 +395,23 @@ export interface IncidentOccurrences {
    * real recurrences, and reporting only the total would lose the finding.
    */
   coFiring: number;
-  /** `total - coFiring`. Windows where fewer than 3 devices fired. */
+  /**
+   * Windows where ≥3 devices fired but the co-firing claim was withdrawn because
+   * the burst is the first pass after a collector resume — noticed together, not
+   * failed together (BUG-10). Published separately rather than folded into
+   * `isolated`, because "fewer than 3 devices fired" and "3 or more fired and we
+   * cannot date any of them" are different facts.
+   */
+  noticedTogether: number;
+  /** `total - coFiring - noticedTogether`. Windows where fewer than 3 devices fired. */
   isolated: number;
-  /** Transitions inside co-firing windows, and outside them. Sums to the total. */
+  /**
+   * Transitions inside co-firing windows, inside withdrawn ones, and outside
+   * both. The three sum to `transitionCount` — no transition changes bucket
+   * without leaving the one it came from.
+   */
   transitionsCoFiring: number;
+  transitionsNoticedTogether: number;
   transitionsIsolated: number;
   windowMinutes: number;
   minCoFiringDevices: number;
@@ -354,6 +523,30 @@ export interface IncidentQueue {
      * denominator understates the share among rows that could have co-fired.
      */
     coFiringShareOfAttributedPercent: number | null;
+    /**
+     * Windows (and their transitions) that carried the ≥3-device signature and
+     * had the co-firing claim withdrawn on provenance. They are NOT in
+     * `coFiringEvents`; they are still in `transitions`.
+     */
+    noticedTogetherEvents: number;
+    noticedTogetherTransitions: number;
+  };
+  /**
+   * Whether the co-firing claims on this page were provenance-checked at all.
+   *
+   * `checked: false` is an honest "we did not look", not a clean bill of health:
+   * without the collector's own outage history every ≥3-device window is
+   * presented on its device count alone, which is how BUG-10 shipped.
+   */
+  provenance: {
+    checked: boolean;
+    /** Why it could not be checked, or null when it was. */
+    reason: string | null;
+    resumes: number;
+    firstPassSeconds: number;
+    suppressedEvents: number;
+    suppressedTransitions: number;
+    note: string;
   };
   /**
    * The no-lost-transition proof, as numbers a caller can assert on.
@@ -377,6 +570,20 @@ export interface BuildIncidentsOptions {
    * same sentence the rest of the API uses.
    */
   hierarchyReason?: string | null;
+  /**
+   * Moments the collector regained sight, so a burst of opens that is really our
+   * own resume cannot be presented as a correlated site condition (BUG-10).
+   *
+   * Undefined or null means NOT CHECKED — the queue then behaves exactly as it
+   * did before this option existed and says so in `provenance.checked`, because
+   * silently treating "no resumes supplied" as "no resumes happened" is the same
+   * fabrication the honest-nulls rule exists to stop.
+   */
+  collectorResumes?: readonly CollectorResume[] | null;
+  /** One lane interval. Defaults to `RESUME_FIRST_PASS_SECONDS`. */
+  resumeFirstPassSeconds?: number;
+  /** Why no resumes were supplied, when they could not be read. */
+  resumeReason?: string | null;
 }
 
 // ── scope resolution (pure) ─────────────────────────────────────────────────
@@ -466,6 +673,48 @@ const windowIndexOf = (openedAtMs: number): number =>
   Math.floor(openedAtMs / OCCURRENCE_WINDOW_MS);
 
 /**
+ * Was this open time produced by the first evaluation pass after a resume?
+ *
+ * Returns the resume that explains it, or null when the open can date a failure.
+ * The test is on the TRANSITION's own open time, never on the window it falls
+ * in: a fixed 30-minute bucket can start up to half an hour before a resume, so
+ * testing the bucket would suppress a genuine site event that merely shares a
+ * bucket with one — the false negative this fix must not trade for.
+ *
+ * Exported for direct unit testing, and so a caller can ask the question with
+ * this module's own answer rather than reproducing the rule.
+ */
+export function resumeForOpen(
+  openedAt: string | number,
+  resumes: readonly CollectorResume[],
+  firstPassSeconds: number = RESUME_FIRST_PASS_SECONDS,
+): CollectorResume | null {
+  const at = typeof openedAt === "number" ? openedAt : ms(openedAt);
+  const after = firstPassSeconds * 1000;
+  const before = RESUME_CLOCK_SKEW_SECONDS * 1000;
+  const minBlind = firstPassSeconds * RESUME_MIN_BLIND_PASSES;
+  let best: CollectorResume | null = null;
+  let bestAt = 0;
+  for (const resume of resumes) {
+    // A known-short outage is not blindness: the lane that opens alerts cannot
+    // be shown to have missed a pass across it, so its open times still date
+    // failures. An UNKNOWN blind length (null) is admitted — that is the
+    // unbounded case, not the harmless one.
+    if (resume.blindSeconds !== null && resume.blindSeconds < minBlind) continue;
+    const resumedAt = ms(resume.resumedAt);
+    if (at < resumedAt - before || at > resumedAt + after) continue;
+    // The latest qualifying resume wins: first passes can only overlap when the
+    // collector restarted twice inside one interval, and the nearer restart is
+    // the one whose pass actually wrote the row.
+    if (best === null || resumedAt > bestAt) {
+      best = resume;
+      bestAt = resumedAt;
+    }
+  }
+  return best;
+}
+
+/**
  * Collapse transitions into incidents.
  *
  * `transitions` is whatever the caller filtered to, and every count in the result
@@ -476,6 +725,20 @@ export function buildIncidentQueue(
   transitions: readonly AlertTransition[],
   options: BuildIncidentsOptions = {},
 ): IncidentQueue {
+  const resumes = options.collectorResumes ?? null;
+  const firstPassSeconds = options.resumeFirstPassSeconds ?? RESUME_FIRST_PASS_SECONDS;
+  // Memoised because a resume burst is thousands of rows sharing a handful of
+  // open instants, and the lookup is a scan over every resume.
+  const resumeCache = new Map<number, CollectorResume | null>();
+  const resumeAt = (openedAtMs: number): CollectorResume | null => {
+    if (resumes === null) return null;
+    const hit = resumeCache.get(openedAtMs);
+    if (hit !== undefined) return hit;
+    const found = resumeForOpen(openedAtMs, resumes, firstPassSeconds);
+    resumeCache.set(openedAtMs, found);
+    return found;
+  };
+
   const byKey = new Map<string, AlertTransition[]>();
   const scopes = new Map<string, IncidentScope>();
 
@@ -491,7 +754,13 @@ export function buildIncidentQueue(
   const incidents: Incident[] = [];
   for (const [key, rows] of byKey) {
     // Non-null by construction: the key was set in the same pass as the rows.
-    incidents.push(assembleIncident(key, scopes.get(key)!, rows));
+    incidents.push(
+      assembleIncident(key, scopes.get(key)!, rows, {
+        resumeAt,
+        provenanceChecked: resumes !== null,
+        firstPassSeconds,
+      }),
+    );
   }
 
   incidents.sort(compareIncidents);
@@ -504,6 +773,8 @@ export function buildIncidentQueue(
   let openTransitions = 0;
   let coFiringEvents = 0;
   let coFiringTransitions = 0;
+  let noticedTogetherEvents = 0;
+  let noticedTogetherTransitions = 0;
   const seenTransitionIds = new Set<string>();
 
   for (const incident of incidents) {
@@ -514,6 +785,8 @@ export function buildIncidentQueue(
     if (incident.state === "open") openIncidents += 1;
     coFiringEvents += incident.occurrences.coFiring;
     coFiringTransitions += incident.occurrences.transitionsCoFiring;
+    noticedTogetherEvents += incident.occurrences.noticedTogether;
+    noticedTogetherTransitions += incident.occurrences.transitionsNoticedTogether;
     for (const window of incident.occurrences.windows) {
       transitionsInWindows += window.transitionIds.length;
       for (const id of window.transitionIds) seenTransitionIds.add(id);
@@ -548,6 +821,33 @@ export function buildIncidentQueue(
         transitionsIn === 0 ? null : round1((100 * coFiringTransitions) / transitionsIn),
       coFiringShareOfAttributedPercent:
         attributed === 0 ? null : round1((100 * coFiringTransitions) / attributed),
+      noticedTogetherEvents,
+      noticedTogetherTransitions,
+    },
+    provenance: {
+      checked: resumes !== null,
+      reason:
+        resumes !== null
+          ? null
+          : (options.resumeReason ??
+            "Collector resume history was not supplied, so no co-firing window on this page " +
+              "has been provenance-checked. A burst of alerts opened by the first evaluation " +
+              "pass after one of our own outages is indistinguishable here from a site that " +
+              "failed together."),
+      resumes: resumes?.length ?? 0,
+      firstPassSeconds,
+      suppressedEvents: noticedTogetherEvents,
+      suppressedTransitions: noticedTogetherTransitions,
+      note:
+        resumes === null
+          ? "Every window with " +
+            `${MIN_CO_FIRING_DEVICES} or more devices is presented on its device count alone.`
+          : `${noticedTogetherEvents} window(s) covering ${noticedTogetherTransitions} ` +
+            `transition(s) carried ${MIN_CO_FIRING_DEVICES} or more devices but opened inside ` +
+            `the first ${firstPassSeconds}s after one of ${resumes.length} collector resume(s), ` +
+            `so they are reported as NOTICED together rather than FAILED together. The alerts ` +
+            `are unchanged and every transition is still listed on its window, its roster and ` +
+            `its drilldown — only the correlation claim is withdrawn.`,
     },
     reconciliation: {
       transitionsIn,
@@ -572,6 +872,13 @@ function assembleIncident(
   key: string,
   scope: IncidentScope,
   rows: readonly AlertTransition[],
+  provenance: {
+    /** The resume whose first pass produced this open, or null. */
+    resumeAt: (openedAtMs: number) => CollectorResume | null;
+    /** False when no resume history was supplied — "not checked", not "clean". */
+    provenanceChecked: boolean;
+    firstPassSeconds: number;
+  },
 ): Incident {
   // Oldest first, so first/last-seen and the window partition are both stable
   // regardless of the order the caller's SQL returned.
@@ -590,6 +897,20 @@ function assembleIncident(
 
   const rosterByDevice = new Map<string, IncidentRosterEntry>();
   const windows = new Map<number, IncidentOccurrence>();
+  /**
+   * Per window, which devices' opens can date a failure and which are only our
+   * own resume noticing them. Kept alongside the window rather than inside it
+   * because sets do not serialise; the window carries the counts.
+   */
+  const tallies = new Map<
+    number,
+    {
+      failedTogether: Set<string>;
+      noticed: Set<string>;
+      noticedTransitions: number;
+      resume: CollectorResume | null;
+    }
+  >();
   // Latest title wins: a rule's wording can change, and the newest row is what
   // the condition is called now.
   let latestTitle = first.title;
@@ -647,24 +968,77 @@ function assembleIncident(
         deviceIds: [row.deviceId],
         transitionIds: [row.id],
         coFiring: false,
+        failedTogetherDeviceCount: 0,
+        noticedTogetherTransitions: 0,
+        noticedTogether: false,
+        provenance: null,
       });
+    }
+
+    // Provenance, per TRANSITION. A device with one first-pass open and one
+    // later open in the same window still counts as having failed: the later
+    // open dates a failure, and only the burst row is unattributable.
+    let tally = tallies.get(index);
+    if (!tally) {
+      tally = {
+        failedTogether: new Set(),
+        noticed: new Set(),
+        noticedTransitions: 0,
+        resume: null,
+      };
+      tallies.set(index, tally);
+    }
+    const resume = provenance.resumeAt(openedMs);
+    if (resume === null) tally.failedTogether.add(row.deviceId);
+    else {
+      tally.noticed.add(row.deviceId);
+      tally.noticedTransitions += 1;
+      if (tally.resume === null || ms(resume.resumedAt) > ms(tally.resume.resumedAt)) {
+        tally.resume = resume;
+      }
     }
   }
 
   const orderedWindows = [...windows.entries()]
     .sort(([a], [b]) => a - b)
-    .map(([, window]) => {
+    .map(([index, window]) => {
+      // Non-null by construction: the tally is written in the same pass.
+      const tally = tallies.get(index)!;
       window.deviceCount = window.deviceIds.length;
-      window.coFiring = window.deviceCount >= MIN_CO_FIRING_DEVICES;
+      window.failedTogetherDeviceCount = tally.failedTogether.size;
+      window.noticedTogetherTransitions = tally.noticedTransitions;
+      // THE co-firing test, on the devices whose opens can date a failure. With
+      // no resume history supplied nothing is first-pass, so this is identical
+      // to the device count and the behaviour is unchanged.
+      window.coFiring = window.failedTogetherDeviceCount >= MIN_CO_FIRING_DEVICES;
+      window.noticedTogether =
+        !window.coFiring && window.deviceCount >= MIN_CO_FIRING_DEVICES && tally.resume !== null;
+      window.provenance =
+        tally.resume === null
+          ? null
+          : describeWindowProvenance(
+              tally.resume,
+              provenance.firstPassSeconds,
+              tally.noticedTransitions,
+              [...tally.noticed].filter((id) => !tally.failedTogether.has(id)).length,
+              window.deviceCount,
+              window.coFiring,
+            );
       return window;
     });
 
   let coFiringWindows = 0;
   let transitionsCoFiring = 0;
+  let noticedTogetherWindows = 0;
+  let transitionsNoticedTogether = 0;
   for (const window of orderedWindows) {
-    if (!window.coFiring) continue;
-    coFiringWindows += 1;
-    transitionsCoFiring += window.transitionIds.length;
+    if (window.coFiring) {
+      coFiringWindows += 1;
+      transitionsCoFiring += window.transitionIds.length;
+    } else if (window.noticedTogether) {
+      noticedTogetherWindows += 1;
+      transitionsNoticedTogether += window.transitionIds.length;
+    }
   }
 
   const roster = [...rosterByDevice.values()].sort(
@@ -702,9 +1076,11 @@ function assembleIncident(
     occurrences: {
       total: orderedWindows.length,
       coFiring: coFiringWindows,
-      isolated: orderedWindows.length - coFiringWindows,
+      noticedTogether: noticedTogetherWindows,
+      isolated: orderedWindows.length - coFiringWindows - noticedTogetherWindows,
       transitionsCoFiring,
-      transitionsIsolated: sorted.length - transitionsCoFiring,
+      transitionsNoticedTogether,
+      transitionsIsolated: sorted.length - transitionsCoFiring - transitionsNoticedTogether,
       windowMinutes: OCCURRENCE_WINDOW_MS / 60_000,
       minCoFiringDevices: MIN_CO_FIRING_DEVICES,
       basis:
@@ -712,11 +1088,62 @@ function assembleIncident(
         `this incident opened at least once; ${coFiringWindows} of ${orderedWindows.length} ` +
         `carried ${MIN_CO_FIRING_DEVICES} or more devices firing together, the signature of a ` +
         `site-level cause. Windows are fixed clock buckets, so two devices firing either side ` +
-        `of a boundary count as two windows: co-firing is a lower bound.`,
+        `of a boundary count as two windows: co-firing is a lower bound.` +
+        (noticedTogetherWindows === 0
+          ? ""
+          : ` A further ${noticedTogetherWindows} window(s) carried ${MIN_CO_FIRING_DEVICES} ` +
+            `or more devices but opened in the first pass after a collector resume, so they ` +
+            `are counted as NOTICED together, not failed together — the alerts stand, the ` +
+            `correlation does not.`),
       windows: orderedWindows,
     },
     flap,
     drilldown: { ruleId: last.ruleId, deviceIds: roster.map((r) => r.deviceId) },
+  };
+}
+
+/**
+ * Say, in words an operator can act on, what the resume does to this window.
+ *
+ * Two different sentences, because there are two different situations: a window
+ * that LOST the claim (everything in it is our noticing) and a window that KEPT
+ * it (part of the burst is ours, the rest still failed together). Reporting the
+ * second as suppressed would hide a real site event; reporting it with no note
+ * at all would let an operator read our blind spot as estate evidence.
+ */
+function describeWindowProvenance(
+  resume: CollectorResume,
+  firstPassSeconds: number,
+  transitions: number,
+  noticedOnlyDevices: number,
+  deviceCount: number,
+  keptClaim: boolean,
+): OccurrenceProvenance {
+  const blind =
+    resume.blindSeconds === null
+      ? `for an unknown length of time (${resume.blindReason ?? "no earlier observation"})`
+      : `for ${round1(resume.blindSeconds / 3600)}h`;
+  return {
+    resumedAt: resume.resumedAt,
+    source: resume.source,
+    blindSeconds: resume.blindSeconds,
+    blindReason: resume.blindReason,
+    lanes: resume.lanes,
+    firstPassSeconds,
+    transitions,
+    devices: noticedOnlyDevices,
+    note: keptClaim
+      ? `${transitions} of this window's transitions opened in the first ${firstPassSeconds}s ` +
+        `after collection resumed at ${resume.resumedAt}, having been blind ${blind}, so those ` +
+        `open times date OUR NOTICING. The window still co-fires on the ` +
+        `${deviceCount - noticedOnlyDevices} device(s) that fired outside that pass.`
+      : `Noticed together, NOT failed together. All ${deviceCount} device(s) here opened in ` +
+        `the first ${firstPassSeconds}s after collection resumed at ${resume.resumedAt}, ` +
+        `having been blind ${blind} — so we found them already down, at unknown and probably ` +
+        `different times, rather than watching them fail together. The alerts are real and ` +
+        `still listed; the co-firing claim is withdrawn because nothing here can date a ` +
+        `failure. Dispatching to a site on this evidence would be dispatching on our own ` +
+        `outage.`,
   };
 }
 

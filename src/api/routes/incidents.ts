@@ -20,6 +20,19 @@
  *     so that fallback under-collapses and the incident count is an upper bound.
  *     Presenting it as site grouping would overstate the collapse.
  *
+ *  1b. **A co-firing claim carries its provenance.** When our collector comes
+ *     back from an outage the alerting lane opens an alert for every device it
+ *     finds already down, all stamped within the same second, and the ≥3-device
+ *     co-firing rule used to read that burst as one correlated site condition
+ *     (BUG-10: `Montreal Office`, 6 devices, at the 2026-08-26 14:06:57 resume
+ *     from a 23.6 h outage). This route therefore reads the collector's own
+ *     resume history and hands it to the incident model, which withdraws the
+ *     co-firing claim on windows whose opens are that first pass's work and says
+ *     why. The alerts stay in the queue and every transition stays reachable —
+ *     only the correlation is withdrawn. If the resume history cannot be read,
+ *     `data.provenance.checked` is FALSE with the reason rather than the queue
+ *     quietly going back to presenting bursts as site events.
+ *
  *  2. **Counts describe exactly the set that was filtered.** The incident-level
  *     filters select whole incidents and then the queue is REBUILT from just
  *     those incidents' transitions, so `totals`, `grouping` and `reconciliation`
@@ -45,9 +58,18 @@ import {
 import {
   buildIncidentQueue,
   incidentIdFor,
+  RESUME_FIRST_PASS_SECONDS,
   type AlertTransition,
+  type BuildIncidentsOptions,
+  type CollectorResume,
   type Incident,
 } from "../../intelligence/incidents.js";
+import {
+  loadPipelineHealth,
+  toExpectedLane,
+  PIPELINE_HEALTH_DEFAULTS,
+} from "../../alerting/pipeline-health.js";
+import { laneDecl } from "../../pipeline/lanes/registry.js";
 import { correlate, type Finding } from "../../intelligence/correlation.js";
 import { GroupSiteCache, withSites } from "../../videri/services/group-hierarchy.js";
 import type { ApiContext } from "../server.js";
@@ -209,6 +231,162 @@ async function loadTransitions(
   };
 }
 
+// ── collector resume history (BUG-10) ───────────────────────────────────────
+
+/**
+ * How long after a resume an alert can still be the first pass's work.
+ *
+ * The `alerting` lane's CONFIGURED interval, taken from the scheduler's own
+ * registry so it follows `POLL_METRICS_INTERVAL_MS` rather than drifting from
+ * it. That lane is what opens every alert, so whatever it finds on its first run
+ * back wears that run's clock.
+ */
+function alertingFirstPassSeconds(): number {
+  const decl = laneDecl("alerting");
+  return (decl ? toExpectedLane(decl).intervalSeconds : null) ?? RESUME_FIRST_PASS_SECONDS;
+}
+
+interface ResumeRead {
+  /** Null means NOT READ — never an empty list, which reads as "no outages". */
+  resumes: CollectorResume[] | null;
+  reason: string | null;
+  /** Earliest collector observation we still hold. Nothing before it is known. */
+  coversFrom: string | null;
+  bySource: Record<CollectorResume["source"], number>;
+}
+
+/**
+ * Every moment we regained sight of the estate, from TWO sources.
+ *
+ *  1. `correlateOutages` via `loadPipelineHealth` — 130 correlated windows,
+ *     61.9 h, on this corpus. The strong evidence: ≥2 lanes silent together and
+ *     back together is one daemon stopping, and its `endedAt` is a resume.
+ *
+ *  2. Gaps in the whole OBSERVATION TIMELINE (`poller_runs.started_at` ∪
+ *     `fleet_snapshots.computed_at`), plus that timeline's start.
+ *
+ * The second source is not belt-and-braces, it is load-bearing, and the card is
+ * wrong to say `correlateOutages` alone finds this bug's own regression case.
+ * Correlation needs two observable lanes; in the era of the 23.6 h outage that
+ * produced the `Montreal Office` burst, `snapshot` was the ONLY lane with any
+ * observation history (`poller_runs` begins at the resume itself), so that
+ * outage has exactly one member lane and `correlateOutages` cannot — and should
+ * not — report it. Absence of correlation there is absence of evidence about the
+ * other lanes, not evidence that we were collecting. Measured: the 130
+ * correlated windows include the 2026-08-27 12:36:09 resume and NOT the
+ * 2026-08-26 14:06:52 one.
+ *
+ * The timeline start is the weakest claim of the three and is labelled as such:
+ * both tables are retention-pruned, so "the earliest observation we hold" is not
+ * "the collector's first breath". Its `blindSeconds` is therefore null with the
+ * reason, never 0.
+ */
+async function loadCollectorResumes(pool: Pool, ctx: ApiContext): Promise<ResumeRead> {
+  const firstPass = alertingFirstPassSeconds();
+  // Unambiguous silence, the same multiple of a lane interval the outage
+  // correlation itself admits as evidence — a shorter hole is a hiccup, and a
+  // hiccup does not stop us dating a failure to within one pass.
+  const silenceSeconds = firstPass * PIPELINE_HEALTH_DEFAULTS.outageSilenceMultiplier;
+  const bySource: ResumeRead["bySource"] = {
+    "correlated-outage": 0,
+    "observation-gap": 0,
+    "observation-start": 0,
+  };
+  try {
+    const timeline = await pool.query<{ prev: Date | null; at: Date }>(
+      `WITH obs AS (
+           SELECT started_at AS at FROM poller_runs
+           UNION ALL
+           SELECT computed_at AS at FROM fleet_snapshots
+         ), stepped AS (
+           SELECT at, lag(at) OVER (ORDER BY at) AS prev FROM obs
+         )
+         SELECT prev, at FROM stepped
+          WHERE prev IS NOT NULL
+            AND at - prev > make_interval(secs => $1::double precision)
+         UNION ALL
+         SELECT NULL::timestamptz AS prev, min(at) AS at FROM obs
+         ORDER BY 2 ASC`,
+      [silenceSeconds],
+    );
+
+    // The health read is windowed (poller_runs is retention-pruned), and the
+    // window has to COVER THE ALERTS WE ARE JUDGING or the correlated source
+    // silently contributes nothing: on a local corpus whose newest row is two
+    // weeks old, the default 336 h lookback ends before the outage that caused
+    // BUG-10. Derived from the earliest observation we hold, floored at the
+    // default so a fresh database still reads its full retention.
+    const earliest = timeline.rows.find((r) => r.prev === null)?.at ?? null;
+    const lookbackHours = Math.max(
+      14 * 24,
+      earliest === null ? 0 : Math.ceil((Date.now() - earliest.getTime()) / 3_600_000) + 1,
+    );
+    const health = await loadPipelineHealth(ctx.repo, { lookbackHours });
+
+    const resumes: CollectorResume[] = health.outages.map((outage) => ({
+      resumedAt: outage.endedAt,
+      blindSeconds: outage.seconds,
+      blindReason: null,
+      lanes: outage.lanes,
+      source: "correlated-outage" as const,
+    }));
+    const instants = resumes.map((r) => new Date(r.resumedAt).getTime());
+    for (const row of timeline.rows) {
+      if (row.at === null) continue;
+      const at = row.at.getTime();
+      // Same instant, twice: the earliest lane back IS the timeline's next
+      // observation, so a correlated outage and a timeline gap usually name the
+      // same second. Keep the correlated one — it carries the member lanes.
+      if (instants.some((known) => Math.abs(known - at) <= 1000)) continue;
+      instants.push(at);
+      resumes.push(
+        row.prev === null
+          ? {
+              resumedAt: row.at.toISOString(),
+              blindSeconds: null,
+              blindReason:
+                "this is the earliest collector observation we still hold, and both " +
+                "poller_runs and fleet_snapshots are retention-pruned, so how long the " +
+                "estate was unobserved before it cannot be known",
+              lanes: [],
+              source: "observation-start",
+            }
+          : {
+              resumedAt: row.at.toISOString(),
+              blindSeconds: (at - row.prev.getTime()) / 1000,
+              blindReason: null,
+              lanes: [],
+              source: "observation-gap",
+            },
+      );
+    }
+    for (const resume of resumes) bySource[resume.source] += 1;
+
+    return {
+      resumes,
+      reason: null,
+      coversFrom:
+        timeline.rows.find((r) => r.prev === null)?.at?.toISOString() ??
+        null,
+      bySource,
+    };
+  } catch (error) {
+    // Degrade to "not checked" WITH the reason. The queue is still correct
+    // without provenance; what must never happen is a burst being presented as
+    // a site condition because the check silently did not run.
+    return {
+      resumes: null,
+      reason:
+        `The collector's own resume history could not be read ` +
+        `(${(error as Error).message}), so no co-firing window below has been ` +
+        `provenance-checked: a burst opened by the first evaluation pass after one of our ` +
+        `outages cannot be told apart here from a site that failed together.`,
+      coversFrom: null,
+      bySource,
+    };
+  }
+}
+
 /** A DB severity string, defended so an unexpected value cannot corrupt a rank. */
 const asSeverity = (raw: string): Severity =>
   raw === "critical" || raw === "high" || raw === "medium" || raw === "info" ? raw : "info";
@@ -264,6 +442,23 @@ export async function registerIncidentRoutes(
    */
   const siteCache = ctx.videri ? new GroupSiteCache(ctx.videri) : null;
 
+  /**
+   * The resume history, memoised for 5 minutes.
+   *
+   * Same rationale as `siteCache`: it costs the run-history read
+   * `/api/collector` pays, it only changes when our own collector stops or
+   * starts, and a dashboard polling the queue should not re-derive 130 outage
+   * windows every time. Short enough that a resume happening now shows up in the
+   * next few minutes.
+   */
+  let resumeCache: { at: number; read: ResumeRead } | null = null;
+  const resumeHistory = async (): Promise<ResumeRead> => {
+    if (resumeCache && Date.now() - resumeCache.at < RESUME_CACHE_TTL_MS) return resumeCache.read;
+    const read = await loadCollectorResumes(ctx.pool, ctx);
+    resumeCache = { at: Date.now(), read };
+    return read;
+  };
+
   app.get("/api/incidents", async (request, reply) => {
     const unknown = unknownParams(request.query);
     if (unknown.length > 0) {
@@ -287,10 +482,11 @@ export async function registerIncidentRoutes(
     }
     const filters = parsed.data;
 
-    const [loaded, freshness, hierarchyRead] = await Promise.all([
+    const [loaded, freshness, hierarchyRead, resumeRead] = await Promise.all([
       loadTransitions(ctx.pool, filters),
       ctx.freshness(),
       siteCache?.get() ?? Promise.resolve(null),
+      resumeHistory(),
     ]);
 
     // `index: null` is the honest "we could not read the tree" — never an empty
@@ -308,16 +504,20 @@ export async function registerIncidentRoutes(
     // published count is computed by one function over exactly the rows it
     // describes. Two passes over ≤ a few thousand rows buys the invariant that
     // the total can never come from a wider set than the list beneath it.
-    const all = buildIncidentQueue(transitions, { hierarchyReason: hierarchy.reason });
+    const build: BuildIncidentsOptions = {
+      hierarchyReason: hierarchy.reason,
+      collectorResumes: resumeRead.resumes,
+      resumeFirstPassSeconds: alertingFirstPassSeconds(),
+      resumeReason: resumeRead.reason,
+    };
+    const all = buildIncidentQueue(transitions, build);
     const selected = new Set(all.incidents.filter((i) => selects(i, filters)).map((i) => i.id));
     const kept =
       selected.size === all.incidents.length
         ? transitions
         : transitions.filter((t) => selected.has(incidentIdFor(t)));
     const queue =
-      selected.size === all.incidents.length
-        ? all
-        : buildIncidentQueue(kept, { hierarchyReason: hierarchy.reason });
+      selected.size === all.incidents.length ? all : buildIncidentQueue(kept, build);
 
     const offset = (filters.page - 1) * filters.limit;
     const pageRows =
@@ -348,6 +548,23 @@ export async function registerIncidentRoutes(
         grouping: queue.grouping,
         totals: queue.totals,
         reconciliation: queue.reconciliation,
+        /**
+         * Whether the co-firing claims above were checked against our OWN
+         * outage history, and what that check withdrew (BUG-10). `checked:
+         * false` is "we did not look", not "nothing found".
+         */
+        provenance: {
+          ...queue.provenance,
+          resumesBySource: resumeRead.bySource,
+          coversFrom: resumeRead.coversFrom,
+          coverageNote:
+            resumeRead.coversFrom === null
+              ? "No collector observation history was read, so no window's provenance is known."
+              : `Resume history starts at ${resumeRead.coversFrom}, the earliest observation ` +
+                `poller_runs and fleet_snapshots still hold. A co-firing window older than ` +
+                `that is reported on its device count alone — we have no record of whether we ` +
+                `were collecting when it opened.`,
+        },
         /**
          * What was READ, against what the table holds — so the published
          * transition count stays reconcilable with `SELECT count(*) FROM alerts`
@@ -415,6 +632,9 @@ export async function registerIncidentRoutes(
     );
   });
 }
+
+/** Resume history changes only when our own collector stops or starts. */
+const RESUME_CACHE_TTL_MS = 5 * 60_000;
 
 const CORRELATION_OFF =
   "Not requested. Pass correlate=true to cross-link live correlation findings onto the " +
