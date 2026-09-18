@@ -45,10 +45,17 @@
  *   1. A daily lane's normal cadence reads as an outage. `data-usage`'s gaps are
  *      24.000 / 24.013 / 24.300 h — a daily lane working perfectly — and only its
  *      48.910 h gap is a miss. Gap sizes are therefore reported in MULTIPLES of
- *      the lane's configured interval (`longestGapIntervals`) with an explicit
- *      `longestGapWithinCadence`, and the miss count comes from
- *      `measureConfiguredCoverage`, which floors gap/interval. An operator
- *      trained to ignore a daily false alarm ignores the real one.
+ *      the lane's configured interval (`longestGapIntervals`), and both
+ *      `longestGapWithinCadence` and `longestGapMissedFires` are READ FROM
+ *      `measureConfiguredCoverage`, whose one missed-fire rule (floor of
+ *      gap/interval, minus one) is the only thing here entitled to say a fire
+ *      went missing. An operator trained to ignore a daily false alarm ignores
+ *      the real one — and an operator shown two answers to one question ignores
+ *      the page. This surface asked that question for itself until BUG-11: it
+ *      compared the gap to `coverageGapMultiplier` and called `data-usage`
+ *      (x2.04) out of cadence while the rule scored it as the single skipped
+ *      fire it is. `longestGapBasis` now states, per lane, which question the
+ *      pair answers and that it is not the coverage verdict.
  *   2. An opt-in lane that is OFF is not broken. `state: "off-by-choice"`, and it
  *      is excluded from the gating set — it is not counted as a shortfall and
  *      never as 0%.
@@ -68,7 +75,6 @@ import { envelope } from "../freshness.js";
 import {
   loadPipelineHealth,
   expectedLanesFor,
-  PIPELINE_HEALTH_DEFAULTS,
   type ExpectedLane,
   type LaneCoverage,
   type LaneHealth,
@@ -211,8 +217,16 @@ export interface LaneAvailability {
   longestGapSeconds: number | null;
   /** The longest gap in MULTIPLES of the configured interval. The daily-lane trap. */
   longestGapIntervals: number | null;
-  /** True when even the worst gap skipped no scheduled fire. */
+  /**
+   * True when even the worst gap skipped no scheduled fire. Read verbatim from
+   * `measureConfiguredCoverage`, which derives it from the missed-fire rule —
+   * this surface does not compare a gap to a threshold of its own.
+   */
   longestGapWithinCadence: boolean | null;
+  /** How many fires the worst gap alone skipped. The boolean above is `=== 0`. */
+  longestGapMissedFires: number | null;
+  /** Which question the three fields above answer, and which they do not. */
+  longestGapBasis: string;
   missedFires: number | null;
   missedFiresOutsideOutages: number | null;
   /** True when more gaps qualified than were read back, so misses are a floor. */
@@ -259,7 +273,6 @@ export function laneAvailability(
   window: CollectorWindow,
   optInEnabled: Readonly<Record<string, boolean>>,
   bars: typeof SLA_GRADE_BARS,
-  gapMultiplier: number,
 ): LaneAvailability {
   const observability: LaneObservability =
     expectation?.observability ?? { kind: "poller-runs" };
@@ -270,12 +283,6 @@ export function laneAvailability(
   const interval = coverage.configuredIntervalSeconds;
   const windowShare =
     coverage.spanSeconds === null ? null : Math.min(1, coverage.spanSeconds / window.seconds);
-  // Keyed on the SAME multiplier the coverage engine uses to decide a gap is
-  // worth reporting at all, so the two can never disagree about whether
-  // `data-usage`'s 24.3 h day was a hole.
-  const longestGapWithinCadence =
-    coverage.longestGapIntervals === null ? null : coverage.longestGapIntervals < gapMultiplier;
-
   const shortfalls: string[] = [];
   if (state === "unobservable") {
     shortfalls.push(
@@ -361,7 +368,15 @@ export function laneAvailability(
     windowShare,
     longestGapSeconds: coverage.longestGapSeconds,
     longestGapIntervals: coverage.longestGapIntervals,
-    longestGapWithinCadence,
+    // BUG-11: this used to be recomputed here as `longestGapIntervals <
+    // coverageGapMultiplier`, which is a SECOND definition of "late" — exactly
+    // what this file's header forbids, and it answered the opposite of the
+    // missed-fire rule for every lane that skipped exactly one fire (a gap of
+    // two intervals plus scheduler jitter is always a hair over 2x). It is now
+    // read, not computed.
+    longestGapWithinCadence: coverage.longestGapWithinCadence,
+    longestGapMissedFires: coverage.longestGapMissedFires,
+    longestGapBasis: coverage.longestGapBasis,
     missedFires: coverage.missedFires,
     missedFiresOutsideOutages: coverage.missedFiresOutsideOutages,
     incomplete: coverage.incomplete,
@@ -548,7 +563,6 @@ export interface CollectorAvailabilityInput {
   /** `freshness.newestSampleAt`: the last thing we heard, whatever the window. */
   lastCollectionAt: string | null;
   bars?: typeof SLA_GRADE_BARS;
-  gapMultiplier?: number;
 }
 
 /**
@@ -566,7 +580,6 @@ export function buildCollectorAvailability({
   fleetObservedBuckets,
   lastCollectionAt,
   bars = SLA_GRADE_BARS,
-  gapMultiplier = PIPELINE_HEALTH_DEFAULTS.coverageGapMultiplier,
 }: CollectorAvailabilityInput): CollectorAvailability {
   const expectedByName = new Map(expectedLanes.map((l) => [l.lane, l]));
   const lanes = health.lanes.map((lane) =>
@@ -576,7 +589,6 @@ export function buildCollectorAvailability({
       window,
       optInEnabled,
       bars,
-      gapMultiplier,
     ),
   );
 

@@ -218,10 +218,22 @@ export const PIPELINE_HEALTH_DEFAULTS = {
   // the reason in the header: an absolute gap threshold flags a daily lane every
   // single day, and the operator learns to ignore it.
   /**
-   * Gap size, in configured intervals, at which a gap is worth returning at all.
-   * At 2x, a gap has demonstrably skipped at least one fire (floor(gap/interval)
-   * - 1 >= 1). Below it, `data-usage`'s perfectly normal 24.30 h gap — 1.01x its
-   * configured day — is correctly worth nothing.
+   * Gap size, in configured intervals, at which a gap is worth READING BACK at
+   * all — the SQL floor in `loadPipelineHealth`, and nothing else.
+   *
+   * It is 2 because that is where `missedFiresInGap` starts counting: at 2x a
+   * gap has demonstrably skipped at least one fire (floor(gap/interval) - 1 >=
+   * 1), and below it `data-usage`'s perfectly normal 24.30 h gap — 1.01x its
+   * configured day — is correctly worth nothing. So the floor is DERIVED from
+   * the missed-fire rule rather than being a second opinion about it.
+   *
+   * IT IS NOT A HEALTH THRESHOLD, and nothing may compare a gap to it to decide
+   * whether a lane is late (BUG-11: the collector surface did exactly that, and
+   * because a lane that misses exactly ONE fire produces a gap of two intervals
+   * plus scheduler jitter, every such lane sat a hair over 2x and read as out of
+   * cadence while the missed-fire rule scored it as the single skipped fire it
+   * is. The two answers were about the same gap.) Ask `missedFiresInGap` —
+   * whose answer `longestGapWithinCadence` now is.
    */
   coverageGapMultiplier: 2,
   /**
@@ -325,6 +337,33 @@ export interface LaneCoverage {
   longestGapSeconds: number | null;
   /** The longest gap as a multiple of the configured interval. */
   longestGapIntervals: number | null;
+  /**
+   * What the WORST gap alone skipped: `missedFiresInGap(longestGap, interval)`.
+   *
+   * The same rule and the same arithmetic as `missedFires`, applied to one gap
+   * instead of summed over all of them — so the two cannot disagree. Because
+   * the longest gap is by definition the largest, this is 0 exactly when
+   * `missedFires` is 0.
+   */
+  longestGapMissedFires: number | null;
+  /**
+   * Did even the worst gap skip nothing? DERIVED, never thresholded.
+   *
+   * `longestGapMissedFires === 0`, which is the missed-fire rule's own answer to
+   * the missed-fire rule's own question. It is deliberately NOT a comparison
+   * against `coverageGapMultiplier`: that was BUG-11, where a lane that skipped
+   * exactly one daily fire read as out of cadence here and as nothing at all
+   * there, from one 48.91 h gap.
+   */
+  longestGapWithinCadence: boolean | null;
+  /**
+   * What the pair above answers, what it tolerates, and what it does NOT judge.
+   *
+   * Carried as prose because the field is a boolean that a surface will colour:
+   * "a fire was skipped" is not "this lane is failing", and the coverage RATE
+   * against its own bar is the only thing that says the latter.
+   */
+  longestGapBasis: string;
   /**
    * True when more gaps qualified than were read back, so `missedFires` is a
    * floor. Said rather than silently rounded off.
@@ -613,6 +652,26 @@ export function correlateOutages(
 }
 
 /**
+ * THE missed-fire rule, in one function: a gap of N configured intervals means
+ * N-1 scheduled fires went missing.
+ *
+ * Floor, not round, because a missed fire has to be CERTAIN before it is
+ * counted — which is what keeps `data-usage`'s normal 24.30 h day (1.01x its
+ * configured day) at zero and makes its 48.91 h gap (2.04x) exactly one.
+ *
+ * Exported and used everywhere the question "did a scheduled fire go missing?"
+ * is asked: the per-gap sum (`missedFires`), the worst gap's own count
+ * (`longestGapMissedFires`) and therefore `longestGapWithinCadence`. One
+ * question, one authority. BUG-11 was what happens without that — a second
+ * mechanism comparing the same gap to a multiplier of its own and answering the
+ * opposite.
+ */
+export function missedFiresInGap(gapSeconds: number, intervalSeconds: number): number {
+  if (!(intervalSeconds > 0)) return 0;
+  return Math.max(0, Math.floor(gapSeconds / intervalSeconds) - 1);
+}
+
+/**
  * Did this lane run as often as it was configured to?
  *
  * Pure. Returns nulls with a stated reason wherever it cannot answer, which is
@@ -645,6 +704,11 @@ export function measureConfiguredCoverage(
     missedFiresOutsideOutages: null,
     longestGapSeconds: null,
     longestGapIntervals: null,
+    longestGapMissedFires: null,
+    longestGapWithinCadence: null,
+    // Unknown, not "within cadence": with no measurable span there is no gap to
+    // have skipped anything, and `false` would accuse while `true` would clear.
+    longestGapBasis: `no gap was measured, so whether a scheduled fire went missing is UNKNOWN: ${basis}`,
     incomplete: obs?.gapsTruncated ?? false,
     basis,
   });
@@ -693,9 +757,8 @@ export function measureConfiguredCoverage(
     const shared = overlapSeconds(gap, windows);
     outageSeconds += shared;
     longestGapSeconds = Math.max(longestGapSeconds, gap.seconds);
-    // floor, not round: a gap of N configured intervals means N-1 fires were
-    // skipped, so a 1.01x gap (data-usage's normal day) is correctly zero.
-    const skipped = Math.max(0, Math.floor(gap.seconds / interval) - 1);
+    // The one missed-fire rule, for every gap. See `missedFiresInGap`.
+    const skipped = missedFiresInGap(gap.seconds, interval);
     missedFires += skipped;
     // An outage can only excuse as many fires as it had ROOM for, quantised to
     // whole intervals — not a proportional share of the gap.
@@ -709,6 +772,29 @@ export function measureConfiguredCoverage(
     // hole in a 2-minute lane fully excused, which is correct.
     missedFiresOutsideOutages += Math.max(0, skipped - Math.floor(shared / interval));
   }
+
+  // The worst gap's verdict, from the SAME rule that produced `missedFires`
+  // above rather than from a threshold of its own. Two consequences worth
+  // stating because they are what BUG-11 lacked:
+  //
+  //   - `longestGapMissedFires === 0` exactly when `missedFires === 0`, since
+  //     the longest gap is the largest. The two mechanisms cannot diverge.
+  //   - With NO gap read back, nothing is shown to have been skipped, so the
+  //     honest answer is "within cadence" rather than "unknown": the caller's
+  //     floor (`coverageGapMultiplier` x interval, in `loadPipelineHealth`) is
+  //     exactly the size at which this rule starts counting, so a gap below it
+  //     cannot have skipped a fire. This is the branch that had no live instance
+  //     while it was thresholded; on the local corpus it is now true for ten
+  //     lanes at a 420 h window, `data-usage` among them (two gaps, 1.000x and
+  //     1.001x of its configured day).
+  const longestGapMissedFires =
+    obs.gaps.length > 0 ? missedFiresInGap(longestGapSeconds, interval) : 0;
+  const longestGapWithinCadence = longestGapMissedFires === 0;
+  const gapQuestion =
+    `This answers "did a scheduled fire go missing", by floor(gap / interval) - 1 — the ` +
+    `same rule as missedFires, not a separate threshold. It does NOT judge the lane: a ` +
+    `skipped fire and a coverage rate below its bar are different claims, and only the ` +
+    `rate is a verdict.`;
 
   const expected = Math.floor(spanSeconds / interval) + 1;
   const spanExcludingOutages = Math.max(0, spanSeconds - outageSeconds);
@@ -729,6 +815,18 @@ export function measureConfiguredCoverage(
     missedFiresOutsideOutages,
     longestGapSeconds: obs.gaps.length > 0 ? longestGapSeconds : null,
     longestGapIntervals: obs.gaps.length > 0 ? longestGapSeconds / interval : null,
+    longestGapMissedFires,
+    longestGapWithinCadence,
+    longestGapBasis:
+      (obs.gaps.length === 0
+        ? `no gap in ${obs.source} was read back above the ` +
+          `${thresholds.coverageGapMultiplier}x-of-interval floor at which a gap could have ` +
+          `skipped a fire, so across ${obs.count} observation(s) of a configured ` +
+          `${formatDuration(interval)} cadence none is shown to have gone missing. `
+        : `the worst gap read back is ${formatDuration(longestGapSeconds)}, ` +
+          `${(longestGapSeconds / interval).toFixed(2)}x the configured ` +
+          `${formatDuration(interval)} cadence, and it skipped ` +
+          `${longestGapMissedFires} scheduled fire(s). `) + gapQuestion,
     incomplete: obs.gapsTruncated,
     basis:
       `${obs.count} row(s) in ${obs.source} over ${formatDuration(spanSeconds)}, against ` +
@@ -1228,8 +1326,12 @@ function coverageShortfallFinding(
       `is excluded, which is the figure judged against the ` +
       `${(thresholds.minConfiguredCoverage * 100).toFixed(0)}% floor. ` +
       `At least ${missed} scheduled fire(s) were skipped outside any outage` +
+      // The worst gap's skipped count is quoted from `longestGapMissedFires`,
+      // which is the same rule as the total above: a reader who sees that gap
+      // flagged on a lane card must find the identical number here.
       (coverage.longestGapIntervals !== null
-        ? `, the worst gap being ${coverage.longestGapIntervals.toFixed(1)}× its configured interval`
+        ? `, the worst gap being ${coverage.longestGapIntervals.toFixed(1)}× its configured ` +
+          `interval and skipping ${coverage.longestGapMissedFires} of them`
         : "") +
       `. The lane is alive and its last run is recent, so nothing else here flags it.`,
     dataImpact:

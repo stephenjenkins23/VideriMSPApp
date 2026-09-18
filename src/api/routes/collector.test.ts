@@ -516,3 +516,73 @@ test("more observed buckets than the window holds cannot produce over-100% cover
   assert.equal(report.fleet.observedBuckets, 2016);
   assert.equal(report.fleet.collectorUp.value, 1);
 });
+
+// ── BUG-11: the surface reads the gap verdict, it does not re-decide it ──────
+
+test("the worst-gap verdict is the engine's, not a second threshold of this file's", () => {
+  // This file measured `longestGapIntervals < coverageGapMultiplier` for itself,
+  // which is a second definition of "late" — the thing the header forbids. On
+  // `data-usage` it answered the OPPOSITE of the missed-fire rule: 2.038x > 2 so
+  // "out of cadence", while the rule scored the same gap as the one skipped fire
+  // it is. Pinned as the invariant, over every shape of lane on the surface.
+  const DAY = 24 * HOUR;
+  const report = build({
+    fleetObservedBuckets: 8000,
+    observations: [
+      // one missed fire plus jitter — the case that was always "late"
+      series("data-usage", { count: 5, everySeconds: DAY,
+        gaps: [{ startedSecondsAgo: 100 * HOUR, seconds: 2.038 * DAY }] }),
+      // many missed fires — must stay late. The real shape: 1,686 rows spread
+      // over 236.82 h of a configured 5-minute cadence = 59.3%, with a 23.56 h
+      // hole inside it.
+      series("snapshot", { source: "fleet_snapshots.computed_at", count: 1686,
+        everySeconds: (236.82 * HOUR) / 1685,
+        gaps: [{ startedSecondsAgo: 100 * HOUR, seconds: 23.56 * HOUR }] }),
+      // nothing past the read-back floor — the branch that had no live instance
+      series("status", { count: 2497, everySeconds: 122 }),
+      // nothing at all: unknown, in both directions
+      empty("device-settings"),
+    ],
+  });
+
+  for (const l of report.lanes) {
+    assert.equal(
+      l.longestGapWithinCadence,
+      l.missedFires === null ? null : l.missedFires === 0,
+      `${l.lane}: the boolean must BE the missed-fire count, not a comparison`,
+    );
+    assert.equal(
+      l.longestGapWithinCadence,
+      l.longestGapMissedFires === null ? null : l.longestGapMissedFires === 0,
+      `${l.lane}: the worst gap's own count and the boolean are one answer`,
+    );
+    assert.ok(l.longestGapBasis.length > 0, `${l.lane} must say which question it answered`);
+  }
+
+  const daily = lane(report, "data-usage");
+  assert.equal(daily.longestGapMissedFires, 1, "2.038x a day skipped exactly one fire");
+  assert.equal(daily.longestGapWithinCadence, false, "and the surface says the same, not more");
+  assert.match(daily.longestGapBasis, /does NOT judge the lane/);
+  // The other half of the pinned case: one missed fire in six is not ALSO a
+  // shortfall. Two mechanisms, one question, one answer, one place to read it.
+  assert.doesNotMatch(daily.claim.shortfalls.join(" "), /of its configured 1 day cadence/);
+
+  const many = lane(report, "snapshot");
+  assert.equal(many.longestGapMissedFires, 281, "a 23.56 h hole in a 5 min lane is 281 fires");
+  assert.equal(many.longestGapWithinCadence, false);
+  assert.equal((many.coverage.value! * 100).toFixed(1), "59.3");
+  assert.match(many.claim.shortfalls.join(" "), /ran at 59\.3% of its configured 5 min cadence/);
+
+  // The branch that was unreachable: live, on a lane with 2,497 observations and
+  // no gap past 2x its 2-minute cadence. It reports TRUE with no gap number,
+  // which is the honest pair — nothing was skipped, and no worst gap was read.
+  const clean = lane(report, "status");
+  assert.equal(clean.longestGapWithinCadence, true);
+  assert.equal(clean.longestGapMissedFires, 0);
+  assert.equal(clean.longestGapIntervals, null);
+  assert.match(clean.longestGapBasis, /none is shown to have gone missing/);
+
+  const silent = lane(report, "device-settings");
+  assert.equal(silent.longestGapWithinCadence, null, "never looked is not within cadence");
+  assert.match(silent.longestGapBasis, /UNKNOWN/);
+});
