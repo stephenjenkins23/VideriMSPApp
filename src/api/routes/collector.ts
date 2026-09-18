@@ -56,6 +56,15 @@
  *      (x2.04) out of cadence while the rule scored it as the single skipped
  *      fire it is. `longestGapBasis` now states, per lane, which question the
  *      pair answers and that it is not the coverage verdict.
+ *      The follow-up to that fix: `longestGapSeconds` was the longest gap ABOVE
+ *      the read-back floor, so a lane that never missed a fire had no gap figure
+ *      at all and this surface rendered a null it then had to excuse. It is now
+ *      the true longest gap for every lane with two observations — `data-usage`
+ *      at a 420 h window reads 24.01 h / 1.00x / 0 fires skipped, which is an
+ *      answer, where it used to read "—". `missedFires` is exact rather than a
+ *      floor (the read-back floor now includes a gap of exactly 2.000x, which
+ *      skipped a fire and was being dropped), and `missedFiresExact` says which
+ *      it is instead of leaving a surface to assume.
  *   2. An opt-in lane that is OFF is not broken. `state: "off-by-choice"`, and it
  *      is excluded from the gating set — it is not counted as a shortfall and
  *      never as 0%.
@@ -214,6 +223,12 @@ export interface LaneAvailability {
   /** That span as a share of the window. A high rate over 30% of the window
    *  evidences 30% of the window, and nothing more. */
   windowShare: number | null;
+  /**
+   * The lane's longest gap between observations — THE longest, for every lane
+   * with two observations, including one that never missed a fire. It used to be
+   * the longest gap above the read-back floor, so an on-cadence lane arrived
+   * here as null and this surface had to explain the null away.
+   */
   longestGapSeconds: number | null;
   /** The longest gap in MULTIPLES of the configured interval. The daily-lane trap. */
   longestGapIntervals: number | null;
@@ -229,6 +244,12 @@ export interface LaneAvailability {
   longestGapBasis: string;
   missedFires: number | null;
   missedFiresOutsideOutages: number | null;
+  /**
+   * Is `missedFires` exact, or a floor to be rendered as "at least"? Read from
+   * `measureConfiguredCoverage`, which knows which gaps the read returned. Null
+   * means unknowable, which a surface must render as "at least" too.
+   */
+  missedFiresExact: boolean | null;
   /** True when more gaps qualified than were read back, so misses are a floor. */
   incomplete: boolean;
   /** Can this lane carry an availability claim over this window, and if not, why. */
@@ -379,6 +400,7 @@ export function laneAvailability(
     longestGapBasis: coverage.longestGapBasis,
     missedFires: coverage.missedFires,
     missedFiresOutsideOutages: coverage.missedFiresOutsideOutages,
+    missedFiresExact: coverage.missedFiresExact,
     incomplete: coverage.incomplete,
     claim: { claimable: state === "measured" && shortfalls.length === 0, shortfalls },
   };

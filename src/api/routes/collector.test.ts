@@ -75,11 +75,17 @@ function series(
     firstAt,
     lastAt,
     medianGapSeconds: everySeconds,
+    // The floor-free aggregate: the largest interval the series really contains.
+    // A lane on cadence has one too, which is the whole point of the field.
+    maxGapSeconds: count < 2 ? null : Math.max(everySeconds, ...gaps.map((g) => g.seconds)),
     gaps: gaps.map((g) => ({
       startedAt: at(g.startedSecondsAgo),
       endedAt: at(g.startedSecondsAgo - g.seconds),
       seconds: g.seconds,
     })),
+    // The floor `loadPipelineHealth` really asks for: 2x the configured
+    // interval, the smallest gap the missed-fire rule can count.
+    gapFloorSeconds: 2 * (LANES.find((l) => l.lane === lane)?.intervalSeconds ?? everySeconds),
     gapsTruncated: false,
   };
 }
@@ -87,7 +93,9 @@ function series(
 /** A lane with no rows at all — the shape `loadPipelineHealth` synthesises. */
 const empty = (lane: string, source = "poller_runs"): LaneObservations => ({
   lane, source, count: 0, firstAt: null, lastAt: null, medianGapSeconds: null,
-  gaps: [], gapsTruncated: false,
+  // No read happened, so no floor and no gap: `loadPipelineHealth` synthesises
+  // exactly this, and coverage must report unknown rather than a measured zero.
+  maxGapSeconds: null, gaps: [], gapFloorSeconds: null, gapsTruncated: false,
 });
 
 function build({
@@ -538,7 +546,8 @@ test("the worst-gap verdict is the engine's, not a second threshold of this file
       series("snapshot", { source: "fleet_snapshots.computed_at", count: 1686,
         everySeconds: (236.82 * HOUR) / 1685,
         gaps: [{ startedSecondsAgo: 100 * HOUR, seconds: 23.56 * HOUR }] }),
-      // nothing past the read-back floor — the branch that had no live instance
+      // nothing at or past the read-back floor — the on-cadence lane, which used
+      // to arrive here with NO gap figure at all
       series("status", { count: 2497, everySeconds: 122 }),
       // nothing at all: unknown, in both directions
       empty("device-settings"),
@@ -573,14 +582,21 @@ test("the worst-gap verdict is the engine's, not a second threshold of this file
   assert.equal((many.coverage.value! * 100).toFixed(1), "59.3");
   assert.match(many.claim.shortfalls.join(" "), /ran at 59\.3% of its configured 5 min cadence/);
 
-  // The branch that was unreachable: live, on a lane with 2,497 observations and
-  // no gap past 2x its 2-minute cadence. It reports TRUE with no gap number,
-  // which is the honest pair — nothing was skipped, and no worst gap was read.
+  // The on-cadence lane: 2,497 observations, no gap at or past 2x its 2-minute
+  // cadence. It reports TRUE *with a figure* — 122 s, 1.02x — where it used to
+  // report TRUE and a null this surface then had to explain away. Nothing was
+  // skipped AND we can say what the worst gap was.
   const clean = lane(report, "status");
   assert.equal(clean.longestGapWithinCadence, true);
   assert.equal(clean.longestGapMissedFires, 0);
-  assert.equal(clean.longestGapIntervals, null);
-  assert.match(clean.longestGapBasis, /none is shown to have gone missing/);
+  assert.equal(clean.longestGapSeconds, 122, "the true longest gap, floor or no floor");
+  assert.equal(clean.longestGapIntervals!.toFixed(4), "1.0167");
+  assert.equal(clean.missedFires, 0);
+  assert.equal(clean.missedFiresExact, true, "exact, so the UI must not say 'at least'");
+  assert.match(clean.longestGapBasis, /under 2x, which is where the rule starts counting/);
+
+  // And the unknowable case keeps its honest null rather than inheriting one.
+  assert.equal(lane(report, "device-settings").missedFiresExact, null);
 
   const silent = lane(report, "device-settings");
   assert.equal(silent.longestGapWithinCadence, null, "never looked is not within cadence");

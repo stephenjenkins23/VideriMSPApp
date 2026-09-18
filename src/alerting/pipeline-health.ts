@@ -150,7 +150,13 @@ export interface LaneObservations {
   firstAt: Date | null;
   lastAt: Date | null;
   medianGapSeconds: number | null;
+  /** The TRUE longest gap, with no read-back floor applied. Null under two
+   *  observations. This is what `longestGapSeconds` is measured from. */
+  maxGapSeconds: number | null;
   gaps: ReadonlyArray<{ startedAt: Date; endedAt: Date; seconds: number }>;
+  /** The floor `gaps` was read back above, so a sum over `gaps` can say whether
+   *  it is exact. Provenance only — never compared to decide health. */
+  gapFloorSeconds: number | null;
   gapsTruncated: boolean;
 }
 
@@ -225,7 +231,16 @@ export const PIPELINE_HEALTH_DEFAULTS = {
    * gap has demonstrably skipped at least one fire (floor(gap/interval) - 1 >=
    * 1), and below it `data-usage`'s perfectly normal 24.30 h gap — 1.01x its
    * configured day — is correctly worth nothing. So the floor is DERIVED from
-   * the missed-fire rule rather than being a second opinion about it.
+   * the missed-fire rule rather than being a second opinion about it, and
+   * because it is EQUAL to the rule's first countable gap (and the SQL compares
+   * `>=`, so a gap of exactly 2.000x is read back) the per-gap sum it feeds is
+   * the exact missed-fire count, not a floor. Raise it and `missedFiresExact`
+   * turns false and says so; it does not quietly undercount.
+   *
+   * It says nothing about a lane whose longest gap is below it: that gap is
+   * still measured and reported (`laneObservations.maxGapSeconds`, aggregated
+   * with no floor at all), because "its worst gap was 1.99x its interval" is an
+   * answer and a null is not.
    *
    * IT IS NOT A HEALTH THRESHOLD, and nothing may compare a gap to it to decide
    * whether a lane is late (BUG-11: the collector surface did exactly that, and
@@ -334,6 +349,28 @@ export interface LaneCoverage {
   missedFires: number | null;
   /** The same, counting only the part of each gap outside a correlated outage. */
   missedFiresOutsideOutages: number | null;
+  /**
+   * Is `missedFires` the EXACT count, or a floor?
+   *
+   * Exact when both hold: every gap the missed-fire rule can count was read back
+   * (the source's read-back floor is at or below 2x the interval, the smallest
+   * gap for which floor(gap/interval) - 1 reaches 1), and no gap was truncated
+   * off the cap. Null when the source did not report its floor, which is "we
+   * cannot tell", not "it is exact" — the surface must say "at least" then.
+   *
+   * It is stated rather than implied because the two were indistinguishable
+   * before: a coarser floor and a truncated cap both silently undercounted.
+   *
+   * It governs `missedFiresOutsideOutages` as well — both are summed over the
+   * same gap list — and anything false or null must be rendered "at least".
+   */
+  missedFiresExact: boolean | null;
+  /**
+   * The longest gap between consecutive observations. THE longest — not the
+   * longest above a read-back floor, which is what this used to mean, so a lane
+   * running perfectly on cadence reported null and the surface had to explain
+   * the null away. A lane with two observations has a longest gap.
+   */
   longestGapSeconds: number | null;
   /** The longest gap as a multiple of the configured interval. */
   longestGapIntervals: number | null;
@@ -683,12 +720,19 @@ export function missedFiresInGap(gapSeconds: number, intervalSeconds: number): n
  * the cadence check already owns and reports with its own age and threshold.
  * Counting it here as well would double-report one fault and reduce coverage to
  * "was the daemon up", which is the outage finding's job.
+ *
+ * It takes NO thresholds, and that is the signature saying so. It used to take
+ * `PIPELINE_HEALTH_DEFAULTS` and use it for one word of prose about the SQL
+ * read-back floor; the rest of this function has exactly one authority — the
+ * missed-fire rule — and an unused threshold parameter is how a second opinion
+ * grows back (BUG-11 was a second opinion). Read-back provenance arrives with
+ * the observations, in `gapFloorSeconds`, where the read that applied it can be
+ * held to it.
  */
 export function measureConfiguredCoverage(
   expectation: Pick<ExpectedLane, "intervalSeconds" | "observability"> | undefined,
   obs: LaneObservations | undefined,
   outages: readonly PipelineOutage[] = [],
-  thresholds: typeof PIPELINE_HEALTH_DEFAULTS = PIPELINE_HEALTH_DEFAULTS,
 ): LaneCoverage {
   const interval = expectation?.intervalSeconds ?? null;
   const blank = (basis: string): LaneCoverage => ({
@@ -702,6 +746,8 @@ export function measureConfiguredCoverage(
     outageSeconds: null,
     missedFires: null,
     missedFiresOutsideOutages: null,
+    // Not `true`: there is no count, so calling it exact would claim a figure.
+    missedFiresExact: null,
     longestGapSeconds: null,
     longestGapIntervals: null,
     longestGapMissedFires: null,
@@ -750,16 +796,16 @@ export function measureConfiguredCoverage(
   }));
 
   let outageSeconds = 0;
-  let missedFires = 0;
+  let missedFiresOverGaps = 0;
   let missedFiresOutsideOutages = 0;
-  let longestGapSeconds = 0;
+  let longestReadBackGapSeconds = 0;
   for (const gap of obs.gaps) {
     const shared = overlapSeconds(gap, windows);
     outageSeconds += shared;
-    longestGapSeconds = Math.max(longestGapSeconds, gap.seconds);
+    longestReadBackGapSeconds = Math.max(longestReadBackGapSeconds, gap.seconds);
     // The one missed-fire rule, for every gap. See `missedFiresInGap`.
     const skipped = missedFiresInGap(gap.seconds, interval);
-    missedFires += skipped;
+    missedFiresOverGaps += skipped;
     // An outage can only excuse as many fires as it had ROOM for, quantised to
     // whole intervals — not a proportional share of the gap.
     //
@@ -773,23 +819,53 @@ export function measureConfiguredCoverage(
     missedFiresOutsideOutages += Math.max(0, skipped - Math.floor(shared / interval));
   }
 
-  // The worst gap's verdict, from the SAME rule that produced `missedFires`
-  // above rather than from a threshold of its own. Two consequences worth
-  // stating because they are what BUG-11 lacked:
+  // THE longest gap, for every lane with two observations — `maxGapSeconds` is
+  // aggregated with no read-back floor, so an on-cadence lane now has a figure
+  // instead of a null the surface had to explain. The fallback to the read-back
+  // gaps is for a source that does not report the aggregate (a stub, an older
+  // caller); it degrades to the old meaning rather than to a fabricated zero.
+  const longestGapSeconds =
+    obs.maxGapSeconds ?? (obs.gaps.length > 0 ? longestReadBackGapSeconds : null);
+
+  // The smallest gap the missed-fire rule can count, in seconds: at 2x,
+  // floor(gap / interval) - 1 first reaches 1. Derived from the rule itself, NOT
+  // a threshold and not a knob — `coverageGapMultiplier` is the SQL read-back
+  // floor and is deliberately not consulted here. Anything below this cannot
+  // have skipped a fire, which is why a lane whose longest gap is 1.99x is
+  // within cadence as a matter of arithmetic rather than tolerance.
+  const countableGapSeconds = 2 * interval;
+
+  // The worst gap's verdict, from the SAME rule that produced the per-gap sum
+  // rather than from a threshold of its own. Three consequences worth stating
+  // because they are what BUG-11 lacked:
   //
-  //   - `longestGapMissedFires === 0` exactly when `missedFires === 0`, since
-  //     the longest gap is the largest. The two mechanisms cannot diverge.
-  //   - With NO gap read back, nothing is shown to have been skipped, so the
-  //     honest answer is "within cadence" rather than "unknown": the caller's
-  //     floor (`coverageGapMultiplier` x interval, in `loadPipelineHealth`) is
-  //     exactly the size at which this rule starts counting, so a gap below it
-  //     cannot have skipped a fire. This is the branch that had no live instance
-  //     while it was thresholded; on the local corpus it is now true for ten
-  //     lanes at a 420 h window, `data-usage` among them (two gaps, 1.000x and
-  //     1.001x of its configured day).
+  //   - `longestGapMissedFires === 0` exactly when `missedFires === 0`. The
+  //     longest gap is the largest, so if any gap skipped a fire this one did;
+  //     and `missedFires` is floored at this count below, so the two mechanisms
+  //     cannot diverge even if the source read back a coarser set of gaps than
+  //     the rule can count.
+  //   - it is now answered for EVERY measurable lane, including one with no gap
+  //     over the read-back floor: its longest gap is a real number below
+  //     `countableGapSeconds`, so the rule returns 0 and "within cadence" is the
+  //     rule's own answer about a measured gap rather than an inference from an
+  //     empty array. On the local corpus that is ten lanes at a 420 h window,
+  //     `data-usage` among them (longest gap 86,447.65 s = 1.0006x its day).
+  //   - nothing flips: a gap below 2x scored 0 before and scores 0 now. What
+  //     changed is that the figure the 0 rests on is visible.
   const longestGapMissedFires =
-    obs.gaps.length > 0 ? missedFiresInGap(longestGapSeconds, interval) : 0;
+    longestGapSeconds === null ? 0 : missedFiresInGap(longestGapSeconds, interval);
   const longestGapWithinCadence = longestGapMissedFires === 0;
+  // Never less than what the worst gap alone proves. A no-op whenever the source
+  // read back every countable gap (which `laneObservations` does: its floor is
+  // `>= 2x`), and the guard that keeps the identity above true when it did not.
+  const missedFires = Math.max(missedFiresOverGaps, longestGapMissedFires);
+  // Exactness is a FACT about the read, not an assumption: the floor has to have
+  // been at or below the first countable gap, and nothing may have been dropped
+  // by the cap. An unreported floor is unknown, never "exact".
+  const missedFiresExact =
+    obs.gapFloorSeconds == null
+      ? null
+      : obs.gapFloorSeconds <= countableGapSeconds && !obs.gapsTruncated;
   const gapQuestion =
     `This answers "did a scheduled fire go missing", by floor(gap / interval) - 1 — the ` +
     `same rule as missedFires, not a separate threshold. It does NOT judge the lane: a ` +
@@ -813,20 +889,23 @@ export function measureConfiguredCoverage(
     outageSeconds,
     missedFires,
     missedFiresOutsideOutages,
-    longestGapSeconds: obs.gaps.length > 0 ? longestGapSeconds : null,
-    longestGapIntervals: obs.gaps.length > 0 ? longestGapSeconds / interval : null,
+    missedFiresExact,
+    longestGapSeconds,
+    longestGapIntervals: longestGapSeconds === null ? null : longestGapSeconds / interval,
     longestGapMissedFires,
     longestGapWithinCadence,
     longestGapBasis:
-      (obs.gaps.length === 0
-        ? `no gap in ${obs.source} was read back above the ` +
-          `${thresholds.coverageGapMultiplier}x-of-interval floor at which a gap could have ` +
-          `skipped a fire, so across ${obs.count} observation(s) of a configured ` +
-          `${formatDuration(interval)} cadence none is shown to have gone missing. `
-        : `the worst gap read back is ${formatDuration(longestGapSeconds)}, ` +
+      (longestGapSeconds === null
+        ? `no interval between observations could be measured in ${obs.source}, so nothing ` +
+          `is shown to have gone missing. `
+        : `the longest gap in ${obs.source} is ${formatDuration(longestGapSeconds)}, ` +
           `${(longestGapSeconds / interval).toFixed(2)}x the configured ` +
           `${formatDuration(interval)} cadence, and it skipped ` +
-          `${longestGapMissedFires} scheduled fire(s). `) + gapQuestion,
+          `${longestGapMissedFires} scheduled fire(s)` +
+          (longestGapMissedFires === 0
+            ? ` — under 2x, which is where the rule starts counting, so across ` +
+              `${obs.count} observation(s) none can have gone missing. `
+            : `. `)) + gapQuestion,
     incomplete: obs.gapsTruncated,
     basis:
       `${obs.count} row(s) in ${obs.source} over ${formatDuration(spanSeconds)}, against ` +
@@ -835,7 +914,20 @@ export function measureConfiguredCoverage(
         ? ` (${formatDuration(outageSeconds)} of that span fell inside a correlated ` +
           `daemon outage and is excluded from the adjusted figure)`
         : "") +
-      (obs.gapsTruncated ? ". More gaps qualified than were read, so missed fires is a floor" : ""),
+      // Exact or floor, always stated — the two used to look identical.
+      (missedFiresExact === true
+        ? `. ${missedFires} missed fire(s), an exact count: every gap of 2x the interval ` +
+          `or more was read back`
+        : missedFiresExact === null
+          ? `. At least ${missedFires} missed fire(s) — the source did not report which ` +
+            `gaps it read back, so this is a floor`
+          : obs.gapsTruncated
+            ? `. At least ${missedFires} missed fire(s): more gaps qualified than were read, ` +
+              `so this is a floor`
+            : `. At least ${missedFires} missed fire(s): gaps were read back only above ` +
+              `${formatDuration(obs.gapFloorSeconds ?? 0)}, which is coarser than the 2x ` +
+              `(${formatDuration(countableGapSeconds)}) at which a fire can be shown ` +
+              `missing, so this is a floor`),
   };
 }
 
@@ -994,7 +1086,7 @@ function assessLane(
 ): LaneHealth {
   const feeds = expectation?.feeds ?? "whatever this lane collects";
   const observability = expectation?.observability ?? { kind: "poller-runs" };
-  const coverage = measureConfiguredCoverage(expectation, observations, outages, thresholds);
+  const coverage = measureConfiguredCoverage(expectation, observations, outages);
   const findings: PipelineFinding[] = [];
 
   // ── the lane leaves no trace at all ────────────────────────────────────────
@@ -1537,7 +1629,12 @@ export async function loadPipelineHealth(
           firstAt: null,
           lastAt: null,
           medianGapSeconds: null,
+          maxGapSeconds: null,
           gaps: [],
+          // No read happened for this lane, so there is no floor to report.
+          // Coverage is blank for a zero-count lane anyway, and a floor quoted
+          // for a read that did not occur would be provenance for nothing.
+          gapFloorSeconds: null,
           gapsTruncated: false,
         });
       }

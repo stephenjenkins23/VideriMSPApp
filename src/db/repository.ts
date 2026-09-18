@@ -382,8 +382,30 @@ export interface LaneObservationRow {
    * as it was configured to.
    */
   medianGapSeconds: number | null;
+  /**
+   * The LONGEST interval between consecutive observations — every gap in the
+   * window, with no floor applied.
+   *
+   * From the same aggregate as the median, so it costs nothing, and it exists
+   * because `gaps` below cannot answer this: `gaps` is read back only above a
+   * per-lane floor, so a lane running perfectly on cadence returned an empty
+   * `gaps` array and therefore had NO longest-gap figure at all — a null the
+   * surface had to explain away, when "its worst gap was 1.99x its interval" is
+   * a fact we already had in hand. Null only when there is no gap to measure,
+   * i.e. fewer than two observations.
+   */
+  maxGapSeconds: number | null;
   /** The longest gaps only — see `gapsTruncated`. Never the whole series. */
   gaps: Array<{ startedAt: Date; endedAt: Date; seconds: number }>;
+  /**
+   * The read-back floor actually applied to `gaps` for this lane, in seconds.
+   *
+   * Provenance, not a threshold: it lets a consumer state whether a count summed
+   * over `gaps` is EXACT or a floor, rather than assuming the floor it asked
+   * for is the one that was used. Null where no floor is known (a synthesised
+   * empty row, or a stub).
+   */
+  gapFloorSeconds: number | null;
   /** True when the lane had more qualifying gaps than the cap returned, so any
    *  count derived from `gaps` is a FLOOR and must be reported as "at least". */
   gapsTruncated: boolean;
@@ -1505,6 +1527,20 @@ export class Repository {
    * lane's own configured interval. A flat floor is the trap: `data-usage` runs
    * daily, so its normal 24 h gap would dominate any absolute threshold while
    * `status`'s genuinely broken 20-minute holes fell below it.
+   *
+   * It is a READ-BACK floor and nothing else: it decides which individual gaps
+   * are worth returning row by row, never whether a lane is healthy. Two
+   * consequences are deliberate:
+   *
+   *   - `maxGapSeconds` ignores it entirely, so the longest gap is reported for
+   *     every lane with two observations, on-cadence lanes included.
+   *   - the comparison is `>=`, not `>`. The caller's floor is the smallest gap
+   *     its missed-fire rule can count (2x the interval: floor(gap/interval) - 1
+   *     first reaches 1 there), and with `>` a gap of EXACTLY 2.000x skipped a
+   *     fire and was still never read back — making any missed-fire count summed
+   *     from `gaps` a floor rather than an exact figure over a measure-zero
+   *     boundary. `>=` closes that; `gapFloorSeconds` reports which floor was
+   *     used so the caller can say whether its sum is exact.
    */
   async laneObservations({
     lookbackHours = 14 * 24,
@@ -1522,12 +1558,17 @@ export class Repository {
     const hours = String(Math.round(lookbackHours));
     const out = new Map<string, LaneObservationRow>();
 
+    // The floor each lane's `gaps` were read back above — the same expression
+    // the SQL below evaluates, so the reported provenance cannot drift from the
+    // predicate that produced the rows.
+    const floorFor = (lane: string): number => minGapSeconds[lane] ?? defaultMinGapSeconds;
+
     const blank = (lane: string, source: string): LaneObservationRow => {
       const existing = out.get(lane);
       if (existing) return existing;
       const fresh: LaneObservationRow = {
         lane, source, count: 0, firstAt: null, lastAt: null, medianGapSeconds: null,
-        gaps: [], gapsTruncated: false,
+        maxGapSeconds: null, gaps: [], gapFloorSeconds: floorFor(lane), gapsTruncated: false,
       };
       out.set(lane, fresh);
       return fresh;
@@ -1536,10 +1577,14 @@ export class Repository {
     // ── poller_runs ──────────────────────────────────────────────────────────
     const { rows: runSummary } = await this.pool.query<{
       poller: string; n: string | number; first_at: Date; last_at: Date;
-      median_gap: string | number | null;
+      median_gap: string | number | null; max_gap: string | number | null;
     }>(
+      // MAX(gap) rides along with the median: same scan, same grouping, and it
+      // is the only figure here that is the lane's TRUE longest gap rather than
+      // its longest gap above the read-back floor.
       `SELECT poller, COUNT(*) AS n, MIN(started_at) AS first_at, MAX(started_at) AS last_at,
-              PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY gap) AS median_gap
+              PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY gap) AS median_gap,
+              MAX(gap) AS max_gap
          FROM (
            SELECT poller, started_at,
                   EXTRACT(EPOCH FROM (
@@ -1557,6 +1602,7 @@ export class Repository {
       lane.firstAt = r.first_at;
       lane.lastAt = r.last_at;
       lane.medianGapSeconds = numeric(r.median_gap);
+      lane.maxGapSeconds = numeric(r.max_gap);
     }
 
     const { rows: runGaps } = await this.pool.query<{
@@ -1580,8 +1626,12 @@ export class Repository {
                 WHERE started_at > now() - ($1::text || ' hours')::interval
              ) seq
             WHERE prev IS NOT NULL
+              -- Inclusive on purpose: a gap of exactly the floor has already
+              -- skipped a scheduled fire, and excluding it left the caller's
+              -- missed-fire count a floor over a measure-zero boundary.
+              -- See the method header.
               AND EXTRACT(EPOCH FROM (started_at - prev))
-                  > COALESCE(($2::jsonb ->> poller)::float8, $3::float8)
+                  >= COALESCE(($2::jsonb ->> poller)::float8, $3::float8)
          ) ranked
         WHERE rn <= $4 + 1
         ORDER BY poller, started_at`,
@@ -1614,10 +1664,13 @@ export class Repository {
       const source = `${src.table}.${src.timeColumn}`;
       const { rows: summary } = await this.pool.query<{
         n: string | number; first_at: Date | null; last_at: Date | null;
-        median_gap: string | number | null;
+        median_gap: string | number | null; max_gap: string | number | null;
       }>(
+        // Same MAX(gap) as the poller_runs aggregate: `snapshot` is measured
+        // here, and it must carry a true longest gap like every other lane.
         `SELECT COUNT(*) AS n, MIN(at) AS first_at, MAX(at) AS last_at,
-                PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY gap) AS median_gap
+                PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY gap) AS median_gap,
+                MAX(gap) AS max_gap
            FROM (
              SELECT ${src.timeColumn} AS at,
                     EXTRACT(EPOCH FROM (
@@ -1634,6 +1687,7 @@ export class Repository {
       lane.firstAt = summary[0]?.first_at ?? null;
       lane.lastAt = summary[0]?.last_at ?? null;
       lane.medianGapSeconds = numeric(summary[0]?.median_gap ?? null);
+      lane.maxGapSeconds = numeric(summary[0]?.max_gap ?? null);
 
       const { rows: gaps } = await this.pool.query<{
         started_at: Date; ended_at: Date; seconds: string | number; rn: string | number;
@@ -1652,11 +1706,12 @@ export class Repository {
                   WHERE ${src.timeColumn} > now() - ($1::text || ' hours')::interval
                ) seq
               WHERE prev IS NOT NULL
-                AND EXTRACT(EPOCH FROM (${src.timeColumn} - prev)) > $2::float8
+                -- Inclusive, as the poller_runs read-back above.
+                AND EXTRACT(EPOCH FROM (${src.timeColumn} - prev)) >= $2::float8
            ) ranked
           WHERE rn <= $3 + 1
           ORDER BY started_at`,
-        [hours, minGapSeconds[src.lane] ?? defaultMinGapSeconds, gapsPerLane],
+        [hours, floorFor(src.lane), gapsPerLane],
       );
       for (const r of gaps) {
         if (Number(r.rn) > gapsPerLane) { lane.gapsTruncated = true; continue; }

@@ -195,3 +195,79 @@ test("saveSchedule honours the schedule date it was handed rather than deriving 
   await new Repository(pool).saveSchedule("canvas-1", snapshot({ date: "2026-01-01" }));
   assert.equal(captured[0]!.values[1], "2026-01-01");
 });
+
+// ─── laneObservations: the gap read-back, asserted as SQL ────────────────────
+//
+// Asserting the statement for the same reason as the rotation above: both ways
+// of getting this wrong are silent and only move numbers.
+//
+//   - drop `MAX(gap)` and every lane running on cadence loses its longest-gap
+//     figure entirely, because the individual gap rows are floored;
+//   - write `>` instead of `>=` and a gap of EXACTLY 2x the interval — which has
+//     skipped a scheduled fire — is never read back, so the caller's missed-fire
+//     count silently becomes a floor over a measure-zero boundary.
+
+test("laneObservations aggregates MAX(gap), so a floored gap list is not the only source", async () => {
+  const { pool, captured } = stubPool();
+  await new Repository(pool).laneObservations({ lookbackHours: 336 });
+
+  const summary = flat(captured[0]!.sql);
+  assert.match(summary, /MAX\(gap\) AS max_gap/, "the true longest gap, with no floor");
+  assert.match(summary, /PERCENTILE_CONT\(0\.5\)/, "from the same aggregate as the median");
+});
+
+test("laneObservations reads back gaps AT the floor, not only above it", async () => {
+  const { pool, captured } = stubPool();
+  await new Repository(pool).laneObservations({
+    lookbackHours: 336,
+    minGapSeconds: { status: 240 },
+    tableSources: [{ lane: "snapshot", table: "fleet_snapshots", timeColumn: "computed_at" }],
+  });
+
+  const runGaps = flat(captured[1]!.sql);
+  assert.match(
+    runGaps,
+    />= COALESCE\(\(\$2::jsonb ->> poller\)::float8, \$3::float8\)/,
+    "inclusive: a gap of exactly 2x the interval skipped a fire and must be read",
+  );
+  assert.doesNotMatch(runGaps, /\(started_at - prev\)\) > COALESCE/);
+
+  // And the same for a lane measured from its own output table — `snapshot` is
+  // the only one today, and it must not be left on the old comparison.
+  const tableGaps = flat(captured[3]!.sql);
+  assert.match(tableGaps, />= \$2::float8/);
+  // `snapshot` has no per-lane floor here, so it falls back to the default.
+  assert.equal(captured[3]!.values[1], 900);
+});
+
+test("laneObservations reports the floor it applied, per lane", async () => {
+  // Provenance, so a consumer can say whether a count summed over `gaps` is
+  // exact or a floor rather than assuming the floor it asked for was used.
+  const { pool } = stubPool([
+    {
+      poller: "status", n: 2, first_at: new Date("2026-09-01T00:00:00Z"),
+      last_at: new Date("2026-09-01T00:03:02Z"), median_gap: 122, max_gap: 182.059,
+      started_at: new Date("2026-09-01T00:00:00Z"), ended_at: new Date("2026-09-01T00:03:02Z"),
+      seconds: 182.059, rn: 1,
+    },
+  ]);
+  const [lane] = await new Repository(pool).laneObservations({
+    minGapSeconds: { status: 240 },
+  });
+
+  assert.equal(lane!.maxGapSeconds, 182.059, "the longest gap, read from the aggregate");
+  assert.equal(lane!.gapFloorSeconds, 240, "the floor this lane's gaps were read above");
+});
+
+test("laneObservations falls back to the default floor for an undeclared lane", async () => {
+  const { pool } = stubPool([
+    {
+      poller: "mystery-lane", n: 2, first_at: new Date("2026-09-01T00:00:00Z"),
+      last_at: new Date("2026-09-01T01:00:00Z"), median_gap: 3600, max_gap: 3600,
+      started_at: new Date("2026-09-01T00:00:00Z"), ended_at: new Date("2026-09-01T01:00:00Z"),
+      seconds: 3600, rn: 1,
+    },
+  ]);
+  const [lane] = await new Repository(pool).laneObservations({ defaultMinGapSeconds: 900 });
+  assert.equal(lane!.gapFloorSeconds, 900, "stated, so the caller is not left guessing");
+});

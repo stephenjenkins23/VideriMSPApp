@@ -48,9 +48,20 @@ const at = (secondsAgo: number) => new Date(NOW.getTime() - secondsAgo * 1000);
 
 const decl = (lane: string): ExpectedLane => toExpectedLane(laneDecl(lane)!, {});
 
+/** The read-back floor `loadPipelineHealth` really asks for: 2x the interval. */
+const readBackFloor = (lane: string): number | null => {
+  const interval = laneDecl(lane) ? toExpectedLane(laneDecl(lane)!, {}).intervalSeconds : null;
+  return interval == null ? null : 2 * interval;
+};
+
 /**
  * An observation series with a uniform gap, which is what a healthy lane looks
  * like. `gapEvery`/`gapSeconds` inject holes at a chosen stride.
+ *
+ * `maxGapSeconds` defaults to the largest interval the series actually contains
+ * — the uniform gap, or the biggest injected hole — because that is what the
+ * SQL aggregate returns, and it is NOT filtered by the read-back floor. A
+ * fixture that left it null would be testing a source that does not exist.
  */
 function observations(
   lane: string,
@@ -60,12 +71,16 @@ function observations(
     everySeconds,
     gaps = [],
     medianGapSeconds,
+    maxGapSeconds,
+    gapFloorSeconds,
     gapsTruncated = false,
   }: {
     count: number;
     everySeconds: number;
     gaps?: Array<{ agoSeconds: number; seconds: number }>;
     medianGapSeconds?: number;
+    maxGapSeconds?: number | null;
+    gapFloorSeconds?: number | null;
     gapsTruncated?: boolean;
   },
 ): LaneObservations {
@@ -77,11 +92,18 @@ function observations(
     firstAt: at(span),
     lastAt: at(0),
     medianGapSeconds: medianGapSeconds ?? everySeconds,
+    maxGapSeconds:
+      maxGapSeconds !== undefined
+        ? maxGapSeconds
+        : count < 2
+          ? null
+          : Math.max(everySeconds, ...gaps.map((g) => g.seconds)),
     gaps: gaps.map((g) => ({
       startedAt: at(g.agoSeconds + g.seconds),
       endedAt: at(g.agoSeconds),
       seconds: g.seconds,
     })),
+    gapFloorSeconds: gapFloorSeconds !== undefined ? gapFloorSeconds : readBackFloor(lane),
     gapsTruncated,
   };
 }
@@ -141,7 +163,9 @@ test("snapshot's coverage comes from fleet_snapshots, because it writes no run r
     firstAt: at(span),
     lastAt: at(0),
     medianGapSeconds: 5.33 * MIN,
+    maxGapSeconds: 23.56 * HOUR,
     gaps: [{ startedAt: at(span - 100), endedAt: at(span - 100 - 23.56 * HOUR), seconds: 23.56 * HOUR }],
+    gapFloorSeconds: 2 * 5 * MIN,
     gapsTruncated: false,
   };
   const coverage = measureConfiguredCoverage(decl("snapshot"), obs);
@@ -304,13 +328,17 @@ test("data-usage's real 24h gaps do NOT read as an outage — only the 48.91h on
     firstAt: at(ago),
     lastAt: at(0),
     medianGapSeconds: 24.155 * HOUR,
-    // Only gaps past the 2x-interval floor are ever returned, which for a daily
-    // lane is exactly the 48.91 h one. The 24 h gaps are its NORMAL day.
-    gaps: gapRows.filter((g) => g.seconds > 2 * 24 * HOUR).map((g) => ({
+    // The aggregate's MAX ignores the read-back floor, so the worst gap is known
+    // even for a lane that returned no gap rows at all.
+    maxGapSeconds: 48.91 * HOUR,
+    // Only gaps AT OR PAST the 2x-interval floor are ever returned, which for a
+    // daily lane is exactly the 48.91 h one. The 24 h gaps are its NORMAL day.
+    gaps: gapRows.filter((g) => g.seconds >= 2 * 24 * HOUR).map((g) => ({
       startedAt: at(g.agoSeconds + g.seconds),
       endedAt: at(g.agoSeconds),
       seconds: g.seconds,
     })),
+    gapFloorSeconds: 2 * 24 * HOUR,
     gapsTruncated: false,
   };
 
@@ -327,6 +355,9 @@ test("data-usage's real 24h gaps do NOT read as an outage — only the 48.91h on
       count: 2,
       firstAt: at(h * HOUR),
       lastAt: at(0),
+      // Overridden with the series being measured: a stale 48.91 h max would
+      // claim a gap this two-row series does not contain.
+      maxGapSeconds: h * HOUR,
       gaps: [{ startedAt: at(h * HOUR), endedAt: at(0), seconds: h * HOUR }],
     });
     assert.equal(normal.missedFires, 0, `${h}h is one configured day, not a miss`);
@@ -349,7 +380,9 @@ test("an hour of downtime cannot excuse a missed DAILY fire", () => {
     firstAt: at(gapSeconds),
     lastAt: at(0),
     medianGapSeconds: gapSeconds,
+    maxGapSeconds: gapSeconds,
     gaps: [{ startedAt: at(gapSeconds), endedAt: at(0), seconds: gapSeconds }],
+    gapFloorSeconds: 2 * 24 * HOUR,
     gapsTruncated: false,
   };
   const hourLongOutage = {
@@ -509,7 +542,9 @@ test("a hole the whole daemon shared is not charged to the lane", () => {
     firstAt: at(span),
     lastAt: at(0),
     medianGapSeconds: 122,
+    maxGapSeconds: outageSeconds,
     gaps: [{ startedAt: at(span - HOUR), endedAt: at(span - HOUR - outageSeconds), seconds: outageSeconds }],
+    gapFloorSeconds: 2 * 2 * MIN,
     gapsTruncated: false,
   };
   const outage = {
@@ -561,6 +596,7 @@ test("the report says 'one process outage', so an operator does not count lanes"
         firstAt: at(100 * HOUR),
         lastAt: at(0),
         medianGapSeconds: 122,
+        maxGapSeconds: outageSeconds - i * 4,
         gaps: [
           {
             startedAt: at(stop + i),
@@ -568,6 +604,7 @@ test("the report says 'one process outage', so an operator does not count lanes"
             seconds: outageSeconds - i * 4,
           },
         ],
+        gapFloorSeconds: readBackFloor(lane),
         gapsTruncated: false,
       })),
     },
@@ -615,7 +652,9 @@ test("the observed cadence and the configured one are both reported, and can dis
     firstAt: at(236.82 * HOUR),
     lastAt: at(0),
     medianGapSeconds: 5.33 * MIN,
+    maxGapSeconds: 23.56 * HOUR,
     gaps: [{ startedAt: at(100 * HOUR), endedAt: at(100 * HOUR - 23.56 * HOUR), seconds: 23.56 * HOUR }],
+    gapFloorSeconds: 2 * 5 * MIN,
     gapsTruncated: false,
   };
   const lane = laneOf(
@@ -669,7 +708,11 @@ test("a truncated gap list is reported as a floor, not as a fact", () => {
   });
   const coverage = measureConfiguredCoverage(decl("status"), obs);
   assert.equal(coverage.incomplete, true);
-  assert.match(coverage.basis, /missed fires is a floor/);
+  // A truncated list is the one case where the count cannot be exact even with
+  // the floor at the rule's own first countable gap, and the field says so in
+  // its own basis rather than leaving a reader to infer it from `incomplete`.
+  assert.equal(coverage.missedFiresExact, false);
+  assert.match(coverage.basis, /At least \d+ missed fire\(s\): more gaps qualified than were read/);
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -696,7 +739,14 @@ function oneGap(lane: string, intervalSeconds: number, multiple: number, count =
     firstAt: at(seconds),
     lastAt: at(0),
     medianGapSeconds: seconds,
-    gaps: [{ startedAt: at(seconds), endedAt: at(0), seconds }],
+    maxGapSeconds: seconds,
+    // Exactly what SQL would return: the gap row exists only at or above the
+    // floor, so every case below 2x exercises the path where the verdict rests
+    // on `maxGapSeconds` alone and no gap row was read back at all.
+    gaps: seconds >= 2 * intervalSeconds
+      ? [{ startedAt: at(seconds), endedAt: at(0), seconds }]
+      : [],
+    gapFloorSeconds: 2 * intervalSeconds,
     gapsTruncated: false,
   });
 }
@@ -708,9 +758,14 @@ test("the worst gap's verdict IS the missed-fire count, at every multiple", () =
   // hair over 2x. It must read as one skipped fire — not as "within cadence"
   // (which a 2.5x threshold would claim, contradicting the count) and not as a
   // separate accusation either.
+  // [2.0, 1] is the boundary hole the read-back floor used to leave open: the
+  // rule counts a fire missing at EXACTLY 2x (floor(2) - 1 = 1), and the SQL
+  // floor was `>`, so that one gap was never read back and `missedFires` was a
+  // floor rather than a count. Measure-zero on real timestamps and therefore
+  // invisible, which is exactly why it belongs in a test rather than in a note.
   const cases: Array<[number, number]> = [
-    [1.0, 0], [1.0006, 0], [1.0125, 0], [1.99, 0],
-    [2.0001, 1], [2.038, 1], [2.49, 1],
+    [1.0, 0], [1.0006, 0], [1.0125, 0], [1.99, 0], [1.9999, 0],
+    [2.0, 1], [2.0001, 1], [2.038, 1], [2.49, 1],
     [3.188, 2], [11.54, 10], [282.711, 281],
   ];
   for (const [multiple, expectedMisses] of cases) {
@@ -724,7 +779,62 @@ test("the worst gap's verdict IS the missed-fire count, at every multiple", () =
       `${multiple}x: the two mechanisms must answer one question the same way`,
     );
     assert.equal(c.longestGapWithinCadence, expectedMisses === 0, `${multiple}x`);
+    // Every multiple, on cadence or not, has a longest gap and an exact count.
+    // Below 2x no gap row was read back at all, so this also pins that the
+    // figure comes from the floor-free aggregate rather than from the gap list.
+    assert.equal(c.longestGapSeconds, multiple * DAY, `${multiple}x, longest gap`);
+    assert.equal(c.missedFiresExact, true, `${multiple}x, exact not a floor`);
   }
+});
+
+test("a coarser read-back floor makes missedFires a FLOOR, and the field says so", () => {
+  // Nothing in the code asks for a floor above the rule's first countable gap,
+  // and `coverageGapMultiplier` is pinned at 2 — but the arithmetic must not
+  // silently undercount if one ever does, and the identity must survive it.
+  // With a 10x floor and a 3.188x longest gap, SQL returns NO gap rows, so the
+  // per-gap sum is 0 while the worst gap demonstrably skipped 2 fires.
+  const c = measureConfiguredCoverage(decl("device-settings"), {
+    lane: "device-settings",
+    source: "poller_runs",
+    count: 168,
+    firstAt: at(160 * HOUR),
+    lastAt: at(0),
+    medianGapSeconds: HOUR,
+    maxGapSeconds: 3.188 * HOUR,
+    gaps: [],
+    gapFloorSeconds: 10 * HOUR,
+    gapsTruncated: false,
+  });
+  assert.equal(
+    c.longestGapWithinCadence,
+    c.missedFires === 0,
+    "THE invariant, under a floor that hid the gaps: still one answer",
+  );
+  assert.equal(c.longestGapMissedFires, 2, "3.188x a configured hour skipped two fires");
+  assert.equal(c.missedFires, 2, "floored at what the worst gap alone proves — never 0");
+  assert.equal(c.missedFiresExact, false);
+  assert.match(c.basis, /At least 2 missed fire\(s\): gaps were read back only above/);
+  assert.match(c.basis, /coarser than the 2x/);
+});
+
+test("a source that does not report its read-back floor is UNKNOWN, not exact", () => {
+  // An older caller or a stub. The count may be a floor and we cannot tell, so
+  // the honest answer is null — a surface must say "at least" for it.
+  const c = measureConfiguredCoverage(decl("data-usage"), {
+    lane: "data-usage",
+    source: "poller_runs",
+    count: 5,
+    firstAt: at(121.223 * HOUR),
+    lastAt: at(0),
+    medianGapSeconds: 24.155 * HOUR,
+    maxGapSeconds: 48.91 * HOUR,
+    gaps: [{ startedAt: at(97.223 * HOUR), endedAt: at(48.313 * HOUR), seconds: 48.91 * HOUR }],
+    gapFloorSeconds: null,
+    gapsTruncated: false,
+  });
+  assert.equal(c.missedFires, 1);
+  assert.equal(c.missedFiresExact, null, "cannot tell is not the same as exact");
+  assert.match(c.basis, /At least 1 missed fire\(s\) — the source did not report/);
 });
 
 test("data-usage's 2.038x gap: one missed fire in six, and both mechanisms say so", () => {
@@ -738,9 +848,11 @@ test("data-usage's 2.038x gap: one missed fire in six, and both mechanisms say s
     firstAt: at(121.223 * HOUR),
     lastAt: at(0),
     medianGapSeconds: 24.155 * HOUR,
+    maxGapSeconds: 48.91 * HOUR,
     // Only the 48.91 h gap clears the 2x-of-interval read-back floor; the three
     // 24 h gaps are the lane's normal day and never come back from SQL.
     gaps: [{ startedAt: at(97.223 * HOUR), endedAt: at(48.313 * HOUR), seconds: 48.91 * HOUR }],
+    gapFloorSeconds: 2 * 24 * HOUR,
     gapsTruncated: false,
   };
   const c = measureConfiguredCoverage(decl("data-usage"), obs);
@@ -778,24 +890,28 @@ test("data-usage's 2.038x gap: one missed fire in six, and both mechanisms say s
   );
 });
 
-test("the within-cadence branch is reachable: observations with no gap past the floor", () => {
-  // This is what had NO live instance. `loadPipelineHealth` only reads back gaps
-  // above 2x the interval — the size at which a fire could have been skipped —
-  // so a healthy lane returns a summary and NO gaps, and the old code turned
-  // that into `null` ("unknown") while a lane with one skipped fire turned into
-  // `false`. Nothing was ever `true` on real data.
+test("an on-cadence lane reports its longest gap as a NUMBER, not as a null", () => {
+  // The follow-up to BUG-11. `loadPipelineHealth` reads back individual gaps only
+  // at or above 2x the interval — the size at which a fire could have been
+  // skipped — so a healthy lane returns a summary and NO gap rows, and
+  // `longestGapSeconds` used to be the longest of an empty list: null. A lane
+  // running perfectly therefore had no gap figure at all and the surface had to
+  // explain the null away, while the number was already in hand as the MAX of the
+  // same aggregate that produces the median.
   //
-  // Measured on the local corpus at a 420 h window (10 lanes read true):
-  //   status  2,497 rows over 85.0 h, no gap past 2x its 2 min cadence
-  //   data-usage 3 rows over 48.0 h, gaps 24.000 h and 24.013 h
+  // Measured by hand on the local corpus at a 420 h window (psql -d vfi,
+  // 2026-09-18): status 2,468 rows, longest gap 182.059 s = 1.5172x its
+  // configured 2 min, no gap at or past 2x.
   const obs: LaneObservations = {
     lane: "status",
     source: "poller_runs",
-    count: 2497,
+    count: 2468,
     firstAt: at(85 * HOUR),
     lastAt: at(0),
     medianGapSeconds: 122,
+    maxGapSeconds: 182.059,
     gaps: [],
+    gapFloorSeconds: 2 * 2 * MIN,
     gapsTruncated: false,
   };
   const c = measureConfiguredCoverage(decl("status"), obs);
@@ -803,12 +919,42 @@ test("the within-cadence branch is reachable: observations with no gap past the 
   assert.equal(c.longestGapWithinCadence, true, "nothing was skipped, and that is an ANSWER");
   assert.equal(c.longestGapMissedFires, 0);
   assert.equal(c.missedFires, 0);
-  // Honest about what is and is not known: there is no worst-gap NUMBER, because
-  // no gap was read back — but whether a fire went missing is known.
-  assert.equal(c.longestGapSeconds, null);
-  assert.equal(c.longestGapIntervals, null);
-  assert.match(c.longestGapBasis, /no gap in poller_runs was read back above the 2x/);
-  assert.match(c.longestGapBasis, /none is shown to have gone missing/);
+  // The point of the change: a figure, with the arithmetic that makes 0 skipped
+  // fires a conclusion rather than an absence of evidence.
+  assert.equal(c.longestGapSeconds, 182.059);
+  assert.equal(c.longestGapIntervals!.toFixed(4), "1.5172");
+  assert.match(c.longestGapBasis, /longest gap in poller_runs is 3 minutes/);
+  assert.match(c.longestGapBasis, /1\.52x the configured/);
+  assert.match(c.longestGapBasis, /skipped 0 scheduled fire\(s\)/);
+  assert.match(c.longestGapBasis, /under 2x, which is where the rule starts counting/);
+  // And the count is exact, not a floor: every gap the rule can count was read
+  // back, and nothing was truncated.
+  assert.equal(c.missedFiresExact, true);
+  assert.match(c.basis, /0 missed fire\(s\), an exact count/);
+});
+
+test("the same lane on cadence for a DAILY interval also gets a number", () => {
+  // `data-usage` is the lane BUG-11 was argued over, and at a 420 h window it is
+  // the on-cadence case: 3 rows, gaps 24.000 h and 24.013 h, longest 1.0006x its
+  // configured day. Measured by hand, 2026-09-18.
+  const c = measureConfiguredCoverage(decl("data-usage"), {
+    lane: "data-usage",
+    source: "poller_runs",
+    count: 3,
+    firstAt: at(48.013 * HOUR),
+    lastAt: at(0),
+    medianGapSeconds: 24.0065 * HOUR,
+    maxGapSeconds: 86447.65,
+    gaps: [],
+    gapFloorSeconds: 2 * 24 * HOUR,
+    gapsTruncated: false,
+  });
+  assert.equal(c.longestGapSeconds, 86447.65, "24.01 h, not a null the UI has to excuse");
+  assert.equal(c.longestGapIntervals!.toFixed(4), "1.0006");
+  assert.equal(c.longestGapMissedFires, 0);
+  assert.equal(c.longestGapWithinCadence, true);
+  assert.equal(c.missedFires, 0);
+  assert.equal(c.missedFiresExact, true);
 });
 
 test("a lane that genuinely skipped many fires is late in both mechanisms", () => {
@@ -823,7 +969,9 @@ test("a lane that genuinely skipped many fires is late in both mechanisms", () =
     firstAt: at(span),
     lastAt: at(0),
     medianGapSeconds: 5.33 * MIN,
+    maxGapSeconds: 23.56 * HOUR,
     gaps: [{ startedAt: at(span - 100), endedAt: at(span - 100 - 23.56 * HOUR), seconds: 23.56 * HOUR }],
+    gapFloorSeconds: 2 * 5 * MIN,
     gapsTruncated: false,
   };
   const c = measureConfiguredCoverage(decl("snapshot"), obs);
@@ -848,14 +996,17 @@ test("an unmeasurable lane says UNKNOWN about the worst gap, never within-cadenc
   for (const obs of [
     undefined,
     { lane: "data-usage", source: "poller_runs", count: 0, firstAt: null, lastAt: null,
-      medianGapSeconds: null, gaps: [], gapsTruncated: false } satisfies LaneObservations,
+      medianGapSeconds: null, maxGapSeconds: null, gaps: [],
+      gapFloorSeconds: 2 * 24 * HOUR, gapsTruncated: false } satisfies LaneObservations,
     { lane: "data-usage", source: "poller_runs", count: 1, firstAt: at(0), lastAt: at(0),
-      medianGapSeconds: null, gaps: [], gapsTruncated: false } satisfies LaneObservations,
+      medianGapSeconds: null, maxGapSeconds: null, gaps: [],
+      gapFloorSeconds: 2 * 24 * HOUR, gapsTruncated: false } satisfies LaneObservations,
   ]) {
     const c = measureConfiguredCoverage(decl("data-usage"), obs);
     assert.equal(c.longestGapWithinCadence, null);
     assert.equal(c.longestGapMissedFires, null);
     assert.equal(c.missedFires, null);
+    assert.equal(c.missedFiresExact, null, "no count at all cannot be an exact count");
     assert.match(c.longestGapBasis, /UNKNOWN/);
   }
 });
