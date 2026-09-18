@@ -1000,6 +1000,18 @@ table.dt td .prov{display:block;margin-top:2px;white-space:normal;max-width:34ch
 
   <!-- ============ SLA ============ -->
   <section id="v-sla" class="hide">
+    <!-- OUR COLLECTOR'S OWN AVAILABILITY — GET /api/collector/availability.
+         FIRST on this tab, above the confidence card, because it is the
+         DENOMINATOR of everything in that card: a reader deciding whether to
+         trust one of those figures has to meet the gate before the number, not
+         after it. The endpoint shipped with no UI at all, which meant the one
+         number that blocks every SLA claim was readable only in SQL. -->
+    <div class="card">
+      <div class="chd"><h2>&#128225; Can we claim anything? &#8212; our own collector's availability</h2>
+        <div class="r"><span class="prov" id="cavsub"></span></div></div>
+      <div class="wbody" id="cavbody"><div class="skel"><span class="sk wide"></span>
+        <span class="sk line"></span><span class="sk row"></span></div></div>
+    </div>
     <div class="card">
       <div class="chd"><h2>&#9201; SLA measurement confidence</h2></div>
       <div class="wbody" id="slabody"></div>
@@ -1321,6 +1333,13 @@ const S = { summary: null, alerts: [], devices: [], compliance: [], pipeline: nu
             cq: "", ccheck: "all", cband: "all", csort: "score", cpage: 1,
             // Our own collector's health, and the lane-status filter for it.
             pipe: null, plane: "all",
+            // Our own collector's AVAILABILITY (a different question from its
+            // health: "did it run" vs "how much of the window did it observe"),
+            // and the lane-state filter for it. Deliberately NOT round-tripped
+            // through the URL: `urlParamsFor`/`urlReadParams` are lifted by the
+            // URL-state suite against a fixed declaration list, and a new
+            // parameter name is also a new way for a shared link to 400.
+            cav: null, cstate: "all",
             // Trends: the window is state because every figure is labelled with it.
             // `trwin` opens at the shortest candidate window rather than a fixed
             // 7 days, which refuses on this tenant; trendsAutoWindow() escalates
@@ -2087,11 +2106,64 @@ function healthScore() {
   const by = snap.byStatus || {};
   const dims = [];
 
+  /* US-8.5.4 — EVERY DIMENSION SAYS WHAT IT COUNTS AND WHEN IT WAS COUNTED.
+     This drawer read "108 of 247 devices reachable" while the status widget
+     beside it read Online 90 / Warning 18 / Offline 139, and both were right:
+     the snapshot counts PRESENCE ONLY, the widget's rows also split a reachable
+     screen by its screen state, and 90 + 18 = 108. Nothing said so. So each
+     dimension now carries `source` — the feed it came from and the clock it was
+     counted on — and the reachability one carries the bridge to those rows.
+     No figure is changed: they measure different things from different feeds. */
+  const snapAt = snap.computedAt || null;
+  const snapWhen = snapAt
+    ? `the 5-minute fleet snapshot, computed ${ago(snapAt)} (${snapAt})`
+    : `the 5-minute fleet snapshot, whose computation time this payload does not state`;
+
   if (total > 0) {
     const online = by.online || 0;
+    /* PRESENCE ONLY, and that is the whole of US-8.5.4. The snapshot collapses
+       each device's newest sample to online / offline / unknown and NEVER sets
+       `warning`: a screen that is on the network but showing the logo is
+       `online` here and `warning` in the device rows. Both are true of it. */
+    const presenceOn = {};
+    let presenceRead = 0;
+    for (const d of (S.devices || [])) {
+      const p = d.latest && d.latest.presence;
+      if (p == null) continue;
+      presenceRead++;
+      if (p === "online") presenceOn[d.status] = (presenceOn[d.status] || 0) + 1;
+    }
+    /* The six lines above are also inline in renderStatusWidget(), deliberately:
+       both functions are lifted by name against a FIXED declaration list in the
+       console suites, so a shared top-level helper would be undefined there —
+       the trap that broke 11 of 22 pinned tests at once. A test asserts that the
+       two copies agree on the same fixture. */
+    const reachableRows = Object.values(presenceOn).reduce((a, n) => a + n, 0);
+    const terms = Object.keys(presenceOn)
+      .sort((a, b) => presenceOn[b] - presenceOn[a])
+      .map((k) => `${k[0].toUpperCase() + k.slice(1)} ${presenceOn[k].toLocaleString()}`)
+      .join(" + ");
+    const bridge = presenceRead === 0
+      ? `The Overview's status widget counts the same fleet from the device rows this page ` +
+        `loaded; those rows carry no presence field, so the two cannot be reconciled here — ` +
+        `unknown, not equal.`
+      : reachableRows === online
+        ? `The Overview's status widget counts the same fleet from the ${(S.devices || []).length} ` +
+          `device rows this page loaded and splits a reachable screen by its SCREEN STATE: ` +
+          `there, ${terms} = ${reachableRows} — the same ${online} devices. Different question, ` +
+          `not a different answer: this dimension asks whether we could reach the screen, ` +
+          `those rows also ask whether it is showing what it should.`
+        : `The Overview's status widget counts the same fleet from the device rows this page ` +
+          `loaded, where presence alone gives ${terms} = ${reachableRows}. That is ` +
+          `${Math.abs(reachableRows - online)} away from this ${online}, because the rows were ` +
+          `read at each device's own newest sample and this snapshot was computed ` +
+          `${snapAt ? ago(snapAt) : "at an unstated time"} — a clock difference, not a fault ` +
+          `in either number.`;
     dims.push({
       key: "Reachability", weight: 40, value: Math.round((online / total) * 100),
-      detail: `${online} of ${total} devices reachable`,
+      detail: `${online} of ${total} devices reachable — presence only`,
+      source: `Presence only (on the network / not), over all ${total} active devices, from ` +
+        `${snapWhen}. It is not a count of healthy screens. ${bridge}`,
     });
   }
 
@@ -2102,6 +2174,9 @@ function healthScore() {
     dims.push({
       key: "Firmware currency", weight: 20, value: Math.round((fwCurrent / fwTotal) * 100),
       detail: `${fwCurrent} of ${fwTotal} on the latest release`,
+      source: `The version each device last reported, over the ${fwTotal} active devices in ` +
+        `${snapWhen}. "Latest" is the highest release the platform itself names as latest for ` +
+        `any device in this fleet — not a vendor release feed we poll.`,
     });
   }
 
@@ -2110,6 +2185,11 @@ function healthScore() {
     dims.push({
       key: "Configuration drift", weight: 25, value: Math.round(mean),
       detail: `mean drift score across ${S.compliance.length}${truncMark("compliance")} devices with a config snapshot`,
+      source: `The per-device configuration scores on the Compliance tab — a collection this ` +
+        `page walks itself, NOT the fleet snapshot, read ` +
+        `${S.lastLoadAt ? ago(new Date(S.lastLoadAt).toISOString()) : "at this page load"}. ` +
+        `Devices with no config snapshot are absent from the mean rather than scored zero` +
+        `${(S.trunc || {}).compliance ? ", and the walk was short — see the banner above" : ""}.`,
     });
   }
 
@@ -2119,6 +2199,9 @@ function healthScore() {
     dims.push({
       key: "Critical alerts", weight: 15, value: Math.round(clean * 100),
       detail: `${crit} critical alert${crit === 1 ? "" : "s"} open across ${total} devices`,
+      source: `Every UNRESOLVED alert at severity "critical", from ${snapWhen} — not only the ` +
+        `incident band the Alerts tab lists, so that tab's critical chip can legitimately ` +
+        `read lower. The denominator is the snapshot's ${total} active devices.`,
     });
   }
 
@@ -2193,8 +2276,14 @@ function showHealthBreakdown(h) {
   $("#dbody").innerHTML =
     `<div class="two"><div>
       <div class="grp"><p class="glb">Counted</p>
+        ${/* WHAT it counts and WHEN it was counted, on every dimension (US-8.5.4).
+              `source` is its own line rather than appended to `detail`: the detail
+              is the arithmetic, the source is the feed and the clock, and the bug
+              this drawer was part of was a reader who had the arithmetic of two
+              figures and the provenance of neither. */ ""}
         ${h.dims.map((d) => `<div class="kv"><span class="k">${esc(d.key)}
-          <span class="prov">weight ${d.weight}/${h.weightSum} &#183; ${esc(d.detail)}</span></span>
+          <span class="prov">weight ${d.weight}/${h.weightSum} &#183; ${esc(d.detail)}</span>
+          ${d.source ? `<span class="prov">${esc(d.source)}</span>` : ""}</span>
           <span class="v ${d.value >= 85 ? "ok" : d.value >= 60 ? "wn" : "bd"}">${d.value}</span></div>`).join("")}
       </div>
     </div><div>
@@ -2207,6 +2296,11 @@ function showHealthBreakdown(h) {
         not &#8220;everything is fine&#8221;.</b> Excluded dimensions are left out of the
         maths rather than scored as passing &#8212; defaulting them to 100 is how a fleet
         with zero hardware telemetry ends up reading green.</div>
+      <div class="note na">Every counted dimension above names its feed and the clock it was
+        counted on. Two figures on this console that count different things from different
+        feeds are not a contradiction &#8212; but one that does not say which it is looks
+        exactly like one, which is what this drawer and the Overview's status widget did to
+        each other over the same 108 devices.</div>
     </div></div>`;
   $("#scrim").classList.add("on");
   $("#modal").classList.add("on");
@@ -2257,6 +2351,66 @@ function renderStatusWidget() {
          ${S.devices.length.toLocaleString()} devices this page could load, not of the whole fleet
          &#8212; see the banner above.</div>`
     : "";
+  /* US-8.5.4 — WHAT THESE NUMBERS COUNT, AND WHEN THEY WERE COUNTED.
+     This widget read Online 90 / Warning 18 / Offline 139 while the health
+     score's drawer read "108 of 247 devices reachable". Both were correct:
+     90 + 18 = 108, because the snapshot counts PRESENCE ONLY and these rows
+     also split a reachable screen by its SCREEN STATE. Nothing on screen said
+     so, which left an operator choosing between two numbers that looked like a
+     disagreement. Neither figure is changed here — they measure different
+     things from different sources — but each now states its source, its clock,
+     and where the other one comes from.
+
+     Rows whose PRESENCE is online, tallied by the status this widget gives
+     them. The same six lines exist in healthScore(), inline rather than shared:
+     the console tests lift each of these functions by name against a FIXED
+     declaration list, so a top-level helper referenced from here would be
+     undefined in that harness. A test asserts the two copies agree. */
+  const presenceOn = {};
+  let presenceRead = 0;
+  for (const d of S.devices) {
+    const p = d.latest && d.latest.presence;
+    if (p == null) continue;
+    presenceRead++;
+    if (p === "online") presenceOn[d.status] = (presenceOn[d.status] || 0) + 1;
+  }
+  const reachableRows = Object.values(presenceOn).reduce((a, n) => a + n, 0);
+  const terms = Object.keys(presenceOn)
+    .sort((a, b) => presenceOn[b] - presenceOn[a])
+    .map((k) => `${k[0].toUpperCase() + k.slice(1)} ${presenceOn[k].toLocaleString()}`)
+    .join(" + ");
+  const snapReach = snap.byStatus && typeof snap.byStatus.online === "number"
+    ? snap.byStatus.online : null;
+  // Never asserted. If the two sides have drifted apart, the line says they
+  // have and why they can — it does not print an equals sign over a difference.
+  const bridge = presenceRead === 0
+    ? `These rows carry no presence field, so they cannot be reconciled here with the
+       reachability count in the health-score drawer &#8212; unknown, not equal.`
+    : snapReach === null
+      ? `${terms} = ${reachableRows.toLocaleString()} of these rows are reachable on presence
+         alone. The snapshot behind the health score did not report a reachability count, so
+         there is nothing to reconcile against.`
+      : snapReach === reachableRows
+        ? `${terms} = ${reachableRows.toLocaleString()} of these rows are reachable on
+           presence alone &#8212; which is exactly the
+           &#8220;${snapReach.toLocaleString()} of ${(snap.totalDevices || 0).toLocaleString()}
+           devices reachable&#8221; the health-score drawer reports from the 5-minute snapshot
+           computed ${snap.computedAt ? ago(snap.computedAt) : "at an unstated time"}. Same
+           devices, different question: that number asks whether we could reach the screen,
+           these rows also ask whether it is showing what it should.`
+        : `${terms} = ${reachableRows.toLocaleString()} of these rows are reachable on presence
+           alone. The health-score drawer reports ${snapReach.toLocaleString()} from the
+           5-minute snapshot computed ${snap.computedAt ? ago(snap.computedAt) : "at an unstated time"}
+           &#8212; a difference of ${Math.abs(snapReach - reachableRows).toLocaleString()}, because
+           the two were counted at different moments, not because either is wrong.`;
+  const provLine =
+    `<div class="prov" style="padding:10px 0 0;line-height:1.55">
+       <b>Counted from the ${S.devices.length.toLocaleString()} device rows this page holds</b>,
+       each from that device's own newest reading${S.fresh && S.fresh.newestSampleAt
+         ? ` (the newest anywhere in the fleet is ${ago(S.fresh.newestSampleAt)})` : ""},
+       by presence AND screen state: <em>Warning</em> is a screen that answered but is showing
+       the logo or has its panel off, and <em>Alert</em> one answering with a black screen.
+       ${bridge}</div>`;
   el.innerHTML = `<div class="slist">` + order.map((k) => {
     const n = by[k] || 0;
     return `<button class="srow ${k}" data-status="${k}">
@@ -2265,7 +2419,7 @@ function renderStatusWidget() {
       <span class="sn">${k[0].toUpperCase() + k.slice(1)}</span>
       <span class="sv">${n.toLocaleString()}</span>
       <span class="sp">${Math.round((n / total) * 100)}%</span></button>`;
-  }).join("") + `</div>` + covLine + shortLine;
+  }).join("") + `</div>` + covLine + shortLine + provLine;
   el.querySelectorAll(".srow").forEach((b) =>
     b.addEventListener("click", () => {
       S.cls = b.dataset.status;
@@ -6268,13 +6422,36 @@ function renderSla() {
         ${kv("Devices assessed", s.devicesAssessed)}
         ${kv("Devices claimable", s.devicesClaimable,
              s.devicesClaimable > 0 ? "ok" : "wn")}
-        ${kv("Fleet collection coverage", pct(s.fleetCollectionCoverage),
-             s.fleetCollectionCoverage > 0.9 ? "ok" : "wn")}
+        ${/* Its OWN window, inline. This card's coverage and the collector card
+              above are both "buckets we observed over buckets the window holds",
+              measured over DIFFERENT windows — 24 h here, CAV_WINDOW_HOURS there
+              — and two such figures side by side with neither naming its window
+              is the contradiction US-8.5.4 was raised about.
+              And at EXACTLY zero it refuses rather than printing "0.0%", which
+              is the rule exportRefusals() already applies to this same field:
+              zero observed buckets means we watched none of the window, not that
+              the estate was down for all of it. */ ""}
+        ${s.fleetCollectionCoverage === 0
+          ? na(`Fleet collection coverage
+                <span class="prov">last ${s.windowHours} h, in ${dur(s.bucketSeconds)} buckets</span>`,
+               `no bucket in the last ${s.windowHours} h carried a reading from any screen &#8212; ` +
+               `we were not looking, so there is no share to state. This is our collector, ` +
+               `never a statement that the estate was dark.`)
+          : kv(`Fleet collection coverage
+                <span class="prov">last ${s.windowHours} h, in ${dur(s.bucketSeconds)} buckets</span>`,
+               pct(s.fleetCollectionCoverage),
+               s.fleetCollectionCoverage > 0.9 ? "ok" : "wn")}
         ${s.fleetObservedUptimeClaimable === null
           ? na("Claimable observed uptime", "not yet claimable for any device")
           : kv("Claimable observed uptime", pct(s.fleetObservedUptimeClaimable), "ok")}
         ${kv("Bucket size", dur(s.bucketSeconds))}
         ${kv("Window", `${s.windowHours} h`)}
+        ${S.cav && S.cav.window
+          ? `<div class="prov">Every figure in this card is measured over the last
+              ${s.windowHours} h. The availability gate above is measured over
+              ${dur(S.cav.window.seconds)} and is a different number for that reason, not a
+              contradiction &#8212; both count 5-minute buckets in which some screen reported.</div>`
+          : ""}
       </div>
       <div class="grp"><p class="glb">Reporting lag</p>
         ${kv("p50", dur(s.reportingLag.p50))}
@@ -6304,6 +6481,289 @@ function renderSla() {
         the window we actually watched. A single blended number would let a
         collection outage read as fleet uptime.</div>
     </div></div>`;
+}
+
+/* ===================================================================
+   OUR OWN COLLECTOR'S AVAILABILITY — GET /api/collector/availability.
+
+   The gate in front of every figure on this tab. The endpoint shipped in
+   e201ace with no UI, so the one number that decides whether an availability
+   claim is defensible was readable only in SQL — and the confidence card below
+   went on stating percentages over a window of unstated coverage.
+
+   Four rules this surface is built around, all of them the endpoint author's:
+
+     A NULL IS NEVER A ZERO. `fleet.collectorUp.value` is null when the window
+     holds no observation at all, and `coverage.note` is the sentence that goes
+     in the slot instead. A literal "0%" in an availability slot is arguably
+     true of us and reads as an estate outage — it is the single most misleading
+     number this page could print.
+
+     THE VERDICT IS PROSE, AND IT IS SHOWN VERBATIM. `refusal`, `headline` and
+     `cause` are written to be read, not summarised. Paraphrasing them here is
+     how a second, weaker definition of "claimable" gets into the product.
+
+     ONLY `measured` HAS A PERCENTAGE. The other four states are not low rates,
+     they are the absence of a rate, and they are four DIFFERENT absences:
+     `off-by-choice` must not read as a fault, and `silent` (we can tell, and
+     nothing was recorded) is not `unobservable` (we cannot tell at all).
+
+     GAPS IN CADENCES, NEVER IN SECONDS. A daily lane's 24 h gap is that lane
+     working. `longestGapIntervals` is the multiple of the lane's OWN configured
+     interval, and `longestGapWithinCadence` is what decides whether it is
+     styled as a problem — not its length.
+   =================================================================== */
+
+/** The lookback this card asks for, in hours. 30 days rather than the
+ *  endpoint's 168 h default: the widest window it accepts is the strongest
+ *  statement it can make, and a refusal over a month cannot be waved away as
+ *  an unlucky week. The window is stated in words wherever a figure appears. */
+const CAV_WINDOW_HOURS = 720;
+
+function renderCollectorAvailability() {
+  const el = $("#cavbody"), sub = $("#cavsub");
+  if (!el) return;
+  const d = S.cav;
+  if (!d) {
+    if (sub) sub.textContent = "our collector's own availability is unavailable";
+    el.innerHTML = `<div class="na"><b>/api/collector/availability did not answer.</b>
+      So we cannot say how much of any window our own collector observed &#8212; which
+      means the coverage behind every figure on this tab is UNKNOWN, not full. Nothing
+      here is a statement about the estate.</div>`;
+    return;
+  }
+  /* The five lane states in this surface's own words, plus whether each is a
+     FAULT. Declared inside this function, not at the top level: the console
+     tests lift render functions by name against a fixed declaration list, and a
+     top-level constant referenced from here would be undefined there. A test
+     pins these five keys to the endpoint's own union by reading this source. */
+  const STATE = {
+    measured: { dot: "grn", word: "measured", fault: false,
+      gloss: "observed in this window, so there is a rate to report" },
+    silent: { dot: "red", word: "silent", fault: true,
+      gloss: "we CAN tell whether it ran, and nothing was recorded in this window — " +
+             "that is no coverage at all, not a rate of zero" },
+    "off-by-choice": { dot: "gry", word: "off by choice", fault: false,
+      gloss: "its opt-in flag is off, so it collected nothing. A configuration decision, " +
+             "NOT a fault — though what it feeds is absent all the same" },
+    "flag-not-visible": { dot: "gry", word: "flag not visible", fault: false,
+      gloss: "opt-in, and the flag is not set in THIS process. The poller may well have " +
+             "it set, so whether it should have run is unknowable from here — neither " +
+             "a measurement nor a fault" },
+    unobservable: { dot: "gry", word: "unobservable", fault: false,
+      gloss: "we CANNOT tell at all: this lane leaves no trace anywhere, so its " +
+             "availability is UNKNOWN rather than low" },
+  };
+  const st = (k) => STATE[k] || { dot: "gry", word: String(k), fault: false,
+    gloss: "a state this console has not been taught — shown as-is rather than guessed" };
+  const pct1 = (v) => v == null ? "&#8212;" : `${(v * 100).toFixed(1)}%`;
+
+  const f = (d.fleet && d.fleet.collectorUp) || {};
+  const fcov = f.coverage || {};
+  const v = d.verdict || {};
+  const lanes = d.lanes || [];
+  const out = d.outages || {};
+
+  // ── the availability slot ─────────────────────────────────────────────────
+  // The figure, or the reason there is no figure. NEVER a 0% and never a blank:
+  // `coverage.note` is written for exactly this position.
+  const figure = f.value == null
+    ? `<div class="v na" style="font-size:15px">no availability figure</div>
+       <div class="prov">${esc(fcov.note || f.basis || "no share can be stated for this window")}</div>`
+    : `<div><b style="font-size:26px;color:var(--${f.value >= (v.bars ? v.bars.minCoverage : 0.95) ? "green" : "red"})">${pct1(f.value)}</b>
+         <span class="prov">of the window carried a reading from some screen</span></div>
+       <div class="prov">${esc(fcov.note || "")}</div>`;
+  const cause = v.cause === "ours"
+    ? `<span class="tag bad">cause: OURS</span>`
+    : v.cause === "the estate"
+      ? `<span class="tag warn">cause: the estate</span>`
+      : `<span class="tag net">cause: unknown</span>`;
+  // headline, refusal and cause VERBATIM. Never trimmed, never reworded.
+  const verdictBlock =
+    `<div class="banner ${v.claimable ? "warn" : "bad"}"><span>${v.claimable ? "&#9989;" : "&#9940;"}</span>
+      <span><b>${esc(v.headline || "")}</b> ${cause}
+      ${v.refusal ? `<div style="margin-top:6px">${esc(v.refusal)}</div>` : ""}
+      </span></div>`;
+
+  // ── lane state counts ─────────────────────────────────────────────────────
+  // Derived from the SAME array the table renders from, never from
+  // `fleet.lanes.*`: the endpoint's own roster counts are computed elsewhere and
+  // appear only in the labelled subtitle. Each pill counts its own state, and
+  // the row set names how many of how many it is showing — the pattern the lane
+  // widget below already uses, and the one three shipped bugs in this file came
+  // from not using.
+  const by = {};
+  for (const l of lanes) by[l.state] = (by[l.state] || 0) + 1;
+  const order = Object.keys(STATE).filter((k) => by[k]).concat(
+    Object.keys(by).filter((k) => !STATE[k]));
+  if (!(S.cstate === "all" || by[S.cstate])) S.cstate = "all";
+  const claimableLanes = lanes.filter((l) => l.claim && l.claim.claimable).length;
+  const pills =
+    `<div class="pills" style="border-bottom:0;padding:0 0 10px">` +
+    `<button class="fp" data-st="all" aria-pressed="${S.cstate === "all"}">
+       <b>${lanes.length}</b> lanes</button>` +
+    order.map((k) => `<button class="fp" data-st="${esc(k)}" aria-pressed="${S.cstate === k}"
+       title="${esc(st(k).gloss)}">
+       <span class="d ${st(k).dot}"></span><b>${by[k]}</b> ${esc(st(k).word)}</button>`).join("") +
+    `<span class="fp" title="A lane clears both bars over this window. Nothing else may be
+       used as evidence for an availability claim."><span class="d ${claimableLanes ? "grn" : "red"}"></span>
+       <b>${claimableLanes}</b> can carry a claim</span></div>`;
+  const rows = lanes.filter((l) => S.cstate === "all" || l.state === S.cstate);
+
+  // ── the outage sentence, ABOVE the table ──────────────────────────────────
+  // The most useful sentence on this surface: it says whether a hole was ONE
+  // process outage or many independent lane failures, and the answer changes
+  // what an operator should do next. A null verdict is said in words, not left
+  // blank and not rendered as "0 outages" beside a table of gaps.
+  const outageBlock = out.verdict
+    ? `<div class="gapbox" style="margin-bottom:12px">
+        <p class="glb">&#128279; One outage, or many failures?</p>
+        <div class="tr-st">${esc(out.verdict)}</div>
+        <div class="tr-sm">${out.count.toLocaleString()} correlated window(s) &#183;
+          ${dur(out.totalSeconds)} total &#183; ${out.lanesAffected.length} lane(s) involved &#183;
+          ${out.shareOfBlindTime == null
+            ? "the share of blind time they explain cannot be computed (no blind time to divide by)"
+            : `${pct1(out.shareOfBlindTime)} of the window's blind time`}
+          ${out.stopSpreadSeconds ? ` &#183; member lanes stop within p50 ${out.stopSpreadSeconds.p50.toFixed(3)} s /
+            p90 ${out.stopSpreadSeconds.p90.toFixed(3)} s / max ${out.stopSpreadSeconds.max.toFixed(3)} s of each other` : ""}
+        </div></div>`
+    : `<div class="note na" style="margin-bottom:12px"><b>No correlated outage in this window.</b>
+        No hole was shared by enough lanes to be one process stopping, so each lane's gaps
+        below stand on their own. That is not a statement that there were no gaps.</div>`;
+
+  // ── per lane ──────────────────────────────────────────────────────────────
+  const gapCell = (l) => {
+    // Multiples of the lane's OWN cadence, never raw seconds: a daily lane's
+    // 24 h gap is that lane working, and an absolute threshold flags it daily.
+    if (l.longestGapIntervals == null) {
+      return `<span class="v na">&#8212;</span><span class="prov">no gap measured &#8212;
+        ${l.state === "measured" ? "only one observation, or none to measure between"
+          : "nothing ran, so there is nothing to measure between"}</span>`;
+    }
+    const ok = l.longestGapWithinCadence === true;
+    return `<span class="v ${ok ? "ok" : "bd"}">&#215;${l.longestGapIntervals.toFixed(1)}</span>
+      <span class="prov">of its configured ${dur(l.configuredIntervalSeconds)} cadence &#8212;
+      ${ok ? "within cadence: no scheduled fire was skipped, so this is the lane working"
+           : "longer than its own cadence allows, so fires were skipped"}</span>`;
+  };
+  const covCell = (l) => {
+    // ONLY `measured` gets a percentage. The other four get their shortfalls as
+    // text in this slot, because there is no rate to put here.
+    if (l.state !== "measured" || !l.coverage || l.coverage.value == null) {
+      return `<span class="v na">no rate</span>
+        <span class="prov">${(l.claim && l.claim.shortfalls || []).map(esc).join(" ")
+          || esc((l.coverage && l.coverage.basis) || st(l.state).gloss)}</span>`;
+    }
+    const bar = v.bars ? v.bars.minCoverage : 0.95;
+    return `<span class="v ${l.coverage.value >= bar ? "ok" : "bd"}">${pct1(l.coverage.value)}</span>
+      <span class="prov">${(l.observedFires || 0).toLocaleString()} of
+        ${(l.expectedFires || 0).toLocaleString()} scheduled fires &#183;
+        ${l.coverageExcludingOutages == null
+          ? "no outage-adjusted figure"
+          : `${pct1(l.coverageExcludingOutages)} excluding correlated outage time`}
+        ${l.missedFires == null ? "" : ` &#183; ${l.missedFires.toLocaleString()} missed${l.incomplete ? " (a floor, not a total)" : ""}`}</span>`;
+  };
+  const table =
+    `<div class="tblwrap"><table class="dt"><thead><tr>
+      <th>Lane</th><th>What goes stale without it</th><th>Can it be measured?</th>
+      <th>Coverage of its own cadence</th><th>Longest gap</th>
+      <th>Span of this window</th><th>Self-check</th></tr></thead><tbody>` +
+    rows.map((l) => `<tr>
+      <td><b>${esc(l.lane)}</b>${l.optIn && l.optIn.env
+        ? `<span class="prov">opt-in: ${esc(l.optIn.env)} is ${esc(l.optIn.reading)}</span>` : ""}</td>
+      <td>${esc(l.feeds)}</td>
+      <td><span class="d ${st(l.state).dot}"></span>${esc(st(l.state).word)}
+        <span class="prov">${esc(st(l.state).gloss)}</span></td>
+      <td class="n">${covCell(l)}</td>
+      <td class="n">${gapCell(l)}</td>
+      <td class="n">${l.windowShare == null
+        ? `<span class="v na">&#8212;</span><span class="prov">no observation in this window to span it</span>`
+        : `<span class="v ${l.windowShare >= (v.bars ? v.bars.minCoverage : 0.95) ? "ok" : "bd"}">${pct1(l.windowShare)}</span>
+           <span class="prov">its rate is measured over ${dur(l.spanSeconds)} of first&#8594;last
+           observation; the rest of the window has no data from it</span>`}</td>
+      <td class="n">${esc(LANE_WORD[l.health] || l.health || "—")}</td></tr>`).join("") +
+    `</tbody></table></div>` +
+    (rows.length === 0
+      ? `<div class="empty">No lane is in that state.</div>`
+      : `<div class="prov" style="padding:6px 0 0">Showing ${rows.length} of
+          ${lanes.length} lane(s)${S.cstate === "all" ? "" : ` in state &#8220;${esc(st(S.cstate).word)}&#8221;`}.</div>`);
+
+  // ── the blockers, folded ──────────────────────────────────────────────────
+  // Three of these kinds are NOT faults, and they are labelled so. A self-check
+  // that reports a deliberate configuration as a fault gets ignored, and then it
+  // reports the real fault to nobody.
+  const NOT_A_FAULT = { "lane-off-by-choice": "a configuration decision, not a fault",
+    "lane-flag-not-visible": "unknowable from this process, not a fault",
+    "lane-unobservable": "unknown, not low" };
+  const missing = v.missing || [];
+  const blockers = missing.length
+    ? `<details class="fold" style="margin-top:14px"><summary>Exactly what is missing
+        (${missing.length}) &#8212; and which of it is not a fault</summary>
+        ${missing.map((m) => `<div class="tr-row">
+          <div class="tr-hd"><span class="lb">${esc(m.subject)}</span>
+            <span class="tr-sc">${esc(m.kind)}</span>
+            ${NOT_A_FAULT[m.kind] ? `<span class="tag net">${esc(NOT_A_FAULT[m.kind])}</span>` : ""}</div>
+          <div class="tr-st">${esc(m.detail)}</div></div>`).join("")}
+       </details>`
+    : `<div class="note" style="margin-top:14px"><b>Nothing is missing:</b> every lane clears
+        both bars over this window, so an availability figure over it is defensible.</div>`;
+
+  if (sub) {
+    sub.textContent =
+      `${d.window.hours} h window in ${dur(d.window.bucketSeconds)} buckets · ` +
+      `${d.fleet.lanes.declared} lanes declared by the scheduler · ` +
+      `${v.claimable ? "claimable" : "NOT claimable"} · assembled ${ago(d.generatedAt)}`;
+  }
+  el.innerHTML = verdictBlock +
+    `<div class="two"><div>
+      <div class="grp"><p class="glb">Our collector, over this window</p>
+        ${figure}
+        ${kv("Blind time", `${dur(d.fleet.blindSeconds)}
+          <span class="prov">${d.fleet.blindBuckets.toLocaleString()} buckets in which we
+          learned nothing about ANY device &#8212; counted as blind, never as offline</span>`,
+          d.fleet.blindBuckets ? "bd" : "ok")}
+        ${d.fleet.lastCollectionAt
+          ? kv("Last reading of any kind", `${ago(d.fleet.lastCollectionAt)}
+              <span class="prov">${esc(d.fleet.lastCollectionAt)} &#8212; read independently of
+              the window, which is the only way to tell an EMPTY window from a dead fleet</span>`)
+          : na("Last reading of any kind", "no reading of any kind is on record")}
+        ${d.fleet.weakestLane
+          ? kv("Weakest measurable lane", `${esc(d.fleet.weakestLane.lane)} at
+              ${pct1(d.fleet.weakestLane.coverage)}`, "wn")
+          : na("Weakest measurable lane", "no lane could be measured over this window, so none is weakest")}
+        ${kv("Bars it is judged against", v.bars
+          ? `${pct1(v.bars.minCoverage)} coverage &#183; cadence no coarser than ${dur(v.bars.maxCadenceSeconds)}`
+          : "not stated")}
+      </div>
+    </div><div>
+      <div class="grp"><p class="glb">The window, stated</p>
+        <div class="prov">${esc(d.window.statement)}</div>
+        <div class="prov" style="margin-top:6px"><b>What "observed" means here:</b>
+          ${esc(f.basis || "not stated")}</div>
+        ${/* The window the PAYLOAD covers, not the one this card asked for. They
+              are the same in normal operation, but quoting the request made the
+              card label a 168 h payload "720 h" the first time one was rendered
+              into it by hand, which is the exact class of mislabelling this
+              surface exists to stop. */ ""}
+        <div class="prov" style="margin-top:6px">Measured over a ${d.window.hours} h lookback
+          ending at the moment above. A shorter window can qualify where this one does not
+          &#8212; ask /api/collector/availability for one, rather than reading a narrower
+          claim into this.</div>
+      </div>
+      <div class="note na"><b>This figure is about US, not the screens.</b> A blind bucket is
+        one in which we learned nothing about any device, whatever the devices were doing, so
+        it can never be read as an estate outage. It is also the denominator of the
+        confidence card below.</div>
+    </div></div>` +
+    pills + outageBlock + table + blockers +
+    `<div class="prov" style="margin-top:10px">${esc(d.pipelineSummary || "")}</div>`;
+  /* Re-render only. The lane state filter is a view over the payload we already
+     hold, so it must never refetch: a click that re-asked the endpoint would
+     move the window under the reader and change the numbers they clicked on. */
+  el.querySelectorAll(".fp[data-st]").forEach((b) => b.addEventListener("click", () => {
+    S.cstate = b.dataset.st;
+    renderCollectorAvailability();
+  }));
 }
 
 /* ===================================================================
@@ -9664,7 +10124,7 @@ async function load() {
     // NOTE: every entry added below must also be NAMED in this destructuring
     // array, in the same position — a missing name silently shifts every payload
     // after it into the wrong variable.
-    const [summary, alerts, alertsSup, suppressions, hygiene, devices, compliance, pipeline, sla, slaCap, brief, shots, remediation, correlation, pop, plan, pipeHealth, trends] = await Promise.all([
+    const [summary, alerts, alertsSup, suppressions, hygiene, devices, compliance, pipeline, sla, slaCap, brief, shots, remediation, correlation, pop, plan, pipeHealth, trends, collector] = await Promise.all([
       api("/api/fleet/summary"),
       /* THE INCIDENT QUEUE, opted into EXPLICITLY (US-8.2.3).
          The API still defaults to band=all on purpose: moving the server default
@@ -9716,6 +10176,11 @@ async function load() {
       // refusals. trendsAutoWindow() escalates from here if this one refuses too,
       // and the view refetches on any manual window change.
       api(`/api/trends?windowDays=${trwinAt}`).catch(() => null),
+      // OUR OWN collector's AVAILABILITY over CAV_WINDOW_HOURS (scope
+      // "vfi-collector"). The gate in front of every figure on the SLA tab.
+      // Allowed to fail: the card then says the coverage behind those figures is
+      // unknown, which is a stronger statement than a missing card.
+      api(`/api/collector/availability?windowHours=${CAV_WINDOW_HOURS}`).catch(() => null),
     ]);
     S.summary = summary.data;
     // What each paged walk could NOT get. Recorded BEFORE anything renders, so
@@ -9761,6 +10226,7 @@ async function load() {
     S.pop = pop && pop.data;
     S.plan = plan && plan.data;
     S.pipe = pipeHealth && pipeHealth.data;
+    S.cav = collector && collector.data;
     // Only if the window has not moved under us mid-load; otherwise the pill
     // and the numbers would disagree about which window is on screen.
     if (S.trwin === trwinAt) S.trends = trends && trends.data;
@@ -9808,7 +10274,10 @@ async function load() {
     renderBrief();
     renderAlertFilters(); renderAlerts(); renderInert(); renderSuppressions();
     renderDeviceFilters(); renderDevices();
-    renderComplianceFilters(); renderCompliance(); renderSla();
+    renderComplianceFilters(); renderCompliance();
+    // The collector gate FIRST, then the confidence card it is the denominator
+    // of — the order they are read in on the tab.
+    renderCollectorAvailability(); renderSla();
     renderActions();
     renderPipelineWidget(); renderTrends();
     drawModules();
